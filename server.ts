@@ -1,10 +1,11 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { GoogleGenAI } from '@google/genai';
-import { createServer as createViteServer } from 'vite';
 import {
   calculateCartTotals,
   calculateProfitMetrics,
@@ -36,7 +37,8 @@ import type {
 
 dotenv.config();
 
-const PORT = 3000;
+const PORT = Number(process.env.PORT) || 3000;
+const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const SESSION_COOKIE = 'himrudra_session';
 const SESSION_SECRET =
   process.env.SESSION_SECRET && process.env.SESSION_SECRET !== 'change-me-in-production'
@@ -150,8 +152,9 @@ function escapeHtml(str: string): string {
     .replaceAll("'", '&#39;');
 }
 
-async function startServer() {
+export function createApiApp(): express.Express {
   const app = express();
+  app.set('trust proxy', 1);
   app.use(express.json({ limit: '5mb' }));
   app.use(attachUser);
 
@@ -733,20 +736,50 @@ async function startServer() {
     const safeBatch = report.testedBatchNumber.replace(/[^a-zA-Z0-9_-]/g, '_') || 'batch';
     res.setHeader('Cache-Control', 'no-store');
 
-    if (report.customDocumentUrl && !/^https?:\/\//i.test(report.customDocumentUrl)) {
-      const publicRoot = path.resolve(process.cwd(), 'public');
-      const relativeDocPath = report.customDocumentUrl.replace(/^\/+/, '');
-      const candidatePath = path.resolve(publicRoot, relativeDocPath);
-
-      if (
-        (candidatePath === publicRoot || candidatePath.startsWith(publicRoot + path.sep)) &&
-        fs.existsSync(candidatePath) &&
-        fs.statSync(candidatePath).isFile()
-      ) {
-        const ext = path.extname(candidatePath) || '.jpeg';
+    if (report.customDocumentUrl?.startsWith('data:')) {
+      const match = /^data:([^;]+);base64,(.+)$/.exec(report.customDocumentUrl);
+      if (match) {
+        const mime = match[1];
+        const buffer = Buffer.from(match[2], 'base64');
+        const ext =
+          mime === 'application/pdf'
+            ? '.pdf'
+            : mime === 'image/png'
+            ? '.png'
+            : mime === 'image/webp'
+            ? '.webp'
+            : '.jpg';
         const downloadName =
           report.originalFileName || `HimRudra-Lab-Certified-Batch-${safeBatch}${ext}`;
-        return res.download(candidatePath, downloadName);
+        res.setHeader('Content-Type', mime);
+        res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+        return res.send(buffer);
+      }
+    }
+
+    if (report.customDocumentUrl && !/^https?:\/\//i.test(report.customDocumentUrl)) {
+      const publicRoot = path.resolve(process.cwd(), 'public');
+      const tmpUploadsRoot = path.join(os.tmpdir(), 'himrudra-uploads');
+      const relativeDocPath = report.customDocumentUrl.replace(/^\/+/, '');
+      const candidatePaths = [
+        { root: publicRoot, file: path.resolve(publicRoot, relativeDocPath) },
+        {
+          root: tmpUploadsRoot,
+          file: path.resolve(tmpUploadsRoot, relativeDocPath.replace(/^uploads\/+/, '')),
+        },
+      ];
+
+      for (const { root, file } of candidatePaths) {
+        if (
+          (file === root || file.startsWith(root + path.sep)) &&
+          fs.existsSync(file) &&
+          fs.statSync(file).isFile()
+        ) {
+          const ext = path.extname(file) || '.jpeg';
+          const downloadName =
+            report.originalFileName || `HimRudra-Lab-Certified-Batch-${safeBatch}${ext}`;
+          return res.download(file, downloadName);
+        }
       }
     }
 
@@ -1389,12 +1422,21 @@ ${labContext}`;
       .replace(/[^a-zA-Z0-9_-]/g, '_')
       .slice(0, 48);
     const outName = `${safeBase || 'report'}-${Date.now()}${ext}`;
+    const cleanB64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
+    const buffer = Buffer.from(cleanB64, 'base64');
+
+    if (IS_SERVERLESS) {
+      return res.status(201).json({
+        url: `data:${safeMime};base64,${cleanB64}`,
+        originalFileName: fileName,
+        originalMimeType: safeMime,
+      });
+    }
+
     const uploadsDir = path.resolve(process.cwd(), 'public', 'uploads');
     if (!fs.existsSync(uploadsDir)) {
       fs.mkdirSync(uploadsDir, { recursive: true });
     }
-    const cleanB64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
-    const buffer = Buffer.from(cleanB64, 'base64');
     fs.writeFileSync(path.join(uploadsDir, outName), buffer);
 
     res.status(201).json({
@@ -1499,15 +1541,30 @@ ${labContext}`;
     res.json({ ok: true });
   });
 
-  // Vite or static production middleware
+  // Ensure unmatched /api/* routes always return JSON 404
+  app.use('/api', (_req, res) => {
+    res.status(404).json({ error: 'API route not found.' });
+  });
+
+  return app;
+}
+
+export const app = createApiApp();
+export default app;
+
+async function startServer() {
+  // Vite dev middleware or static production serving for non-Vercel hosts & local dev
   if (process.env.NODE_ENV !== 'production') {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
   } else {
+    const publicDir = path.resolve(process.cwd(), 'public');
     const distDir = path.resolve(process.cwd(), 'dist');
+    app.use(express.static(publicDir));
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
@@ -1519,4 +1576,11 @@ ${labContext}`;
   });
 }
 
-startServer();
+const isDirectRun =
+  !IS_SERVERLESS &&
+  typeof process.argv[1] === 'string' &&
+  path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
+
+if (isDirectRun) {
+  void startServer();
+}

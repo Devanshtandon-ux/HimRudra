@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import type {
   AdminNotification,
@@ -73,7 +74,10 @@ function getInitialAdminPassword(): string {
     : 'HimRudraOwner#2026';
 }
 
-const DATA_DIR = path.resolve(process.cwd(), 'data');
+const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
+const BUNDLED_DATA_DIR = path.resolve(process.cwd(), 'data');
+const BUNDLED_DB_FILE = path.join(BUNDLED_DATA_DIR, 'himrudra-db.json');
+const DATA_DIR = IS_SERVERLESS ? path.join(os.tmpdir(), 'himrudra-data') : BUNDLED_DATA_DIR;
 const DB_FILE = path.join(DATA_DIR, 'himrudra-db.json');
 
 function createSeedState(): DatabaseState {
@@ -659,11 +663,14 @@ class StoreRepository {
 
   private load(): DatabaseState {
     try {
-      if (!fs.existsSync(DATA_DIR)) {
-        fs.mkdirSync(DATA_DIR, { recursive: true });
-      }
-      if (fs.existsSync(DB_FILE)) {
-        const raw = fs.readFileSync(DB_FILE, 'utf-8');
+      const sourceFile = fs.existsSync(DB_FILE)
+        ? DB_FILE
+        : fs.existsSync(BUNDLED_DB_FILE)
+        ? BUNDLED_DB_FILE
+        : null;
+
+      if (sourceFile) {
+        const raw = fs.readFileSync(sourceFile, 'utf-8');
         const parsed = JSON.parse(raw) as DatabaseState;
         if (parsed && Array.isArray(parsed.products) && Array.isArray(parsed.users)) {
           let mutated = false;
@@ -921,12 +928,19 @@ class StoreRepository {
   }
 
   private save(nextState: DatabaseState) {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      const tmpFile = `${DB_FILE}.tmp`;
+      fs.writeFileSync(tmpFile, JSON.stringify(nextState, null, 2), 'utf-8');
+      fs.renameSync(tmpFile, DB_FILE);
+    } catch (err) {
+      if (!IS_SERVERLESS) {
+        throw err;
+      }
+      console.warn('Skipping non-fatal disk persistence in serverless runtime:', err);
     }
-    const tmpFile = `${DB_FILE}.tmp`;
-    fs.writeFileSync(tmpFile, JSON.stringify(nextState, null, 2), 'utf-8');
-    fs.renameSync(tmpFile, DB_FILE);
   }
 
   getState(): DatabaseState {
