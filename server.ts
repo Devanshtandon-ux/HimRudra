@@ -246,6 +246,107 @@ export function createApiApp(): express.Express {
     res.json({ user: storeRepo.sanitizeUser(user) });
   });
 
+  app.post('/api/auth/google', async (req: AuthRequest, res) => {
+    const { idToken } = req.body as { idToken?: string };
+    if (!idToken || typeof idToken !== 'string' || idToken.trim().length < 20) {
+      return res.status(400).json({ error: 'Valid Google sign-in token is required.' });
+    }
+
+    let firebaseApiKey = process.env.FIREBASE_API_KEY?.trim() || '';
+    if (!firebaseApiKey) {
+      try {
+        const cfgPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
+        if (fs.existsSync(cfgPath)) {
+          const parsedCfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as {
+            apiKey?: string;
+          };
+          firebaseApiKey = parsedCfg.apiKey?.trim() || '';
+        }
+      } catch (err) {
+        console.error('Failed to read firebase-applet-config.json:', err);
+      }
+    }
+
+    if (!firebaseApiKey) {
+      return res.status(503).json({
+        error: 'Google Sign-In is not configured on the server.',
+      });
+    }
+
+    try {
+      const lookupRes = await fetch(
+        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(
+          firebaseApiKey
+        )}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken: idToken.trim() }),
+        }
+      );
+
+      if (!lookupRes.ok) {
+        return res.status(401).json({
+          error: 'Could not verify Google account credentials. Please try again.',
+        });
+      }
+
+      const lookupJson = (await lookupRes.json()) as {
+        users?: Array<{
+          localId?: string;
+          email?: string;
+          displayName?: string;
+          emailVerified?: boolean;
+        }>;
+      };
+      const fbUser = lookupJson.users?.[0];
+      const normalizedEmail = fbUser?.email?.trim().toLowerCase();
+
+      if (!normalizedEmail) {
+        return res.status(401).json({
+          error: 'Google account did not provide a verified email address.',
+        });
+      }
+
+      const state = storeRepo.getState();
+      let user = state.users.find((u) => u.email.toLowerCase() === normalizedEmail);
+      const isOwner = normalizedEmail === getAdminOwnerEmail();
+
+      if (!user) {
+        const fallbackName =
+          fbUser?.displayName?.trim() ||
+          normalizedEmail
+            .split('@')[0]
+            .replace(/[._-]+/g, ' ')
+            .replace(/\b\w/g, (ch) => ch.toUpperCase());
+
+        user = {
+          id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+          name: fallbackName,
+          email: normalizedEmail,
+          phone: '',
+          role: isOwner ? 'admin' : 'customer',
+          passwordHash: hashPassword(crypto.randomBytes(24).toString('hex')),
+          createdAt: new Date().toISOString(),
+          wishlistProductIds: [],
+        };
+        state.users.push(user);
+        storeRepo.commit();
+      } else if (isOwner && user.role !== 'admin') {
+        user.role = 'admin';
+        storeRepo.commit();
+      }
+
+      setSessionCookie(req, res, user);
+      return res.json({ user: storeRepo.sanitizeUser(user) });
+    } catch (err) {
+      console.error('Google sign-in verification error:', err);
+      return res.status(500).json({
+        error: 'Unable to complete Google sign-in right now. Please try again.',
+      });
+    }
+  });
+
   app.post('/api/auth/logout', (req, res) => {
     const secure = isHttpsRequest(req);
     res.clearCookie(SESSION_COOKIE, {

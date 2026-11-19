@@ -4,6 +4,8 @@ import {
   Bell,
   CheckCircle2,
   Download,
+  Eye,
+  EyeOff,
   FileText,
   ImagePlus,
   IndianRupee,
@@ -1964,6 +1966,10 @@ const OwnerPasswordCard: React.FC<{ onToast: (msg: string) => void }> = ({ onToa
     }
   };
 
+  const [showCurrent, setShowCurrent] = useState(false);
+  const [showNew, setShowNew] = useState(false);
+  const [showConfirm, setShowConfirm] = useState(false);
+
   return (
     <form
       onSubmit={handleSubmit}
@@ -1987,42 +1993,72 @@ const OwnerPasswordCard: React.FC<{ onToast: (msg: string) => void }> = ({ onToa
           <label htmlFor="adm-cur-pw" className="block text-[#79543D] mb-1">
             Current Password
           </label>
-          <input
-            id="adm-cur-pw"
-            type="password"
-            required
-            value={currentPassword}
-            onChange={(e) => setCurrentPassword(e.target.value)}
-            className="w-full rounded-lg border border-[#79543D]/30 px-3 py-2"
-          />
+          <div className="relative">
+            <input
+              id="adm-cur-pw"
+              type={showCurrent ? 'text' : 'password'}
+              required
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+              className="w-full rounded-lg border border-[#79543D]/30 pl-3 pr-9 py-2"
+            />
+            <button
+              type="button"
+              onClick={() => setShowCurrent((v) => !v)}
+              aria-label={showCurrent ? 'Hide current password' : 'Show current password'}
+              className="absolute inset-y-0 right-0 flex items-center px-2.5 text-[#79543D] hover:text-[#281A15]"
+            >
+              {showCurrent ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
         </div>
         <div>
           <label htmlFor="adm-new-pw" className="block text-[#79543D] mb-1">
             New Password (min 8 chars)
           </label>
-          <input
-            id="adm-new-pw"
-            type="password"
-            required
-            minLength={8}
-            value={newPassword}
-            onChange={(e) => setNewPassword(e.target.value)}
-            className="w-full rounded-lg border border-[#79543D]/30 px-3 py-2"
-          />
+          <div className="relative">
+            <input
+              id="adm-new-pw"
+              type={showNew ? 'text' : 'password'}
+              required
+              minLength={8}
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+              className="w-full rounded-lg border border-[#79543D]/30 pl-3 pr-9 py-2"
+            />
+            <button
+              type="button"
+              onClick={() => setShowNew((v) => !v)}
+              aria-label={showNew ? 'Hide new password' : 'Show new password'}
+              className="absolute inset-y-0 right-0 flex items-center px-2.5 text-[#79543D] hover:text-[#281A15]"
+            >
+              {showNew ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
         </div>
         <div>
           <label htmlFor="adm-conf-pw" className="block text-[#79543D] mb-1">
             Confirm New Password
           </label>
-          <input
-            id="adm-conf-pw"
-            type="password"
-            required
-            minLength={8}
-            value={confirmPassword}
-            onChange={(e) => setConfirmPassword(e.target.value)}
-            className="w-full rounded-lg border border-[#79543D]/30 px-3 py-2"
-          />
+          <div className="relative">
+            <input
+              id="adm-conf-pw"
+              type={showConfirm ? 'text' : 'password'}
+              required
+              minLength={8}
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+              className="w-full rounded-lg border border-[#79543D]/30 pl-3 pr-9 py-2"
+            />
+            <button
+              type="button"
+              onClick={() => setShowConfirm((v) => !v)}
+              aria-label={showConfirm ? 'Hide confirm password' : 'Show confirm password'}
+              className="absolute inset-y-0 right-0 flex items-center px-2.5 text-[#79543D] hover:text-[#281A15]"
+            >
+              {showConfirm ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </button>
+          </div>
         </div>
       </div>
       <button
