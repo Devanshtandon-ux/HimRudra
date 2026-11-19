@@ -408,3 +408,79 @@ test('calculateProfitMetrics starts cleanly at exact zero when no orders or expe
   assert.deepEqual(zero.statusDistribution, []);
 });
 
+test('launch offer grants ₹0 free delivery until expiry, then automatically charges ₹100 delivery, with ₹100 COD fee', () => {
+  const startupSettings: StoreSettings = {
+    ...sampleSettings,
+    standardShippingFee: 100,
+    freeShippingThreshold: 0,
+    codFee: 100,
+  };
+
+  // During active offer (before 30 Nov 2026 23:59:59 IST)
+  const duringOfferOnline = calculateCartTotals(
+    [{ productId: 'himrudra-shilajit-20g', quantity: 1 }],
+    [sampleProduct],
+    startupSettings,
+    {
+      shippingSpeed: 'standard',
+      paymentMethod: 'UPI',
+      promotions: [freeShippingPromo],
+      nowMs: Date.parse('2026-11-20T12:00:00+05:30'),
+    }
+  );
+  assert.equal(duringOfferOnline.shippingFee, 0);
+  assert.equal(duringOfferOnline.freeShippingByPromo, true);
+  assert.equal(duringOfferOnline.codFee, 0);
+  assert.equal(duringOfferOnline.grandTotal, 799);
+
+  // During active offer with Cash on Delivery -> ₹0 shipping + ₹100 COD fee
+  const duringOfferCod = calculateCartTotals(
+    [{ productId: 'himrudra-shilajit-20g', quantity: 1 }],
+    [sampleProduct],
+    startupSettings,
+    {
+      shippingSpeed: 'standard',
+      paymentMethod: 'COD',
+      promotions: [freeShippingPromo],
+      nowMs: Date.parse('2026-11-20T12:00:00+05:30'),
+    }
+  );
+  assert.equal(duringOfferCod.shippingFee, 0);
+  assert.equal(duringOfferCod.codFee, 100);
+  assert.equal(duringOfferCod.grandTotal, 899);
+
+  // After offer expires (1 Dec 2026) -> automatically adds ₹100 delivery even on multi-jar orders
+  const afterOfferOnline = calculateCartTotals(
+    [{ productId: 'himrudra-shilajit-20g', quantity: 2 }],
+    [sampleProduct],
+    startupSettings,
+    {
+      shippingSpeed: 'standard',
+      paymentMethod: 'UPI',
+      promotions: [freeShippingPromo],
+      nowMs: Date.parse('2026-12-01T00:00:01+05:30'),
+    }
+  );
+  assert.equal(afterOfferOnline.shippingFee, 100);
+  assert.equal(afterOfferOnline.freeShippingByPromo, false);
+  assert.equal(afterOfferOnline.codFee, 0);
+  assert.equal(afterOfferOnline.grandTotal, 1598 + 100);
+
+  // After offer expires with COD -> ₹100 delivery + ₹100 COD fee
+  const afterOfferCod = calculateCartTotals(
+    [{ productId: 'himrudra-shilajit-20g', quantity: 1 }],
+    [sampleProduct],
+    startupSettings,
+    {
+      shippingSpeed: 'standard',
+      paymentMethod: 'COD',
+      promotions: [freeShippingPromo],
+      nowMs: Date.parse('2026-12-01T00:00:01+05:30'),
+    }
+  );
+  assert.equal(afterOfferCod.shippingFee, 100);
+  assert.equal(afterOfferCod.codFee, 100);
+  assert.equal(afterOfferCod.grandTotal, 799 + 100 + 100);
+});
+
+

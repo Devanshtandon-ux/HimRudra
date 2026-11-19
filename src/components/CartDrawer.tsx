@@ -132,16 +132,22 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
               <div className="rounded-xl bg-[#F3EDE5] border border-[#C69B51]/35 px-4 py-3 text-xs text-[#281A15]">
                 {calc.freeShippingByPromo ? (
                   <span>
-                    <strong>Shipping: FREE — Limited-Time Offer</strong> applied to your bag.
+                    <strong>Shipping: FREE — Limited-Time Offer</strong> applied to your bag
+                    ({formatINR(settings.standardShippingFee)} delivery after offer ends).
                   </span>
                 ) : calc.freeShippingRemaining > 0 ? (
                   <span>
                     Add <strong>{formatINR(calc.freeShippingRemaining)}</strong> more for
                     complimentary standard shipping (currently {formatINR(settings.standardShippingFee)}).
                   </span>
-                ) : (
+                ) : settings.freeShippingThreshold > 0 && calc.shippingFee === 0 ? (
                   <span>
                     Your order qualifies for <strong>complimentary standard shipping</strong>.
+                  </span>
+                ) : (
+                  <span>
+                    Standard delivery charge of <strong>{formatINR(settings.standardShippingFee)}</strong>{' '}
+                    applies to this order.
                   </span>
                 )}
               </div>
@@ -236,7 +242,8 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                     <div className="text-[#79543D] mt-0.5 tabular-nums">
                       {calc.freeShippingByPromo
                         ? 'FREE — Limited-Time'
-                        : calc.subtotal - calc.couponDiscount >= settings.freeShippingThreshold
+                        : settings.freeShippingThreshold > 0 &&
+                          calc.subtotal - calc.couponDiscount >= settings.freeShippingThreshold
                         ? 'Complimentary'
                         : formatINR(settings.standardShippingFee)}
                     </div>

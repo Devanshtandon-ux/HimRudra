@@ -1799,6 +1799,7 @@ const SettingsEditor: React.FC<{
 }> = ({ settings, onSave }) => {
   const [stdFee, setStdFee] = useState(String(settings.standardShippingFee));
   const [expFee, setExpFee] = useState(String(settings.expressShippingFee));
+  const [codFee, setCodFee] = useState(String(settings.codFee));
   const [freeThreshold, setFreeThreshold] = useState(String(settings.freeShippingThreshold));
   const [gwFeePct, setGwFeePct] = useState(String(settings.gatewayFeePercent ?? 2));
   const [shipCost, setShipCost] = useState(String(settings.defaultShippingCostPerOrder ?? 65));
@@ -1812,9 +1813,9 @@ const SettingsEditor: React.FC<{
   return (
     <div className="rounded-xl border border-[#79543D]/18 bg-[#FAF8F4] p-5 space-y-4">
       <h4 className="font-serif text-xl font-semibold text-[#281A15]">
-        Shipping, Gateway Costs, Alerts & SEO Metadata
+        Shipping, COD, Gateway Costs, Alerts & SEO Metadata
       </h4>
-      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
         <div>
           <label className="block text-[#79543D] mb-1">Standard Fee (₹)</label>
           <input
@@ -1834,7 +1835,16 @@ const SettingsEditor: React.FC<{
           />
         </div>
         <div>
-          <label className="block text-[#79543D] mb-1">Free Above (₹)</label>
+          <label className="block text-[#79543D] mb-1">COD Fee (₹)</label>
+          <input
+            type="number"
+            value={codFee}
+            onChange={(e) => setCodFee(e.target.value)}
+            className="w-full rounded-lg border border-[#79543D]/30 px-3 py-2 font-mono"
+          />
+        </div>
+        <div>
+          <label className="block text-[#79543D] mb-1">Free Above (₹, 0 = off)</label>
           <input
             type="number"
             value={freeThreshold}
@@ -1908,6 +1918,7 @@ const SettingsEditor: React.FC<{
           onSave({
             standardShippingFee: Number(stdFee),
             expressShippingFee: Number(expFee),
+            codFee: Number(codFee),
             freeShippingThreshold: Number(freeThreshold),
             gatewayFeePercent: Number(gwFeePct),
             defaultShippingCostPerOrder: Number(shipCost),

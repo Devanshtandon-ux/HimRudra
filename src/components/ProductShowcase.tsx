@@ -77,7 +77,7 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
   const lineSubtotal = selectedProduct.price * quantity;
   const estShipping = activeFreeShipPromo
     ? 0
-    : lineSubtotal >= settings.freeShippingThreshold
+    : settings.freeShippingThreshold > 0 && lineSubtotal >= settings.freeShippingThreshold
     ? 0
     : settings.standardShippingFee;
   const estTotal = lineSubtotal + estShipping;
@@ -134,8 +134,10 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
     }
     const isMetro = ['1', '2', '4', '5', '6'].includes(clean[0]);
     const shipText = activeFreeShipPromo
-      ? 'FREE — Limited-Time Offer'
-      : `₹${settings.standardShippingFee}; free on ₹${settings.freeShippingThreshold}+`;
+      ? `FREE — Limited-Time Offer (₹${settings.standardShippingFee} after offer ends)`
+      : settings.freeShippingThreshold > 0
+      ? `₹${settings.standardShippingFee}; free on ₹${settings.freeShippingThreshold}+`
+      : `₹${settings.standardShippingFee} standard delivery`;
     setPincodeStatus(
       `Deliverable to ${clean} · Standard dispatch (${isMetro ? '3–5' : '4–6'} business days, ${shipText}).`
     );
@@ -272,13 +274,15 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
                 Inclusive of {selectedProduct.gstRatePercent}% GST ·{' '}
                 {activeFreeShipPromo ? (
                   <span className="font-semibold text-[#79543D]">
-                    Shipping: FREE — Limited-Time Offer
+                    Shipping: FREE — Limited-Time Offer ({formatINR(settings.standardShippingFee)} after offer ends)
                   </span>
-                ) : (
+                ) : settings.freeShippingThreshold > 0 ? (
                   <>
                     Standard shipping {formatINR(settings.standardShippingFee)} (free on orders{' '}
                     {formatINR(settings.freeShippingThreshold)}+)
                   </>
+                ) : (
+                  <>Standard delivery {formatINR(settings.standardShippingFee)}</>
                 )}
               </p>
 

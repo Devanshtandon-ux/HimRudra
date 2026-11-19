@@ -1014,7 +1014,7 @@ ACTIVE PROMOTIONS:
 ${promoContext}
 
 SHIPPING & POLICY:
-- Standard shipping: ₹${state.settings.standardShippingFee} (free on orders ₹${state.settings.freeShippingThreshold}+ unless waived by an active free-shipping promotion).
+- Standard shipping: ₹${state.settings.standardShippingFee}${state.settings.freeShippingThreshold > 0 ? ` (free on orders ₹${state.settings.freeShippingThreshold}+ unless waived by an active free-shipping promotion)` : ' (automatically waived to ₹0 while the Limited-Time Free Shipping Offer is active; ₹100 delivery applies automatically after the offer ends)'}.
 - Express shipping: ₹${state.settings.expressShippingFee}.
 - Cash on Delivery (COD) fee: ₹${state.settings.codFee}.
 - Active coupons: ${state.coupons.filter((c) => c.active).map((c) => `${c.code} (${c.description})`).join(', ')}.
@@ -1170,7 +1170,9 @@ ${labContext}`;
         'Keep tightly sealed in a cool, dry place away from direct sunlight.',
       shippingNote:
         body.shippingNote?.trim() ||
-        `Standard pan-India shipping is ₹${state.settings.standardShippingFee} (free on orders ₹${state.settings.freeShippingThreshold}+).`,
+        (state.settings.freeShippingThreshold > 0
+          ? `Standard pan-India shipping is ₹${state.settings.standardShippingFee} (free on orders ₹${state.settings.freeShippingThreshold}+).`
+          : `Free standard delivery during our limited-time offer; standard delivery is ₹${state.settings.standardShippingFee} after the offer ends. Cash on Delivery fee is ₹${state.settings.codFee}.`),
       returnPolicy:
         body.returnPolicy?.trim() ||
         'Unopened, tamper-sealed packages are eligible for return or replacement within 7 days of delivery.',

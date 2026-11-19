@@ -120,7 +120,7 @@ function createSeedState(): DatabaseState {
       storageInstructions:
         'Keep the amber glass jar tightly sealed after each use. Store in a cool, dry place away from direct sunlight. Resin consistency naturally firms in cooler weather and softens in warmth.',
       shippingNote:
-        'Standard pan-India shipping is ₹79 (3–5 business days). Complimentary standard shipping applies on orders of ₹1,499 or above. Express air dispatch available for ₹149.',
+        'Free standard pan-India delivery during our launch offer (until 30 November 2026). After the offer ends, standard delivery is ₹100 (3–5 business days). Cash on Delivery fee is ₹100.',
       returnPolicy:
         'Unopened, tamper-sealed jars are eligible for return or replacement within 7 days of delivery. Damaged-in-transit replacements are processed within 48 hours of photo verification.',
       specifications: [
@@ -154,13 +154,13 @@ function createSeedState(): DatabaseState {
       batchNumber: 'HR-SHJ-2026-B04',
       gstRatePercent: 12,
       shortDescription:
-        'Two individually sealed 20 g jars of HimRudra Himalayan Shilajit Resin crafted for consistent two-to-four month household rituals, qualifying automatically for complimentary standard pan-India shipping.',
+        'Two individually sealed 20 g jars of HimRudra Himalayan Shilajit Resin crafted for consistent two-to-four month household rituals.',
       usageGuidance:
         'Dissolve a pea-sized portion (~250–300 mg) in lukewarm water or milk once daily. Keep the second jar sealed until ready to open.',
       storageInstructions:
         'Store in a cool, dry cabinet away from moisture and direct heat.',
       shippingNote:
-        'Qualifies automatically for complimentary standard shipping across India.',
+        'Free standard pan-India delivery during our launch offer (until 30 November 2026). After the offer ends, standard delivery is ₹100. Cash on Delivery fee is ₹100.',
       returnPolicy:
         'Unopened jars with intact tamper seals qualify for return within 7 days of delivery.',
       specifications: [
@@ -179,10 +179,10 @@ function createSeedState(): DatabaseState {
   ];
 
   const settings: StoreSettings = {
-    standardShippingFee: 79,
+    standardShippingFee: 100,
     expressShippingFee: 149,
-    freeShippingThreshold: 1499,
-    codFee: 49,
+    freeShippingThreshold: 0,
+    codFee: 100,
     codEnabled: true,
     gstIncludedInPrice: true,
     gatewayFeePercent: 2,

@@ -166,6 +166,7 @@ export function calculateCartTotals(
       (appliedPromotion.freeShippingSpeed === 'all' || shippingSpeed === 'standard')
   );
 
+  const hasFreeThreshold = settings.freeShippingThreshold > 0;
   let shippingFee = 0;
   let freeShippingByPromo = false;
   if (itemCount > 0) {
@@ -176,13 +177,16 @@ export function calculateCartTotals(
       shippingFee = settings.expressShippingFee;
     } else {
       shippingFee =
-        discountedSubtotal >= settings.freeShippingThreshold ? 0 : settings.standardShippingFee;
+        hasFreeThreshold && discountedSubtotal >= settings.freeShippingThreshold
+          ? 0
+          : settings.standardShippingFee;
     }
   }
 
   const freeShippingRemaining =
     itemCount > 0 &&
     !promoGrantsFreeShipping &&
+    hasFreeThreshold &&
     discountedSubtotal < settings.freeShippingThreshold
       ? settings.freeShippingThreshold - discountedSubtotal
       : 0;
