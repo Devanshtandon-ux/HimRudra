@@ -383,3 +383,28 @@ test('isAuthorizedAdmin grants access strictly to the owner email with admin rol
   );
   assert.equal(isAuthorizedAdmin(null, owner), false);
 });
+
+test('calculateProfitMetrics starts cleanly at exact zero when no orders or expenses exist', () => {
+  const zero = calculateProfitMetrics([], []);
+  assert.equal(zero.totalOrders, 0);
+  assert.equal(zero.totalPaidOrders, 0);
+  assert.equal(zero.grossRevenue, 0);
+  assert.equal(zero.totalSalesToday, 0);
+  assert.equal(zero.monthlyRevenue, 0);
+  assert.equal(zero.annualRevenue, 0);
+  assert.equal(zero.totalCogs, 0);
+  assert.equal(zero.totalShippingCollected, 0);
+  assert.equal(zero.shippingExpenses, 0);
+  assert.equal(zero.gatewayFees, 0);
+  assert.equal(zero.refundsTotal, 0);
+  assert.equal(zero.operatingExpenses, 0);
+  assert.equal(zero.netProfit, 0);
+  assert.equal(zero.profitMarginPercent, 0);
+  assert.equal(zero.averageOrderValue, 0);
+  assert.deepEqual(zero.dailySales, []);
+  assert.deepEqual(zero.weeklyOrders, []);
+  assert.deepEqual(zero.monthlySeries, []);
+  assert.deepEqual(zero.annualSales, []);
+  assert.deepEqual(zero.statusDistribution, []);
+});
+

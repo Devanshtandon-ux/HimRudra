@@ -164,27 +164,6 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
     }
   };
 
-  const quickLogin = async (demoEmail: string, demoPassword: string) => {
-    setAuthError('');
-    setAuthBusy(true);
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: demoEmail, password: demoPassword }),
-      });
-      const data = await res.json();
-      if (res.ok) {
-        onAuthChange(data.user);
-        setTab(data.user.role === 'admin' ? 'account' : 'orders');
-      } else {
-        setAuthError(data.error || 'Sign-in failed.');
-      }
-    } finally {
-      setAuthBusy(false);
-    }
-  };
-
   const handleLogout = async () => {
     await fetch('/api/auth/logout', { method: 'POST' });
     onAuthChange(null);
@@ -486,27 +465,20 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
                 </button>
               </form>
 
-              {/* Customer Demo Access */}
-              <div className="md:col-span-5 rounded-xl border border-[#79543D]/20 bg-[#F3EDE5]/70 p-5 space-y-4">
+              {/* Member Benefits */}
+              <div className="md:col-span-5 rounded-xl border border-[#79543D]/20 bg-[#F3EDE5]/70 p-5 space-y-3">
                 <h3 className="font-serif text-xl font-semibold text-[#281A15]">
-                  Customer Demo Account
+                  Your HimRudra Account
                 </h3>
                 <p className="text-xs text-[#241B17]/75 leading-relaxed">
-                  Preview a sample customer account with pre-seeded order history and saved
-                  delivery details, or sign in with your own credentials.
+                  Sign in or register to track orders live, download GST invoices, save your
+                  delivery address, and manage your wishlist across visits.
                 </p>
-                <div className="space-y-2.5">
-                  <button
-                    type="button"
-                    onClick={() => quickLogin('aarav.mehta@example.in', 'Ritual@2026')}
-                    className="w-full rounded-lg border border-[#281A15]/25 bg-[#FAF8F4] px-4 py-2.5 text-left text-xs hover:bg-[#EAE1D4]"
-                  >
-                    <div className="font-semibold text-[#281A15]">Demo Customer Sign-In</div>
-                    <div className="font-mono text-[11px] text-[#79543D]">
-                      aarav.mehta@example.in
-                    </div>
-                  </button>
-                </div>
+                <ul className="space-y-1.5 text-xs text-[#281A15]/85 list-disc pl-4">
+                  <li>Real-time dispatch &amp; tracking updates</li>
+                  <li>One-click GST invoice access</li>
+                  <li>Saved checkout address &amp; wishlist</li>
+                </ul>
               </div>
             </div>
           )}

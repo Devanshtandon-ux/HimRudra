@@ -145,7 +145,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     if (!silent) setLoading(true);
     setError('');
     try {
-      const res = await fetch('/api/admin/overview');
+      const res = await fetch('/api/admin/overview', { cache: 'no-store' });
       const json = await res.json();
       if (!res.ok) {
         setError(json.error || 'Failed to load admin console.');
@@ -163,8 +163,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     void fetchOverview();
     const poll = window.setInterval(() => {
       void fetchOverview(true);
-    }, 15000);
-    return () => window.clearInterval(poll);
+    }, 5000);
+    const handleFocus = () => {
+      void fetchOverview(true);
+    };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchOverview(true);
+      }
+    };
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.clearInterval(poll);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, []);
 
   const uploadFileToServer = async (file: File) => {

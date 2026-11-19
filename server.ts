@@ -986,6 +986,7 @@ ${labContext}`;
 
   // PRIVATE ADMIN ROUTES
   app.get('/api/admin/overview', requireAdmin, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const state = storeRepo.getState();
     const nowMs = Date.now();
     const analytics = calculateProfitMetrics(state.orders, state.expenses, {
