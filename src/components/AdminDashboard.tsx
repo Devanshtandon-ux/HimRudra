@@ -9,6 +9,7 @@ import {
   FileText,
   ImagePlus,
   IndianRupee,
+  LogOut,
   Megaphone,
   Package,
   Plus,
@@ -43,6 +44,7 @@ import type {
 
 interface AdminDashboardProps {
   onClose: () => void;
+  onLogout: () => Promise<void> | void;
   onStorefrontDataChanged: () => void;
 }
 
@@ -74,13 +76,25 @@ type AdminSection =
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onClose,
+  onLogout,
   onStorefrontDataChanged,
 }) => {
   const [section, setSection] = useState<AdminSection>('overview');
   const [data, setData] = useState<AdminOverviewData | null>(null);
   const [loading, setLoading] = useState(true);
+  const [loggingOut, setLoggingOut] = useState(false);
   const [error, setError] = useState('');
   const [toast, setToast] = useState('');
+
+  const handleLogoutClick = async () => {
+    if (loggingOut) return;
+    setLoggingOut(true);
+    try {
+      await onLogout();
+    } finally {
+      setLoggingOut(false);
+    }
+  };
 
   // Expense form
   const [expDesc, setExpDesc] = useState('');
@@ -694,13 +708,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           })}
         </nav>
 
-        <button
-          type="button"
-          onClick={onClose}
-          className="mt-4 w-full rounded-lg border border-[#79543D]/35 bg-[#FAF8F4] py-2.5 text-xs font-semibold text-[#281A15] hover:bg-[#EAE1D4]"
-        >
-          Exit to Storefront
-        </button>
+        <div className="mt-4 space-y-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-full rounded-lg border border-[#79543D]/35 bg-[#FAF8F4] py-2.5 text-xs font-semibold text-[#281A15] hover:bg-[#EAE1D4]"
+          >
+            Exit to Storefront
+          </button>
+          <button
+            type="button"
+            disabled={loggingOut}
+            onClick={() => void handleLogoutClick()}
+            className="w-full inline-flex items-center justify-center gap-2 rounded-lg border border-red-200 bg-red-50/80 py-2.5 text-xs font-semibold text-red-900 hover:bg-red-100 disabled:opacity-60"
+          >
+            <LogOut className="h-3.5 w-3.5" />
+            <span>{loggingOut ? 'Logging out...' : 'Log Out'}</span>
+          </button>
+        </div>
       </aside>
 
       {/* Main Content */}
@@ -812,6 +837,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </option>
               ))}
             </select>
+            <button
+              type="button"
+              disabled={loggingOut}
+              onClick={() => void handleLogoutClick()}
+              aria-label="Log out of admin console"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50/80 px-3 py-1.5 text-xs font-semibold text-red-900 hover:bg-red-100 disabled:opacity-60"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">{loggingOut ? 'Logging out...' : 'Log Out'}</span>
+            </button>
             <button
               type="button"
               onClick={onClose}

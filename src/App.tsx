@@ -16,6 +16,7 @@ import { SupportChatbot } from './components/SupportChatbot';
 import { WhatsAppButton } from './components/WhatsAppButton';
 import { WhyHimRudra } from './components/WhyHimRudra';
 import { getActivePromotions } from './lib/commerce';
+import { signOutFirebase } from './lib/firebaseAuth';
 import type {
   CartItem,
   Order,
@@ -424,6 +425,16 @@ export default function App() {
       {adminOpen && user?.role === 'admin' && (
         <AdminDashboard
           onClose={() => setAdminOpen(false)}
+          onLogout={async () => {
+            try {
+              await fetch('/api/auth/logout', { method: 'POST' });
+            } catch {
+              // ignore network errors during logout
+            }
+            await signOutFirebase();
+            setUser(null);
+            setAdminOpen(false);
+          }}
           onStorefrontDataChanged={() => void loadStoreBootstrap()}
         />
       )}
