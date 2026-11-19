@@ -566,12 +566,45 @@ function createSeedState(): DatabaseState {
       updatedAt: now,
     },
     {
-      id: 'cms-faq-dissolve',
-      key: 'faq_dissolve',
-      title: 'Frequently Asked Questions — Texture, Solubility & Authenticity',
+      id: 'cms-faq-1',
+      key: 'faq_texture',
+      title: 'Why does the resin texture change between summer and winter?',
       category: 'faq',
       content:
-        'Q: Why does the resin texture change between summer and winter? A: Genuine mineral resin responds naturally to ambient temperature—firmer when cool and softer when warm. Q: Does HimRudra Shilajit dissolve in warm water? A: Yes, it disperses smoothly in lukewarm water or milk without leaving gritty sand residue. Q: How long does one 20 g jar last? A: At 250–300 mg per serving, a single 20 g jar lasts roughly 65 to 75 days.',
+        'Genuine mineral resin responds naturally to ambient temperature—becoming firmer when cool and softer in warmer weather. Warming the closed jar briefly in your palms restores smooth scooping.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'cms-faq-2',
+      key: 'faq_solubility',
+      title: 'Does HimRudra Shilajit dissolve completely in warm water?',
+      category: 'faq',
+      content:
+        'Yes. A pea-sized portion dissolves smoothly in lukewarm water, warm milk, or herbal tea into a rich amber-brown infusion without leaving gritty sand residue.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'cms-faq-3',
+      key: 'faq_duration',
+      title: 'How long does one 20 g jar of HimRudra Shilajit last?',
+      category: 'faq',
+      content:
+        'At the recommended serving of 250–300 mg (one pea-sized scoop daily), a single 20 g apothecary jar lasts approximately 65 to 75 days.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'cms-faq-4',
+      key: 'faq_certificate',
+      title: 'Is HimRudra Shilajit lab certified and can I download the report?',
+      category: 'faq',
+      content:
+        'Yes. Every production batch is laboratory screened for Fulvic Acid assay, heavy metals, and microbiological safety. Click "Lab Certified" in the top navigation bar anytime to preview or download the official batch certificate.',
       approvedByAdmin: true,
       approvedAt: now,
       updatedAt: now,
@@ -675,16 +708,10 @@ class StoreRepository {
         if (parsed && Array.isArray(parsed.products) && Array.isArray(parsed.users)) {
           let mutated = false;
           for (const p of parsed.products) {
-            const expectedGallery: Product['galleryTypes'] =
-              p.id === 'himrudra-shilajit-40g-duo'
-                ? ['box', 'hero', 'texture', 'ritual']
-                : ['hero', 'box', 'texture', 'ritual'];
             if (
-              !p.customImages ||
-              p.customImages.length === 0 ||
-              JSON.stringify(p.galleryTypes) !== JSON.stringify(expectedGallery)
+              (p.id === 'himrudra-shilajit-20g' || p.id === 'himrudra-shilajit-40g-duo') &&
+              (!p.customImages || p.customImages.length === 0)
             ) {
-              p.galleryTypes = expectedGallery;
               p.customImages =
                 p.id === 'himrudra-shilajit-40g-duo'
                   ? [

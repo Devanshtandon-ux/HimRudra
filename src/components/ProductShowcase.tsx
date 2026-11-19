@@ -220,11 +220,11 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
                 </button>
               )}
 
-              {/* Edition / Pack Selector */}
+              {/* Product / Pack Selector */}
               {products.length > 1 && (
                 <div className="mt-5">
                   <span className="block text-xs font-medium text-[#241B17]/75 mb-2">
-                    Select Pack Size
+                    Select Product / Pack Size
                   </span>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                     {products.map((prod) => {
@@ -234,17 +234,19 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
                           key={prod.id}
                           type="button"
                           onClick={() => onSelectProduct(prod)}
-                          className={`flex items-center justify-between rounded-xl border px-4 py-3 text-left transition-colors ${
+                          className={`flex items-center justify-between gap-3 rounded-xl border px-4 py-3 text-left transition-colors ${
                             active
                               ? 'border-[#281A15] bg-[#FAF8F4] text-[#281A15]'
                               : 'border-[#79543D]/25 bg-[#FAF8F4]/50 text-[#241B17]/75 hover:bg-[#FAF8F4]'
                           }`}
                         >
-                          <div>
-                            <div className="text-sm font-semibold">{prod.netQuantity}</div>
-                            <div className="text-xs text-[#79543D]">{prod.stock} in stock</div>
+                          <div className="min-w-0">
+                            <div className="text-sm font-semibold truncate">{prod.name}</div>
+                            <div className="text-xs text-[#79543D]">
+                              {prod.netQuantity} · {prod.stock} in stock
+                            </div>
                           </div>
-                          <div className="font-mono text-sm font-semibold tabular-nums">
+                          <div className="font-mono text-sm font-semibold tabular-nums shrink-0">
                             {formatINR(prod.price)}
                           </div>
                         </button>

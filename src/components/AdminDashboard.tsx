@@ -3,13 +3,15 @@ import {
   BarChart3,
   Bell,
   CheckCircle2,
-  FileCheck2,
+  Download,
   FileText,
+  ImagePlus,
   IndianRupee,
   Megaphone,
   Package,
   Plus,
   RefreshCw,
+  ShieldCheck,
   ShoppingBag,
   Sparkles,
   Trash2,
@@ -84,14 +86,32 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [expCategory, setExpCategory] = useState<Expense['category']>('Marketing');
   const [expDate, setExpDate] = useState(() => new Date().toISOString().slice(0, 10));
 
-  // New Lab Report form
+  // New Product form (Self-service product creation without developer)
+  const [showAddProductForm, setShowAddProductForm] = useState(false);
+  const [newProdName, setNewProdName] = useState('');
+  const [newProdSubtitle, setNewProdSubtitle] = useState('');
+  const [newProdNetQty, setNewProdNetQty] = useState('20 g');
+  const [newProdSku, setNewProdSku] = useState('');
+  const [newProdBatch, setNewProdBatch] = useState(`HR-${new Date().getFullYear()}-B05`);
+  const [newProdPrice, setNewProdPrice] = useState('');
+  const [newProdMrp, setNewProdMrp] = useState('');
+  const [newProdCost, setNewProdCost] = useState('');
+  const [newProdStock, setNewProdStock] = useState('25');
+  const [newProdGst, setNewProdGst] = useState('12');
+  const [newProdDesc, setNewProdDesc] = useState('');
+  const [newProdUsage, setNewProdUsage] = useState('');
+  const [newProdImageUrl, setNewProdImageUrl] = useState('');
+  const [uploadingProdImg, setUploadingProdImg] = useState(false);
+
+  // New Lab Certificate form
   const [labName, setLabName] = useState('');
   const [labReportNum, setLabReportNum] = useState('');
   const [labBatch, setLabBatch] = useState('');
   const [labDate, setLabDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [labMethod, setLabMethod] = useState('ICP-MS & USP Microbiological');
+  const [labMethod, setLabMethod] = useState('Fulvic Acid Assay, Heavy Metals & Microbiological');
+  const [labFulvicAcid, setLabFulvicAcid] = useState('77.15%');
   const [labVerified, setLabVerified] = useState<LabReport['verifiedStatus']>('Verified');
-  const [labLeadResult, setLabLeadResult] = useState('0.22 ppm (Pass)');
+  const [labLeadResult, setLabLeadResult] = useState('Meets Specification (Pass)');
   const [labMicroResult, setLabMicroResult] = useState('<100 CFU/g (Conforms)');
   const [labMappedProductIds, setLabMappedProductIds] = useState<string[]>([
     'himrudra-shilajit-20g',
@@ -102,6 +122,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     originalMimeType: string;
   } | null>(null);
   const [uploadingLabFile, setUploadingLabFile] = useState(false);
+  const [replacingCertId, setReplacingCertId] = useState<string | null>(null);
 
   // New CMS section form
   const [newCmsTitle, setNewCmsTitle] = useState('');
@@ -146,6 +167,90 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return () => window.clearInterval(poll);
   }, []);
 
+  const uploadFileToServer = async (file: File) => {
+    const base64Data = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(String(reader.result));
+      reader.onerror = () => reject(new Error('Failed to read file'));
+      reader.readAsDataURL(file);
+    });
+    const res = await fetch('/api/admin/upload-report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fileName: file.name,
+        mimeType: file.type,
+        base64Data,
+      }),
+    });
+    if (!res.ok) return null;
+    return (await res.json()) as {
+      url: string;
+      originalFileName: string;
+      originalMimeType: string;
+    };
+  };
+
+  const handleNewProductImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingProdImg(true);
+    try {
+      const uploaded = await uploadFileToServer(file);
+      if (uploaded) {
+        setNewProdImageUrl(uploaded.url);
+        showToast(`Uploaded product photo: ${file.name}`);
+      }
+    } finally {
+      setUploadingProdImg(false);
+    }
+  };
+
+  const createProduct = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newProdName.trim() || !Number(newProdPrice)) return;
+    const res = await fetch('/api/admin/products', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: newProdName.trim(),
+        subtitle: newProdSubtitle.trim() || undefined,
+        netQuantity: newProdNetQty.trim() || '20 g',
+        sku: newProdSku.trim() || undefined,
+        batchNumber: newProdBatch.trim() || undefined,
+        price: Number(newProdPrice),
+        mrp: Number(newProdMrp) || Number(newProdPrice),
+        costPerUnit: Number(newProdCost) || undefined,
+        stock: Number(newProdStock) || 0,
+        gstRatePercent: Number(newProdGst) || 12,
+        shortDescription: newProdDesc.trim() || undefined,
+        usageGuidance: newProdUsage.trim() || undefined,
+        customImages: newProdImageUrl.trim() ? [newProdImageUrl.trim()] : undefined,
+      }),
+    });
+    if (res.ok) {
+      const json = await res.json();
+      setNewProdName('');
+      setNewProdSubtitle('');
+      setNewProdNetQty('20 g');
+      setNewProdSku('');
+      setNewProdPrice('');
+      setNewProdMrp('');
+      setNewProdCost('');
+      setNewProdStock('25');
+      setNewProdDesc('');
+      setNewProdUsage('');
+      setNewProdImageUrl('');
+      setShowAddProductForm(false);
+      showToast(`Added "${json.product.name}" to storefront`);
+      await fetchOverview(true);
+      onStorefrontDataChanged();
+    } else {
+      const errJson = await res.json().catch(() => ({}));
+      showToast(errJson.error || 'Could not add product');
+    }
+  };
+
   const updateProduct = async (product: Product, patch: Partial<Product>) => {
     const res = await fetch(`/api/admin/products/${product.id}`, {
       method: 'PUT',
@@ -153,9 +258,23 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       body: JSON.stringify(patch),
     });
     if (res.ok) {
-      showToast(`Updated ${product.name}`);
+      showToast(`Updated ${patch.name || product.name}`);
       await fetchOverview(true);
       onStorefrontDataChanged();
+    }
+  };
+
+  const deleteProduct = async (product: Product) => {
+    const res = await fetch(`/api/admin/products/${product.id}`, {
+      method: 'DELETE',
+    });
+    if (res.ok) {
+      showToast(`Removed ${product.name}`);
+      await fetchOverview(true);
+      onStorefrontDataChanged();
+    } else {
+      const errJson = await res.json().catch(() => ({}));
+      showToast(errJson.error || 'Unable to delete product');
     }
   };
 
@@ -253,33 +372,74 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     if (!file) return;
     setUploadingLabFile(true);
     try {
-      const base64Data = await new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = () => resolve(String(reader.result));
-        reader.onerror = () => reject(new Error('Failed to read file'));
-        reader.readAsDataURL(file);
-      });
-      const res = await fetch('/api/admin/upload-report', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          fileName: file.name,
-          mimeType: file.type,
-          base64Data,
-        }),
-      });
-      if (res.ok) {
-        const uploaded = await res.json();
+      const uploaded = await uploadFileToServer(file);
+      if (uploaded) {
         setLabFileMeta(uploaded);
-        showToast(`Uploaded ${file.name}`);
+        showToast(`Uploaded certificate: ${file.name}`);
       }
     } finally {
       setUploadingLabFile(false);
     }
   };
 
+  const replaceLabCertificateFile = async (
+    report: LabReport,
+    e: React.ChangeEvent<HTMLInputElement>
+  ) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setReplacingCertId(report.id);
+    try {
+      const uploaded = await uploadFileToServer(file);
+      if (!uploaded) return;
+      const res = await fetch(`/api/admin/lab-reports/${report.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          customDocumentUrl: uploaded.url,
+          originalFileName: uploaded.originalFileName,
+          originalMimeType: uploaded.originalMimeType,
+        }),
+      });
+      if (res.ok) {
+        showToast(`Certificate updated for Batch ${report.testedBatchNumber}`);
+        await fetchOverview(true);
+        onStorefrontDataChanged();
+      }
+    } finally {
+      setReplacingCertId(null);
+    }
+  };
+
   const createLabReport = async (e: React.FormEvent) => {
     e.preventDefault();
+    const heavyMetals = [
+      ...(labFulvicAcid.trim()
+        ? [
+            {
+              parameter: 'Fulvic Acid (Active Component)',
+              method: 'Assay',
+              specificationLimit: 'Batch Standard',
+              observedResult: labFulvicAcid.trim(),
+              status: 'Within Limit' as const,
+            },
+          ]
+        : []),
+      {
+        parameter: 'Lead (Pb)',
+        method: 'ICP-MS',
+        specificationLimit: 'NMT 2.0 ppm',
+        observedResult: labLeadResult,
+        status: 'Within Limit' as const,
+      },
+      {
+        parameter: 'Arsenic (As) / Mercury (Hg) / Cadmium (Cd)',
+        method: 'ICP-MS',
+        specificationLimit: 'USP/AYUSH Limits',
+        observedResult: 'Meets Specification',
+        status: 'Within Limit' as const,
+      },
+    ];
     const res = await fetch('/api/admin/lab-reports', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -292,26 +452,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         verifiedStatus: labVerified,
         mappedProductIds: labMappedProductIds.length
           ? labMappedProductIds
+          : data?.products[0]
+          ? [data.products[0].id]
           : ['himrudra-shilajit-20g'],
         customDocumentUrl: labFileMeta?.url,
         originalFileName: labFileMeta?.originalFileName,
         originalMimeType: labFileMeta?.originalMimeType,
-        heavyMetals: [
-          {
-            parameter: 'Lead (Pb)',
-            method: 'ICP-MS',
-            specificationLimit: 'NMT 2.0 ppm',
-            observedResult: labLeadResult,
-            status: 'Within Limit',
-          },
-          {
-            parameter: 'Arsenic (As) / Mercury (Hg) / Cadmium (Cd)',
-            method: 'ICP-MS',
-            specificationLimit: 'USP/AYUSH Limits',
-            observedResult: 'Meets Specification',
-            status: 'Within Limit',
-          },
-        ],
+        heavyMetals,
         microbiological: [
           {
             parameter: 'Total Aerobic Microbial Count',
@@ -335,7 +482,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setLabReportNum('');
       setLabBatch('');
       setLabFileMeta(null);
-      showToast('Laboratory report published to registry');
+      showToast('Lab certificate added and live on storefront');
       await fetchOverview();
       onStorefrontDataChanged();
     }
@@ -484,8 +631,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     { key: 'orders', label: 'Orders & Dispatch', icon: ShoppingBag },
     { key: 'promotions', label: 'Offers & Promotions', icon: Sparkles },
     { key: 'products', label: 'Products & Inventory', icon: Package },
-    { key: 'quality', label: 'Lab Reports CMS', icon: FileCheck2 },
-    { key: 'cms', label: 'Content Approval', icon: FileText },
+    { key: 'quality', label: 'Lab Certificates', icon: ShieldCheck },
+    { key: 'cms', label: 'Content & FAQs', icon: FileText },
     { key: 'expenses', label: 'Expenses & Customers', icon: Users },
     { key: 'marketing', label: 'SEO, Shipping & Coupons', icon: Megaphone },
   ];
@@ -700,32 +847,272 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                 {/* 4. PRODUCTS & INVENTORY */}
                 {section === 'products' && (
-                  <div className="space-y-4">
-                    {data.products.map((prod) => (
-                      <ProductEditorRow
-                        key={prod.id}
-                        product={prod}
-                        onSave={(patch) => void updateProduct(prod, patch)}
-                      />
-                    ))}
+                  <div className="space-y-5">
+                    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#79543D]/20 bg-[#F3EDE5]/60 p-4 sm:p-5">
+                      <div>
+                        <h4 className="font-serif text-xl font-semibold text-[#281A15]">
+                          Catalog & Inventory ({data.products.length} Products)
+                        </h4>
+                        <p className="text-xs text-[#79543D] mt-0.5">
+                          Add new products, upload photos, update prices, or manage live stock anytime—no developer needed.
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => setShowAddProductForm((v) => !v)}
+                        data-testid="toggle-add-product-btn"
+                        className="inline-flex items-center gap-1.5 rounded-lg bg-[#281A15] px-4 py-2.5 text-xs font-semibold text-[#FAF8F4] hover:bg-[#3A2720] transition-colors whitespace-nowrap"
+                      >
+                        {showAddProductForm ? (
+                          <>
+                            <X className="h-3.5 w-3.5 text-[#C69B51]" />
+                            <span>Close Form</span>
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="h-3.5 w-3.5 text-[#C69B51]" />
+                            <span>Add New Product</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {showAddProductForm && (
+                      <form
+                        onSubmit={createProduct}
+                        data-testid="add-product-form"
+                        className="rounded-xl border border-[#C69B51]/45 bg-[#FAF8F4] p-5 sm:p-6 space-y-4 shadow-sm"
+                      >
+                        <h5 className="font-serif text-xl font-semibold text-[#281A15]">
+                          Create New Storefront Product
+                        </h5>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 text-xs">
+                          <div>
+                            <label className="block text-[#79543D] mb-1">Product Name *</label>
+                            <input
+                              type="text"
+                              required
+                              placeholder="e.g. HimRudra Himalayan Shilajit Resin 50 g"
+                              value={newProdName}
+                              onChange={(e) => setNewProdName(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[#79543D] mb-1">Subtitle / Tagline</label>
+                            <input
+                              type="text"
+                              placeholder="e.g. Pure by Himalayas · 50 g Glass Jar"
+                              value={newProdSubtitle}
+                              onChange={(e) => setNewProdSubtitle(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[#79543D] mb-1">Pack Size / Net Quantity *</label>
+                            <input
+                              type="text"
+                              required
+                              placeholder="e.g. 50 g"
+                              value={newProdNetQty}
+                              onChange={(e) => setNewProdNetQty(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs">
+                          <div>
+                            <label className="block text-[#79543D] mb-1">Selling Price (₹) *</label>
+                            <input
+                              type="number"
+                              required
+                              min={1}
+                              placeholder="799"
+                              value={newProdPrice}
+                              onChange={(e) => setNewProdPrice(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[#79543D] mb-1">MRP (₹)</label>
+                            <input
+                              type="number"
+                              min={1}
+                              placeholder="1299"
+                              value={newProdMrp}
+                              onChange={(e) => setNewProdMrp(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[#79543D] mb-1">Cost/Unit (₹)</label>
+                            <input
+                              type="number"
+                              min={0}
+                              placeholder="295"
+                              value={newProdCost}
+                              onChange={(e) => setNewProdCost(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[#79543D] mb-1">Opening Stock *</label>
+                            <input
+                              type="number"
+                              required
+                              min={0}
+                              value={newProdStock}
+                              onChange={(e) => setNewProdStock(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[#79543D] mb-1">SKU (Optional)</label>
+                            <input
+                              type="text"
+                              placeholder="Auto if blank"
+                              value={newProdSku}
+                              onChange={(e) => setNewProdSku(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 font-mono"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[#79543D] mb-1">Batch Code</label>
+                            <input
+                              type="text"
+                              value={newProdBatch}
+                              onChange={(e) => setNewProdBatch(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 font-mono"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                          <div>
+                            <label className="block text-[#79543D] mb-1">Product Description</label>
+                            <textarea
+                              rows={2}
+                              placeholder="Describe the product, origin, and highlights..."
+                              value={newProdDesc}
+                              onChange={(e) => setNewProdDesc(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2"
+                            />
+                          </div>
+                          <div>
+                            <label className="block text-[#79543D] mb-1">Usage Guidance</label>
+                            <textarea
+                              rows={2}
+                              placeholder="How should customers consume or use this product?"
+                              value={newProdUsage}
+                              onChange={(e) => setNewProdUsage(e.target.value)}
+                              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-4 pt-2 border-t border-[#79543D]/15">
+                          <div className="flex flex-wrap items-center gap-3 text-xs">
+                            <label className="inline-flex items-center gap-1.5 rounded-lg border border-[#79543D]/35 bg-[#F3EDE5] px-3.5 py-2 font-medium text-[#281A15] cursor-pointer hover:bg-[#EAE1D4]">
+                              <ImagePlus className="h-4 w-4 text-[#79543D]" />
+                              <span>
+                                {uploadingProdImg
+                                  ? 'Uploading Photo...'
+                                  : newProdImageUrl
+                                  ? 'Change Product Photo'
+                                  : 'Upload Product Photo'}
+                              </span>
+                              <input
+                                type="file"
+                                accept=".png,.jpg,.jpeg,.webp"
+                                onChange={(e) => void handleNewProductImageUpload(e)}
+                                className="sr-only"
+                              />
+                            </label>
+                            {newProdImageUrl && (
+                              <div className="flex items-center gap-2">
+                                <img
+                                  src={newProdImageUrl}
+                                  alt="New product preview"
+                                  className="h-10 w-10 rounded-lg object-cover border border-[#79543D]/25"
+                                />
+                                <span className="text-[11px] text-emerald-800 font-medium">
+                                  Photo ready
+                                </span>
+                              </div>
+                            )}
+                            <div className="flex items-center gap-1.5">
+                              <span className="text-[#79543D]">GST %:</span>
+                              <input
+                                type="number"
+                                min={0}
+                                max={28}
+                                value={newProdGst}
+                                onChange={(e) => setNewProdGst(e.target.value)}
+                                className="w-16 rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-2 py-1.5 font-mono"
+                              />
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setShowAddProductForm(false)}
+                              className="rounded-lg border border-[#79543D]/30 px-4 py-2 text-xs font-medium text-[#281A15] hover:bg-[#F3EDE5]"
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="submit"
+                              disabled={uploadingProdImg}
+                              className="inline-flex items-center gap-1.5 rounded-lg bg-[#281A15] px-5 py-2 text-xs font-semibold text-[#FAF8F4] hover:bg-[#3A2720] disabled:opacity-50"
+                            >
+                              <Plus className="h-3.5 w-3.5 text-[#C69B51]" />
+                              <span>Publish Product</span>
+                            </button>
+                          </div>
+                        </div>
+                      </form>
+                    )}
+
+                    <div className="space-y-4">
+                      {data.products.map((prod) => (
+                        <ProductEditorRow
+                          key={prod.id}
+                          product={prod}
+                          canDelete={data.products.length > 1}
+                          onUploadImage={uploadFileToServer}
+                          onSave={(patch) => void updateProduct(prod, patch)}
+                          onDelete={() => void deleteProduct(prod)}
+                        />
+                      ))}
+                    </div>
                   </div>
                 )}
 
-                {/* 4. QUALITY & LAB REPORTS CMS */}
+                {/* 5. LAB CERTIFICATES CMS */}
                 {section === 'quality' && (
                   <div className="space-y-6">
                     <form
                       onSubmit={createLabReport}
+                      data-testid="add-certificate-form"
                       className="rounded-xl border border-[#79543D]/20 bg-[#F3EDE5]/60 p-5 space-y-4"
                     >
-                      <h4 className="font-serif text-xl font-semibold text-[#281A15]">
-                        Add / Upload Batch Laboratory Report
-                      </h4>
+                      <div>
+                        <h4 className="font-serif text-xl font-semibold text-[#281A15]">
+                          Add New Lab Certificate
+                        </h4>
+                        <p className="text-xs text-[#79543D] mt-0.5">
+                          Upload your batch laboratory certificate (PDF or Image). Customers can immediately preview and download it from the “Lab Certified” button in the header.
+                        </p>
+                      </div>
+
                       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
                         <input
                           type="text"
                           required
-                          placeholder="Laboratory Name"
+                          placeholder="Laboratory Name (e.g. Eurofins)"
                           value={labName}
                           onChange={(e) => setLabName(e.target.value)}
                           className="rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 text-xs lg:col-span-2"
@@ -733,7 +1120,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <input
                           type="text"
                           required
-                          placeholder="Report Number (e.g. NABL-2026-09)"
+                          placeholder="Certificate / Report No."
                           value={labReportNum}
                           onChange={(e) => setLabReportNum(e.target.value)}
                           className="rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 text-xs font-mono"
@@ -755,7 +1142,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         />
                       </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 text-xs">
+                        <input
+                          type="text"
+                          value={labFulvicAcid}
+                          onChange={(e) => setLabFulvicAcid(e.target.value)}
+                          placeholder="Fulvic Acid % (e.g. 77.15%)"
+                          className="rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 font-mono"
+                        />
                         <input
                           type="text"
                           value={labMethod}
@@ -798,7 +1192,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   }
                                   className="h-3.5 w-3.5 accent-[#281A15]"
                                 />
-                                <span>{p.netQuantity}</span>
+                                <span>{p.name} ({p.netQuantity})</span>
                               </label>
                             );
                           })}
@@ -825,7 +1219,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                 ? 'Uploading...'
                                 : labFileMeta
                                 ? labFileMeta.originalFileName
-                                : 'Upload PDF / Image'}
+                                : 'Upload Certificate (PDF / Image)'}
                             </span>
                             <input
                               type="file"
@@ -839,8 +1233,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             type="submit"
                             className="inline-flex items-center gap-1.5 rounded-lg bg-[#281A15] px-5 py-2 text-xs font-semibold text-[#FAF8F4]"
                           >
-                            <Plus className="h-3.5 w-3.5" />
-                            <span>Publish Lab Report</span>
+                            <Plus className="h-3.5 w-3.5 text-[#C69B51]" />
+                            <span>Add Lab Certificate</span>
                           </button>
                         </div>
                       </div>
@@ -852,7 +1246,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           key={rep.id}
                           className="rounded-xl border border-[#79543D]/18 bg-[#FAF8F4] p-5 flex flex-wrap items-center justify-between gap-4"
                         >
-                          <div>
+                          <div className="min-w-0">
                             <div className="font-mono text-xs text-[#79543D]">
                               Batch {rep.testedBatchNumber} · Report {rep.reportNumber}
                             </div>
@@ -861,10 +1255,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                             </div>
                             <div className="text-xs text-[#241B17]/70 mt-0.5">
                               {rep.testingMethodology} · Test Date: {rep.testDate}
+                              {rep.customDocumentUrl ? ' · Certificate file attached' : ''}
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-2">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <a
+                              href={`/api/lab-reports/${encodeURIComponent(rep.id)}/download`}
+                              download
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-1.5 text-xs font-medium text-[#281A15] hover:bg-[#F3EDE5]"
+                            >
+                              <Download className="h-3.5 w-3.5 text-[#79543D]" />
+                              <span>Download</span>
+                            </a>
+
+                            <label className="inline-flex items-center gap-1.5 rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-1.5 text-xs font-medium text-[#281A15] cursor-pointer hover:bg-[#F3EDE5]">
+                              <Upload className="h-3.5 w-3.5 text-[#79543D]" />
+                              <span>
+                                {replacingCertId === rep.id ? 'Uploading...' : 'Replace File'}
+                              </span>
+                              <input
+                                type="file"
+                                accept=".pdf,.png,.jpg,.jpeg,.webp"
+                                onChange={(e) => void replaceLabCertificateFile(rep, e)}
+                                className="sr-only"
+                              />
+                            </label>
+
                             <select
                               aria-label={`Verification status for ${rep.reportNumber}`}
                               value={rep.verifiedStatus}
@@ -1162,22 +1579,98 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
 const ProductEditorRow: React.FC<{
   product: Product;
+  canDelete: boolean;
+  onUploadImage: (file: File) => Promise<{ url: string } | null>;
   onSave: (patch: Partial<Product>) => void;
-}> = ({ product, onSave }) => {
+  onDelete: () => void;
+}> = ({ product, canDelete, onUploadImage, onSave, onDelete }) => {
+  const [name, setName] = useState(product.name);
+  const [netQuantity, setNetQuantity] = useState(product.netQuantity);
   const [price, setPrice] = useState(String(product.price));
   const [mrp, setMrp] = useState(String(product.mrp));
   const [stock, setStock] = useState(String(product.stock));
   const [batch, setBatch] = useState(product.batchNumber);
+  const [active, setActive] = useState(product.active);
+  const [imageUrl, setImageUrl] = useState(product.customImages?.[0] ?? '');
+  const [uploadingPhoto, setUploadingPhoto] = useState(false);
+
+  const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setUploadingPhoto(true);
+    try {
+      const uploaded = await onUploadImage(file);
+      if (uploaded) {
+        setImageUrl(uploaded.url);
+        onSave({ customImages: [uploaded.url] });
+      }
+    } finally {
+      setUploadingPhoto(false);
+    }
+  };
 
   return (
-    <div className="rounded-xl border border-[#79543D]/18 bg-[#FAF8F4] p-5 flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-      <div className="min-w-0">
-        <div className="font-mono text-xs text-[#79543D]">
-          {product.sku} · {product.netQuantity}
+    <div className="rounded-xl border border-[#79543D]/18 bg-[#FAF8F4] p-5 space-y-4">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex items-center gap-3.5 min-w-0 flex-1">
+          {imageUrl ? (
+            <img
+              src={imageUrl}
+              alt={product.name}
+              className="h-14 w-14 rounded-lg object-cover border border-[#79543D]/20 shrink-0"
+            />
+          ) : (
+            <div className="h-14 w-14 rounded-lg bg-[#F3EDE5] border border-[#79543D]/20 shrink-0" />
+          )}
+          <div className="min-w-0 flex-1 space-y-1.5">
+            <div className="font-mono text-[11px] text-[#79543D]">
+              {product.sku} · {active ? 'Live on Storefront' : 'Hidden'}
+            </div>
+            <input
+              type="text"
+              aria-label="Product name"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              className="w-full max-w-md rounded-lg border border-[#79543D]/25 bg-[#FAF8F4] px-2.5 py-1 font-serif text-lg font-semibold text-[#281A15]"
+            />
+          </div>
         </div>
-        <h4 className="font-serif text-xl font-semibold text-[#281A15]">{product.name}</h4>
+
+        <div className="flex items-center gap-2 shrink-0">
+          <label className="inline-flex items-center gap-1.5 rounded-lg border border-[#79543D]/30 bg-[#F3EDE5] px-3 py-1.5 text-xs font-medium text-[#281A15] cursor-pointer hover:bg-[#EAE1D4]">
+            <ImagePlus className="h-3.5 w-3.5 text-[#79543D]" />
+            <span>{uploadingPhoto ? 'Uploading...' : 'Change Photo'}</span>
+            <input
+              type="file"
+              accept=".png,.jpg,.jpeg,.webp"
+              onChange={(e) => void handlePhotoChange(e)}
+              className="sr-only"
+            />
+          </label>
+          {canDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              aria-label={`Delete ${product.name}`}
+              title="Delete product"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-lg border border-[#79543D]/25 text-[#79543D] hover:bg-red-50 hover:text-red-700 hover:border-red-200 transition-colors"
+            >
+              <Trash2 className="h-4 w-4" />
+            </button>
+          )}
+        </div>
       </div>
-      <div className="flex flex-wrap items-end gap-3 text-xs">
+
+      <div className="flex flex-wrap items-end gap-3 text-xs pt-2 border-t border-[#79543D]/12">
+        <div>
+          <label className="block text-[#79543D] mb-1">Pack Size</label>
+          <input
+            type="text"
+            value={netQuantity}
+            onChange={(e) => setNetQuantity(e.target.value)}
+            className="w-28 rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-2.5 py-1.5"
+          />
+        </div>
         <div>
           <label className="block text-[#79543D] mb-1">Price (₹)</label>
           <input
@@ -1214,17 +1707,30 @@ const ProductEditorRow: React.FC<{
             className="w-36 rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-2.5 py-1.5 font-mono"
           />
         </div>
+        <label className="inline-flex items-center gap-1.5 py-2 font-medium text-[#281A15]">
+          <input
+            type="checkbox"
+            checked={active}
+            onChange={(e) => setActive(e.target.checked)}
+            className="h-3.5 w-3.5 accent-[#281A15]"
+          />
+          <span>Active</span>
+        </label>
         <button
           type="button"
           onClick={() =>
             onSave({
+              name,
+              netQuantity,
               price: Number(price),
               mrp: Number(mrp),
               stock: Number(stock),
               batchNumber: batch,
+              active,
+              customImages: imageUrl ? [imageUrl] : undefined,
             })
           }
-          className="rounded-lg bg-[#281A15] px-4 py-2 text-xs font-semibold text-[#FAF8F4]"
+          className="rounded-lg bg-[#281A15] px-4 py-2 text-xs font-semibold text-[#FAF8F4] hover:bg-[#3A2720] transition-colors"
         >
           Save Changes
         </button>

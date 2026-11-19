@@ -31,6 +31,7 @@ import type {
   OrderPaymentStatus,
   OrderStatus,
   PaymentMethod,
+  Product,
   Promotion,
   ShippingAddress,
 } from './src/types.ts';
@@ -1009,13 +1010,112 @@ ${labContext}`;
     });
   });
 
+  app.post('/api/admin/products', requireAdmin, (req, res) => {
+    const state = storeRepo.getState();
+    const body = req.body as Partial<Product>;
+    if (!body.name?.trim()) {
+      return res.status(400).json({ error: 'Product name is required.' });
+    }
+    const price = Number(body.price);
+    if (!Number.isFinite(price) || price <= 0) {
+      return res.status(400).json({ error: 'Valid selling price is required.' });
+    }
+    const mrp = Math.max(price, Number(body.mrp) || price);
+    const costPerUnit = Math.max(0, Number(body.costPerUnit) || Math.round(price * 0.35));
+    const stock = Math.max(0, Math.floor(Number(body.stock) || 0));
+    const lowStockThreshold = Math.max(0, Math.floor(Number(body.lowStockThreshold) || 10));
+    const netQuantity = body.netQuantity?.trim() || '20 g';
+    const batchNumber = body.batchNumber?.trim() || `HR-BATCH-${new Date().getFullYear()}`;
+    const gstRatePercent = Math.max(0, Math.min(28, Number(body.gstRatePercent ?? 12)));
+    const slugBase = body.name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '');
+    const uniqueSuffix = crypto.randomUUID().slice(0, 6);
+    const id = `${slugBase || 'himrudra-product'}-${uniqueSuffix}`;
+    const sku =
+      body.sku?.trim().toUpperCase() ||
+      `HR-${slugBase.replace(/-/g, '').slice(0, 6).toUpperCase() || 'PRD'}-${uniqueSuffix.slice(0, 4).toUpperCase()}`;
+
+    const customImages = Array.isArray(body.customImages)
+      ? body.customImages.filter((u: unknown): u is string => typeof u === 'string' && u.trim().length > 0)
+      : [];
+
+    const newProduct: Product = {
+      id,
+      slug: id,
+      name: body.name.trim(),
+      subtitle: body.subtitle?.trim() || `Pure by Himalayas · ${netQuantity}`,
+      netQuantity,
+      sku,
+      hsnCode: body.hsnCode?.trim() || '30049011',
+      mrp,
+      price,
+      costPerUnit,
+      stock,
+      lowStockThreshold,
+      batchNumber,
+      gstRatePercent,
+      shortDescription:
+        body.shortDescription?.trim() ||
+        'Carefully crafted Himalayan wellness formulation presented with batch-level lab transparency.',
+      usageGuidance:
+        body.usageGuidance?.trim() ||
+        'Use as directed on the jar label or as advised by a qualified wellness practitioner.',
+      storageInstructions:
+        body.storageInstructions?.trim() ||
+        'Keep tightly sealed in a cool, dry place away from direct sunlight.',
+      shippingNote:
+        body.shippingNote?.trim() ||
+        `Standard pan-India shipping is ₹${state.settings.standardShippingFee} (free on orders ₹${state.settings.freeShippingThreshold}+).`,
+      returnPolicy:
+        body.returnPolicy?.trim() ||
+        'Unopened, tamper-sealed packages are eligible for return or replacement within 7 days of delivery.',
+      specifications: [
+        { label: 'Net Quantity', value: netQuantity },
+        { label: 'SKU', value: sku },
+        { label: 'Active Batch Code', value: batchNumber },
+        { label: 'GST Rate', value: `${gstRatePercent}% (Included)` },
+      ],
+      galleryTypes: ['hero'],
+      customImages: customImages.length
+        ? customImages
+        : ['/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg'],
+      active: body.active !== false,
+    };
+
+    state.products.push(newProduct);
+    storeRepo.commit();
+    res.status(201).json({ product: newProduct, products: state.products });
+  });
+
   app.put('/api/admin/products/:id', requireAdmin, (req, res) => {
     const state = storeRepo.getState();
     const product = state.products.find((p) => p.id === req.params.id);
     if (!product) return res.status(404).json({ error: 'Product not found.' });
 
-    const { price, mrp, costPerUnit, stock, lowStockThreshold, batchNumber, active, shortDescription } =
-      req.body;
+    const {
+      name,
+      subtitle,
+      netQuantity,
+      sku,
+      price,
+      mrp,
+      costPerUnit,
+      stock,
+      lowStockThreshold,
+      batchNumber,
+      active,
+      shortDescription,
+      usageGuidance,
+      storageInstructions,
+      customImages,
+    } = req.body;
+    if (typeof name === 'string' && name.trim()) product.name = name.trim();
+    if (typeof subtitle === 'string' && subtitle.trim()) product.subtitle = subtitle.trim();
+    if (typeof netQuantity === 'string' && netQuantity.trim()) product.netQuantity = netQuantity.trim();
+    if (typeof sku === 'string' && sku.trim()) product.sku = sku.trim().toUpperCase();
     if (typeof price === 'number' && price > 0) product.price = price;
     if (typeof mrp === 'number' && mrp > 0) product.mrp = mrp;
     if (typeof costPerUnit === 'number' && costPerUnit >= 0) product.costPerUnit = costPerUnit;
@@ -1030,9 +1130,34 @@ ${labContext}`;
     if (typeof shortDescription === 'string' && shortDescription.trim()) {
       product.shortDescription = shortDescription.trim();
     }
+    if (typeof usageGuidance === 'string' && usageGuidance.trim()) {
+      product.usageGuidance = usageGuidance.trim();
+    }
+    if (typeof storageInstructions === 'string' && storageInstructions.trim()) {
+      product.storageInstructions = storageInstructions.trim();
+    }
+    if (Array.isArray(customImages) && customImages.length > 0) {
+      product.customImages = customImages.filter(
+        (u: unknown): u is string => typeof u === 'string' && u.trim().length > 0
+      );
+    }
 
     storeRepo.commit();
     res.json({ product });
+  });
+
+  app.delete('/api/admin/products/:id', requireAdmin, (req, res) => {
+    const state = storeRepo.getState();
+    if (state.products.length <= 1) {
+      return res.status(400).json({ error: 'At least one product must remain in the catalog.' });
+    }
+    const before = state.products.length;
+    state.products = state.products.filter((p) => p.id !== req.params.id);
+    if (state.products.length === before) {
+      return res.status(404).json({ error: 'Product not found.' });
+    }
+    storeRepo.commit();
+    res.json({ ok: true, products: state.products });
   });
 
   app.put('/api/admin/settings', requireAdmin, (req, res) => {
