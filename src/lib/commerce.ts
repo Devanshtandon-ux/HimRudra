@@ -57,6 +57,34 @@ export function getCountdownParts(targetIso: string, nowMs: number = Date.now())
   return { expired: false, days, hours, minutes, seconds };
 }
 
+export interface ParsedChargeInput {
+  valid: boolean;
+  value: number;
+  isFreeNA: boolean;
+}
+
+export function parseShippingOrCodInput(raw: string): ParsedChargeInput {
+  const trimmed = raw.trim();
+  if (!trimmed) {
+    return { valid: true, value: 0, isFreeNA: true };
+  }
+  const lowered = trimmed.toLowerCase();
+  if (lowered === 'n/a' || lowered === 'na' || lowered === 'free' || lowered === 'none') {
+    return { valid: true, value: 0, isFreeNA: true };
+  }
+  const cleaned = trimmed.replace(/[₹,\s]/g, '');
+  const num = Number(cleaned);
+  if (!Number.isFinite(num) || num < 0) {
+    return { valid: false, value: 0, isFreeNA: false };
+  }
+  const rounded = Math.round(num);
+  return { valid: true, value: rounded, isFreeNA: rounded === 0 };
+}
+
+export function formatChargeForEditor(amount: number): string {
+  return !Number.isFinite(amount) || amount <= 0 ? 'N/A' : String(Math.round(amount));
+}
+
 export interface CartCalculation {
   itemCount: number;
   mrpTotal: number;
@@ -73,6 +101,7 @@ export interface CartCalculation {
   appliedCoupon?: Coupon;
   appliedPromotion?: Promotion;
   freeShippingByPromo: boolean;
+  freeShippingByNA: boolean;
 }
 
 export function calculateCartTotals(
@@ -167,31 +196,39 @@ export function calculateCartTotals(
   );
 
   const hasFreeThreshold = settings.freeShippingThreshold > 0;
+  const standardFee = Math.max(0, Number(settings.standardShippingFee) || 0);
+  const freeShippingByNA = standardFee === 0;
   let shippingFee = 0;
   let freeShippingByPromo = false;
   if (itemCount > 0) {
-    if (promoGrantsFreeShipping) {
+    if (shippingSpeed === 'express') {
+      shippingFee = promoGrantsFreeShipping ? 0 : Math.max(0, Number(settings.expressShippingFee) || 0);
+      freeShippingByPromo = promoGrantsFreeShipping;
+    } else if (freeShippingByNA) {
+      shippingFee = 0;
+      freeShippingByPromo = false;
+    } else if (promoGrantsFreeShipping) {
       shippingFee = 0;
       freeShippingByPromo = true;
-    } else if (shippingSpeed === 'express') {
-      shippingFee = settings.expressShippingFee;
     } else {
       shippingFee =
         hasFreeThreshold && discountedSubtotal >= settings.freeShippingThreshold
           ? 0
-          : settings.standardShippingFee;
+          : standardFee;
     }
   }
 
   const freeShippingRemaining =
     itemCount > 0 &&
+    !freeShippingByNA &&
     !promoGrantsFreeShipping &&
     hasFreeThreshold &&
     discountedSubtotal < settings.freeShippingThreshold
       ? settings.freeShippingThreshold - discountedSubtotal
       : 0;
 
-  const codFee = itemCount > 0 && paymentMethod === 'COD' ? settings.codFee : 0;
+  const configuredCodFee = Math.max(0, Number(settings.codFee) || 0);
+  const codFee = itemCount > 0 && paymentMethod === 'COD' ? configuredCodFee : 0;
 
   const grandTotal = discountedSubtotal + shippingFee + codFee;
 
@@ -217,6 +254,7 @@ export function calculateCartTotals(
     appliedCoupon,
     appliedPromotion,
     freeShippingByPromo,
+    freeShippingByNA,
   };
 }
 

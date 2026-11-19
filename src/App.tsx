@@ -70,7 +70,16 @@ export default function App() {
 
   const loadCurrentUser = async () => {
     try {
-      const res = await fetch('/api/auth/me');
+      let token: string | null = null;
+      try {
+        token = window.sessionStorage.getItem('himrudra_session_token');
+      } catch {
+        // ignore storage errors
+      }
+      const res = await fetch('/api/auth/me', {
+        credentials: 'include',
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
       if (res.ok) {
         const data = await res.json();
         setUser(data.user ?? null);
@@ -427,9 +436,14 @@ export default function App() {
           onClose={() => setAdminOpen(false)}
           onLogout={async () => {
             try {
-              await fetch('/api/auth/logout', { method: 'POST' });
+              await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
             } catch {
               // ignore network errors during logout
+            }
+            try {
+              window.sessionStorage.removeItem('himrudra_session_token');
+            } catch {
+              // ignore storage errors
             }
             await signOutFirebase();
             setUser(null);

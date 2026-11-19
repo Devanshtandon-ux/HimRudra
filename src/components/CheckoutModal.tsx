@@ -424,7 +424,15 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                         ['Card', 'Debit / Credit Card', CreditCard],
                         ['NetBanking', 'Net Banking', Building2],
                         ...(settings.codEnabled
-                          ? [['COD', `Cash on Delivery (+${formatINR(settings.codFee)})`, Truck]]
+                          ? [
+                              [
+                                'COD',
+                                settings.codFee > 0
+                                  ? `Cash on Delivery (+${formatINR(settings.codFee)})`
+                                  : 'Cash on Delivery (FREE)',
+                                Truck,
+                              ],
+                            ]
                           : []),
                       ] as Array<[PaymentMethod, string, React.ComponentType<{ className?: string }>]>
                     ).map(([method, label, Icon]) => (
@@ -447,6 +455,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
                 {/* Order Total Card */}
                 <div className="rounded-xl border border-[#79543D]/20 bg-[#F3EDE5]/75 p-4 space-y-2 text-xs tabular-nums">
+                  {calc.shippingFee === 0 && (
+                    <div className="rounded-lg border border-emerald-700/25 bg-emerald-50/90 px-3 py-2 text-[11px] font-semibold text-emerald-900">
+                      Congratulations! You got Free Delivery!
+                    </div>
+                  )}
                   <div className="flex justify-between">
                     <span>Items ({calc.itemCount})</span>
                     <span className="font-mono">{formatINR(calc.subtotal)}</span>
@@ -459,18 +472,26 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                   )}
                   <div className="flex justify-between gap-2">
                     <span>Shipping ({shippingSpeed})</span>
-                    <span className="font-mono text-right text-[#79543D] font-medium">
-                      {calc.freeShippingByPromo
+                    <span className="font-mono text-right text-emerald-800 font-semibold">
+                      {calc.freeShippingByNA
+                        ? 'FREE Shipping'
+                        : calc.freeShippingByPromo
                         ? 'FREE — Limited-Time Offer'
                         : calc.shippingFee === 0
-                        ? 'Complimentary'
+                        ? 'FREE Shipping'
                         : formatINR(calc.shippingFee)}
                     </span>
                   </div>
-                  {calc.codFee > 0 && (
+                  {paymentMethod === 'COD' && (
                     <div className="flex justify-between">
                       <span>COD Handling Fee</span>
-                      <span className="font-mono">{formatINR(calc.codFee)}</span>
+                      <span
+                        className={`font-mono ${
+                          calc.codFee === 0 ? 'font-semibold text-emerald-800' : ''
+                        }`}
+                      >
+                        {calc.codFee > 0 ? formatINR(calc.codFee) : 'FREE'}
+                      </span>
                     </div>
                   )}
                   <div className="flex justify-between text-[#79543D] text-[11px]">

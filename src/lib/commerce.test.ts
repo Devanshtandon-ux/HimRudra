@@ -4,11 +4,13 @@ import {
   FREE_SHIPPING_PROMO_END_ISO,
   calculateCartTotals,
   calculateProfitMetrics,
+  formatChargeForEditor,
   getActiveFreeShippingPromotion,
   getCountdownParts,
   getOrderStageIndex,
   isAuthorizedAdmin,
   normalizeLegacyOrderStatus,
+  parseShippingOrCodInput,
   validateCheckoutForm,
 } from './commerce';
 import type { Coupon, Expense, Order, Product, Promotion, StoreSettings } from '../types';
@@ -482,5 +484,42 @@ test('launch offer grants ₹0 free delivery until expiry, then automatically ch
   assert.equal(afterOfferCod.codFee, 100);
   assert.equal(afterOfferCod.grandTotal, 799 + 100 + 100);
 });
+
+test('parseShippingOrCodInput accepts N/A or numeric charges and N/A triggers free delivery & free COD', () => {
+  assert.deepEqual(parseShippingOrCodInput('N/A'), { valid: true, value: 0, isFreeNA: true });
+  assert.deepEqual(parseShippingOrCodInput('n/a'), { valid: true, value: 0, isFreeNA: true });
+  assert.deepEqual(parseShippingOrCodInput('Free'), { valid: true, value: 0, isFreeNA: true });
+  assert.deepEqual(parseShippingOrCodInput(''), { valid: true, value: 0, isFreeNA: true });
+  assert.deepEqual(parseShippingOrCodInput('₹100'), { valid: true, value: 100, isFreeNA: false });
+  assert.deepEqual(parseShippingOrCodInput('150'), { valid: true, value: 150, isFreeNA: false });
+  assert.equal(parseShippingOrCodInput('-10').valid, false);
+  assert.equal(parseShippingOrCodInput('abc').valid, false);
+
+  assert.equal(formatChargeForEditor(0), 'N/A');
+  assert.equal(formatChargeForEditor(100), '100');
+
+  const naSettings: StoreSettings = {
+    ...sampleSettings,
+    standardShippingFee: 0,
+    freeShippingThreshold: 0,
+    codFee: 0,
+  };
+
+  const naCodOrder = calculateCartTotals(
+    [{ productId: 'himrudra-shilajit-20g', quantity: 1 }],
+    [sampleProduct],
+    naSettings,
+    {
+      shippingSpeed: 'standard',
+      paymentMethod: 'COD',
+      promotions: [],
+    }
+  );
+  assert.equal(naCodOrder.shippingFee, 0);
+  assert.equal(naCodOrder.freeShippingByNA, true);
+  assert.equal(naCodOrder.codFee, 0);
+  assert.equal(naCodOrder.grandTotal, 799);
+});
+
 
 

@@ -12,7 +12,11 @@ import {
   X,
 } from 'lucide-react';
 import { ORDER_STAGES, formatINR, getOrderStageIndex } from '../lib/commerce';
-import { signInWithGooglePopup, signOutFirebase } from '../lib/firebaseAuth';
+import {
+  getFirebaseAuthErrorMessage,
+  signInWithGooglePopup,
+  signOutFirebase,
+} from '../lib/firebaseAuth';
 import type { Order, Product, User } from '../types';
 
 interface AccountDashboardModalProps {
@@ -176,13 +180,26 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
       const { idToken } = await signInWithGooglePopup();
       const res = await fetch('/api/auth/google', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ idToken }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setAuthError(data.error || 'Google sign-in could not be completed.');
+      let data: { user?: User; error?: string; sessionToken?: string } = {};
+      try {
+        data = (await res.json()) as { user?: User; error?: string; sessionToken?: string };
+      } catch {
+        // Non-JSON response
+      }
+      if (!res.ok || !data.user) {
+        setAuthError(data.error || `Google sign-in failed on server (HTTP ${res.status}).`);
         return;
+      }
+      if (data.sessionToken) {
+        try {
+          window.sessionStorage.setItem('himrudra_session_token', data.sessionToken);
+        } catch {
+          // ignore storage errors
+        }
       }
       onAuthChange(data.user);
       if (data.user.role === 'admin') {
@@ -193,24 +210,20 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
         setTab('orders');
       }
     } catch (err: unknown) {
-      const code =
-        typeof err === 'object' && err !== null && 'code' in err
-          ? String((err as { code?: unknown }).code)
-          : '';
-      if (code === 'auth/popup-closed-by-user' || code === 'auth/cancelled-popup-request') {
-        setAuthError('Google sign-in popup was closed before completing.');
-      } else if (code === 'auth/popup-blocked') {
-        setAuthError('Please allow popups in your browser to continue with Google.');
-      } else {
-        setAuthError('Unable to sign in with Google right now. Please try again.');
-      }
+      console.error('Google Sign-In error:', err);
+      setAuthError(getFirebaseAuthErrorMessage(err));
     } finally {
       setGoogleBusy(false);
     }
   };
 
   const handleLogout = async () => {
-    await fetch('/api/auth/logout', { method: 'POST' });
+    await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' });
+    try {
+      window.sessionStorage.removeItem('himrudra_session_token');
+    } catch {
+      // ignore storage errors
+    }
     await signOutFirebase();
     onAuthChange(null);
     setMyOrders([]);
@@ -464,7 +477,13 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
                       d="M24 48c6.48 0 11.93-2.13 15.89-5.81l-7.73-6c-2.15 1.45-4.92 2.3-8.16 2.3-6.26 0-11.57-4.22-13.47-9.91l-7.98 6.19C6.51 42.62 14.62 48 24 48z"
                     />
                   </svg>
-                  <span>{googleBusy ? 'Connecting to Google...' : 'Continue with Google'}</span>
+                  <span>
+                    {googleBusy
+                      ? 'Connecting to Google...'
+                      : authMode === 'register'
+                      ? 'Sign up with Google'
+                      : 'Continue with Google'}
+                  </span>
                 </button>
 
                 <div className="relative flex items-center py-1">

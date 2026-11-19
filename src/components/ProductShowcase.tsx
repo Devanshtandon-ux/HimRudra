@@ -75,11 +75,13 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
     Date.now() + serverOffsetMs
   );
   const lineSubtotal = selectedProduct.price * quantity;
-  const estShipping = activeFreeShipPromo
-    ? 0
-    : settings.freeShippingThreshold > 0 && lineSubtotal >= settings.freeShippingThreshold
-    ? 0
-    : settings.standardShippingFee;
+  const isFreeByNA = settings.standardShippingFee <= 0;
+  const estShipping =
+    isFreeByNA || activeFreeShipPromo
+      ? 0
+      : settings.freeShippingThreshold > 0 && lineSubtotal >= settings.freeShippingThreshold
+      ? 0
+      : settings.standardShippingFee;
   const estTotal = lineSubtotal + estShipping;
 
   useEffect(() => {
@@ -133,8 +135,10 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
       return;
     }
     const isMetro = ['1', '2', '4', '5', '6'].includes(clean[0]);
-    const shipText = activeFreeShipPromo
-      ? `FREE — Limited-Time Offer (₹${settings.standardShippingFee} after offer ends)`
+    const shipText = isFreeByNA
+      ? 'FREE SHIPPING — Congratulations! You got Free Delivery!'
+      : activeFreeShipPromo
+      ? `FREE — Congratulations! You got Free Delivery! (₹${settings.standardShippingFee} after offer ends)`
       : settings.freeShippingThreshold > 0
       ? `₹${settings.standardShippingFee}; free on ₹${settings.freeShippingThreshold}+`
       : `₹${settings.standardShippingFee} standard delivery`;
@@ -272,9 +276,14 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
               </div>
               <p className="text-xs text-[#241B17]/65 mt-1">
                 Inclusive of {selectedProduct.gstRatePercent}% GST ·{' '}
-                {activeFreeShipPromo ? (
-                  <span className="font-semibold text-[#79543D]">
-                    Shipping: FREE — Limited-Time Offer ({formatINR(settings.standardShippingFee)} after offer ends)
+                {isFreeByNA ? (
+                  <span className="font-semibold text-emerald-800">
+                    Free Shipping — Congratulations! You got Free Delivery!
+                  </span>
+                ) : activeFreeShipPromo ? (
+                  <span className="font-semibold text-emerald-800">
+                    Free Shipping — Congratulations! You got Free Delivery! (
+                    {formatINR(settings.standardShippingFee)} after offer ends)
                   </span>
                 ) : settings.freeShippingThreshold > 0 ? (
                   <>

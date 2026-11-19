@@ -26,6 +26,7 @@ import { formatINR, type ProfitSummary } from '../lib/commerce';
 import { AdminAnalyticsSection } from './admin/AdminAnalyticsSection';
 import { AdminOrdersSection } from './admin/AdminOrdersSection';
 import { AdminPromotionsSection } from './admin/AdminPromotionsSection';
+import { ShippingCodQuickCard } from './admin/ShippingCodQuickCard';
 import type {
   AdminNotification,
   CmsSection,
@@ -887,18 +888,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                 {/* 3. OFFERS & PROMOTIONS CMS */}
                 {section === 'promotions' && (
-                  <AdminPromotionsSection
-                    promotions={data.promotions ?? []}
-                    serverNow={data.serverNow}
-                    onCreatePromotion={createPromotion}
-                    onUpdatePromotion={updatePromotion}
-                    onDeletePromotion={deletePromotion}
-                  />
+                  <div className="space-y-5">
+                    <ShippingCodQuickCard
+                      settings={data.settings}
+                      onSave={saveSettings}
+                    />
+                    <AdminPromotionsSection
+                      promotions={data.promotions ?? []}
+                      serverNow={data.serverNow}
+                      onCreatePromotion={createPromotion}
+                      onUpdatePromotion={updatePromotion}
+                      onDeletePromotion={deletePromotion}
+                    />
+                  </div>
                 )}
 
                 {/* 4. PRODUCTS & INVENTORY */}
                 {section === 'products' && (
                   <div className="space-y-5">
+                    <ShippingCodQuickCard
+                      settings={data.settings}
+                      onSave={saveSettings}
+                    />
                     <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#79543D]/20 bg-[#F3EDE5]/60 p-4 sm:p-5">
                       <div>
                         <h4 className="font-serif text-xl font-semibold text-[#281A15]">
@@ -1844,6 +1855,18 @@ const SettingsEditor: React.FC<{
   const [emailAlerts, setEmailAlerts] = useState(settings.emailNotificationsEnabled !== false);
   const [seoTitle, setSeoTitle] = useState(settings.seoTitle);
   const [seoDescription, setSeoDescription] = useState(settings.seoDescription);
+
+  useEffect(() => {
+    setStdFee(String(settings.standardShippingFee));
+    setExpFee(String(settings.expressShippingFee));
+    setCodFee(String(settings.codFee));
+    setFreeThreshold(String(settings.freeShippingThreshold));
+  }, [
+    settings.standardShippingFee,
+    settings.expressShippingFee,
+    settings.codFee,
+    settings.freeShippingThreshold,
+  ]);
 
   return (
     <div className="rounded-xl border border-[#79543D]/18 bg-[#FAF8F4] p-5 space-y-4">

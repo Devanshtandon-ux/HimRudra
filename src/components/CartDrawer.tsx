@@ -129,11 +129,22 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
           ) : (
             <>
               {/* Free Shipping Progress Note */}
-              <div className="rounded-xl bg-[#F3EDE5] border border-[#C69B51]/35 px-4 py-3 text-xs text-[#281A15]">
-                {calc.freeShippingByPromo ? (
+              <div
+                className={`rounded-xl border px-4 py-3 text-xs ${
+                  calc.freeShippingByNA || calc.freeShippingByPromo
+                    ? 'bg-emerald-50/80 border-emerald-700/25 text-emerald-950'
+                    : 'bg-[#F3EDE5] border-[#C69B51]/35 text-[#281A15]'
+                }`}
+              >
+                {calc.freeShippingByNA ? (
                   <span>
-                    <strong>Shipping: FREE — Limited-Time Offer</strong> applied to your bag
-                    ({formatINR(settings.standardShippingFee)} delivery after offer ends).
+                    <strong>Free Shipping</strong> — Congratulations! You got Free Delivery!
+                  </span>
+                ) : calc.freeShippingByPromo ? (
+                  <span>
+                    <strong>Congratulations! You got Free Delivery!</strong> Limited-Time Free
+                    Shipping applied ({formatINR(settings.standardShippingFee)} delivery after offer
+                    ends).
                   </span>
                 ) : calc.freeShippingRemaining > 0 ? (
                   <span>
@@ -142,7 +153,8 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                   </span>
                 ) : settings.freeShippingThreshold > 0 && calc.shippingFee === 0 ? (
                   <span>
-                    Your order qualifies for <strong>complimentary standard shipping</strong>.
+                    <strong>Congratulations! You got Free Delivery!</strong> Your order qualifies
+                    for complimentary standard shipping.
                   </span>
                 ) : (
                   <span>
@@ -240,7 +252,9 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                   >
                     <div className="font-semibold text-[#281A15]">Standard (3–5d)</div>
                     <div className="text-[#79543D] mt-0.5 tabular-nums">
-                      {calc.freeShippingByPromo
+                      {calc.freeShippingByNA
+                        ? 'FREE Shipping'
+                        : calc.freeShippingByPromo
                         ? 'FREE — Limited-Time'
                         : settings.freeShippingThreshold > 0 &&
                           calc.subtotal - calc.couponDiscount >= settings.freeShippingThreshold

@@ -20,6 +20,7 @@ import {
   verifyPassword,
   type StoredUser,
 } from './server/store.ts';
+import { verifyFirebaseIdToken } from './server/firebaseVerify.ts';
 import type {
   AdminNotification,
   BannerTheme,
@@ -95,7 +96,12 @@ interface AuthRequest extends Request {
 
 function attachUser(req: AuthRequest, _res: Response, next: NextFunction) {
   const cookies = parseCookies(req.headers.cookie);
-  const rawToken = cookies[SESSION_COOKIE];
+  const authHeader = req.headers.authorization;
+  const bearerToken =
+    typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+      ? authHeader.slice(7).trim()
+      : undefined;
+  const rawToken = cookies[SESSION_COOKIE] || bearerToken;
   if (rawToken) {
     const session = verifySession(rawToken);
     if (session) {
@@ -128,7 +134,7 @@ function isHttpsRequest(req: Request): boolean {
   return Boolean(req.secure || proto?.includes('https') || process.env.NODE_ENV === 'production');
 }
 
-function setSessionCookie(req: Request, res: Response, user: StoredUser) {
+function setSessionCookie(req: Request, res: Response, user: StoredUser): string {
   const token = signSession({
     userId: user.id,
     role: user.role,
@@ -142,6 +148,7 @@ function setSessionCookie(req: Request, res: Response, user: StoredUser) {
     maxAge: 1000 * 60 * 60 * 24 * 7,
     path: '/',
   });
+  return token;
 }
 
 function escapeHtml(str: string): string {
@@ -252,55 +259,9 @@ export function createApiApp(): express.Express {
       return res.status(400).json({ error: 'Valid Google sign-in token is required.' });
     }
 
-    let firebaseApiKey = process.env.FIREBASE_API_KEY?.trim() || '';
-    if (!firebaseApiKey) {
-      try {
-        const cfgPath = path.resolve(process.cwd(), 'firebase-applet-config.json');
-        if (fs.existsSync(cfgPath)) {
-          const parsedCfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8')) as {
-            apiKey?: string;
-          };
-          firebaseApiKey = parsedCfg.apiKey?.trim() || '';
-        }
-      } catch (err) {
-        console.error('Failed to read firebase-applet-config.json:', err);
-      }
-    }
-
-    if (!firebaseApiKey) {
-      return res.status(503).json({
-        error: 'Google Sign-In is not configured on the server.',
-      });
-    }
-
     try {
-      const lookupRes = await fetch(
-        `https://identitytoolkit.googleapis.com/v1/accounts:lookup?key=${encodeURIComponent(
-          firebaseApiKey
-        )}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ idToken: idToken.trim() }),
-        }
-      );
-
-      if (!lookupRes.ok) {
-        return res.status(401).json({
-          error: 'Could not verify Google account credentials. Please try again.',
-        });
-      }
-
-      const lookupJson = (await lookupRes.json()) as {
-        users?: Array<{
-          localId?: string;
-          email?: string;
-          displayName?: string;
-          emailVerified?: boolean;
-        }>;
-      };
-      const fbUser = lookupJson.users?.[0];
-      const normalizedEmail = fbUser?.email?.trim().toLowerCase();
+      const fbUser = await verifyFirebaseIdToken(idToken);
+      const normalizedEmail = fbUser.email.trim().toLowerCase();
 
       if (!normalizedEmail) {
         return res.status(401).json({
@@ -311,10 +272,12 @@ export function createApiApp(): express.Express {
       const state = storeRepo.getState();
       let user = state.users.find((u) => u.email.toLowerCase() === normalizedEmail);
       const isOwner = normalizedEmail === getAdminOwnerEmail();
+      let isNewAccount = false;
 
       if (!user) {
+        isNewAccount = true;
         const fallbackName =
-          fbUser?.displayName?.trim() ||
+          fbUser.displayName?.trim() ||
           normalizedEmail
             .split('@')[0]
             .replace(/[._-]+/g, ' ')
@@ -337,13 +300,19 @@ export function createApiApp(): express.Express {
         storeRepo.commit();
       }
 
-      setSessionCookie(req, res, user);
-      return res.json({ user: storeRepo.sanitizeUser(user) });
+      const sessionToken = setSessionCookie(req, res, user);
+      return res.json({
+        user: storeRepo.sanitizeUser(user),
+        isNewAccount,
+        sessionToken,
+      });
     } catch (err) {
       console.error('Google sign-in verification error:', err);
-      return res.status(500).json({
-        error: 'Unable to complete Google sign-in right now. Please try again.',
-      });
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to complete Google sign-in right now. Please try again.';
+      return res.status(401).json({ error: message });
     }
   });
 
@@ -1266,7 +1235,35 @@ ${labContext}`;
 
   app.put('/api/admin/settings', requireAdmin, (req, res) => {
     const state = storeRepo.getState();
-    Object.assign(state.settings, req.body);
+    const patch = { ...(req.body as Record<string, unknown>) };
+    const nonNegativeIntKeys = [
+      'standardShippingFee',
+      'expressShippingFee',
+      'freeShippingThreshold',
+      'codFee',
+      'defaultShippingCostPerOrder',
+    ] as const;
+    for (const key of nonNegativeIntKeys) {
+      if (key in patch) {
+        const raw = patch[key];
+        if (
+          raw === null ||
+          raw === '' ||
+          (typeof raw === 'string' &&
+            ['n/a', 'na', 'free', 'none'].includes(raw.trim().toLowerCase()))
+        ) {
+          patch[key] = 0;
+        } else {
+          const parsed = Number(raw);
+          if (Number.isFinite(parsed) && parsed >= 0) {
+            patch[key] = Math.round(parsed);
+          } else {
+            delete patch[key];
+          }
+        }
+      }
+    }
+    Object.assign(state.settings, patch);
     storeRepo.commit();
     res.json({ settings: state.settings });
   });
