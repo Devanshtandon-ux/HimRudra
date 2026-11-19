@@ -368,13 +368,13 @@ test('calculateProfitMetrics excludes cancelled/refunded orders from gross reven
 });
 
 test('isAuthorizedAdmin grants access strictly to the owner email with admin role', () => {
-  const owner = 'atyansharma04488@gmail.com';
+  const owner = 'himrudraofficial@gmail.com';
   assert.equal(
-    isAuthorizedAdmin({ email: 'AtyanSharma04488@gmail.com', role: 'admin' }, owner),
+    isAuthorizedAdmin({ email: 'HimRudraOfficial@gmail.com', role: 'admin' }, owner),
     true
   );
   assert.equal(
-    isAuthorizedAdmin({ email: 'admin@himrudra.in', role: 'admin' }, owner),
+    isAuthorizedAdmin({ email: 'atyansharma04488@gmail.com', role: 'admin' }, owner),
     false
   );
   assert.equal(

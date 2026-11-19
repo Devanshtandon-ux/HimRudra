@@ -65,13 +65,13 @@ export function verifyPassword(password: string, storedHash: string): boolean {
 }
 
 export function getAdminOwnerEmail(): string {
-  return (process.env.ADMIN_EMAIL || 'atyansharma04488@gmail.com').trim().toLowerCase();
+  return (process.env.ADMIN_EMAIL || 'himrudraofficial@gmail.com').trim().toLowerCase();
 }
 
 function getInitialAdminPassword(): string {
   return process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim()
     ? process.env.ADMIN_PASSWORD.trim()
-    : 'HimRudraOwner#2026';
+    : 'Rahulmewara@himrudra123';
 }
 
 const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
@@ -87,9 +87,9 @@ function createSeedState(): DatabaseState {
   const users: StoredUser[] = [
     {
       id: 'usr-owner-1',
-      name: 'Atyan Sharma (Store Owner)',
+      name: 'Rahul Mewara (Store Owner)',
       email: ownerEmail,
-      phone: '9810011223',
+      phone: '9549572457',
       role: 'admin',
       passwordHash: hashPassword(getInitialAdminPassword()),
       createdAt: '2026-08-01T08:00:00.000Z',
@@ -585,9 +585,12 @@ class StoreRepository {
             }
           }
           const ownerEmail = getAdminOwnerEmail();
-          const filteredUsers = (parsed.users ?? []).filter(
-            (u) => u.email.toLowerCase() !== 'admin@himrudra.in'
-          );
+          const filteredUsers = (parsed.users ?? []).filter((u) => {
+            const lower = u.email.toLowerCase();
+            if (lower === 'admin@himrudra.in') return false;
+            if (lower === 'atyansharma04488@gmail.com' && ownerEmail !== lower) return false;
+            return true;
+          });
           if (filteredUsers.length !== (parsed.users ?? []).length) {
             parsed.users = filteredUsers;
             mutated = true;
@@ -602,9 +605,9 @@ class StoreRepository {
           if (!existingOwner) {
             parsed.users.unshift({
               id: 'usr-owner-1',
-              name: 'Atyan Sharma (Store Owner)',
+              name: 'Rahul Mewara (Store Owner)',
               email: ownerEmail,
-              phone: '9810011223',
+              phone: '9549572457',
               role: 'admin',
               passwordHash: hashPassword(getInitialAdminPassword()),
               createdAt: '2026-08-01T08:00:00.000Z',

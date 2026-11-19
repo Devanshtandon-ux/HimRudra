@@ -2,11 +2,11 @@
   "users": [
     {
       "id": "usr-owner-1",
-      "name": "Atyan Sharma (Store Owner)",
-      "email": "atyansharma04488@gmail.com",
-      "phone": "9810011223",
+      "name": "Rahul Mewara (Store Owner)",
+      "email": "himrudraofficial@gmail.com",
+      "phone": "9549572457",
       "role": "admin",
-      "passwordHash": "3acf681896dd87d579ba3be23000db40:1a05baee7419d8cd4a85915d0571eb0db96659b00a336c6a07c119948d147e44ec4602584cefccb56a24244ce6c76d6766837f45f87d16e6c7c2d1d818e2b16e",
+      "passwordHash": "b1d173bea7a93cae1c13cc6471511159:aae99e97d2854ccee1d7d9f2cb1aafa91e21847fc0196f3f5a2492e19b29ab4c70ac64a8d83ee45caa5ba3155030d1084ae523edf0e7d8540d48ec365c23e91e",
       "createdAt": "2026-08-01T08:00:00.000Z",
       "wishlistProductIds": []
     }
