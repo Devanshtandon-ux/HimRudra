@@ -1,0 +1,8 @@
+{
+  "name": "Remix HimRudra — Pure by Himalayas | Himalayan Shilajit Resin",
+  "description": "Born in the Himalayas. Crafted for Your Ritual. Shop HimRudra Himalayan Shilajit Resin (20 g) with verified batch lab transparency, tracked delivery, and ritual support.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -1,0 +1,952 @@
+import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import type {
+  AdminNotification,
+  CmsSection,
+  ContactInquiry,
+  Coupon,
+  Expense,
+  LabReport,
+  Order,
+  Product,
+  Promotion,
+  StoreSettings,
+  User,
+} from '../src/types.ts';
+import {
+  FREE_SHIPPING_PROMO_END_ISO,
+  normalizeLegacyOrderStatus,
+} from '../src/lib/commerce.ts';
+
+export interface StoredUser extends User {
+  passwordHash: string;
+}
+
+export interface PaymentIntentRecord {
+  razorpayOrderId: string;
+  amountPaise: number;
+  verified: boolean;
+  paymentId?: string;
+  signatureVerified: boolean;
+  method: string;
+  createdAt: string;
+}
+
+export interface DatabaseState {
+  users: StoredUser[];
+  products: Product[];
+  settings: StoreSettings;
+  coupons: Coupon[];
+  promotions: Promotion[];
+  orders: Order[];
+  labReports: LabReport[];
+  cmsSections: CmsSection[];
+  expenses: Expense[];
+  inquiries: ContactInquiry[];
+  adminNotifications: AdminNotification[];
+  paymentIntents: Record<string, PaymentIntentRecord>;
+}
+
+export function hashPassword(password: string): string {
+  const salt = crypto.randomBytes(16).toString('hex');
+  const hash = crypto.scryptSync(password, salt, 64).toString('hex');
+  return `${salt}:${hash}`;
+}
+
+export function verifyPassword(password: string, storedHash: string): boolean {
+  const [salt, key] = storedHash.split(':');
+  if (!salt || !key) return false;
+  const derived = crypto.scryptSync(password, salt, 64);
+  const keyBuf = Buffer.from(key, 'hex');
+  if (derived.length !== keyBuf.length) return false;
+  return crypto.timingSafeEqual(derived, keyBuf);
+}
+
+export function getAdminOwnerEmail(): string {
+  return (process.env.ADMIN_EMAIL || 'atyansharma04488@gmail.com').trim().toLowerCase();
+}
+
+function getInitialAdminPassword(): string {
+  return process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim()
+    ? process.env.ADMIN_PASSWORD.trim()
+    : 'HimRudraOwner#2026';
+}
+
+const DATA_DIR = path.resolve(process.cwd(), 'data');
+const DB_FILE = path.join(DATA_DIR, 'himrudra-db.json');
+
+function createSeedState(): DatabaseState {
+  const now = new Date().toISOString();
+  const ownerEmail = getAdminOwnerEmail();
+
+  const users: StoredUser[] = [
+    {
+      id: 'usr-owner-1',
+      name: 'Atyan Sharma (Store Owner)',
+      email: ownerEmail,
+      phone: '9810011223',
+      role: 'admin',
+      passwordHash: hashPassword(getInitialAdminPassword()),
+      createdAt: '2026-08-01T08:00:00.000Z',
+      wishlistProductIds: [],
+    },
+    {
+      id: 'usr-cust-1',
+      name: 'Aarav Mehta',
+      email: 'aarav.mehta@example.in',
+      phone: '9876543210',
+      role: 'customer',
+      passwordHash: hashPassword('Ritual@2026'),
+      createdAt: '2026-09-12T10:30:00.000Z',
+      wishlistProductIds: ['himrudra-shilajit-20g'],
+      defaultAddress: {
+        fullName: 'Aarav Mehta',
+        phone: '9876543210',
+        email: 'aarav.mehta@example.in',
+        line1: '42 Rajpur Road, Jakhan',
+        line2: 'Near Silver City Mall',
+        city: 'Dehradun',
+        state: 'Uttarakhand',
+        pincode: '248001',
+      },
+    },
+  ];
+
+  const products: Product[] = [
+    {
+      id: 'himrudra-shilajit-20g',
+      slug: 'himalayan-shilajit-resin-20g',
+      name: 'HimRudra Himalayan Shilajit Resin',
+      subtitle: 'Pure by Himalayas · 20 g Glass Apothecary Jar',
+      netQuantity: '20 g',
+      sku: 'HR-SHJ-20G',
+      hsnCode: '30049011',
+      mrp: 1299,
+      price: 799,
+      costPerUnit: 295,
+      stock: 48,
+      lowStockThreshold: 10,
+      batchNumber: 'HR-SHJ-2026-B04',
+      gstRatePercent: 12,
+      shortDescription:
+        'HimRudra Himalayan Shilajit Resin brings a traditional Himalayan wellness ingredient into a modern, premium experience. Presented in a 20 g jar, this resin is designed for customers who value thoughtful sourcing, clear product information and an uncomplicated daily routine.',
+      usageGuidance:
+        'Take a pea-sized portion (approximately 250–300 mg) using the included brass spoon. Stir gently into lukewarm water or milk until dissolved. Use once daily or as advised by a qualified practitioner.',
+      storageInstructions:
+        'Keep the amber glass jar tightly sealed after each use. Store in a cool, dry place away from direct sunlight. Resin consistency naturally firms in cooler weather and softens in warmth.',
+      shippingNote:
+        'Standard pan-India shipping is ₹79 (3–5 business days). Complimentary standard shipping applies on orders of ₹1,499 or above. Express air dispatch available for ₹149.',
+      returnPolicy:
+        'Unopened, tamper-sealed jars are eligible for return or replacement within 7 days of delivery. Damaged-in-transit replacements are processed within 48 hours of photo verification.',
+      specifications: [
+        { label: 'Net Quantity', value: '20 g (approx. 65–75 servings)' },
+        { label: 'Form', value: 'Semi-solid dark mineral resin' },
+        { label: 'Container', value: 'UV-protected amber glass jar with brushed gold cap' },
+        { label: 'Included Accessory', value: 'Calibrated brass measuring spoon' },
+        { label: 'Active Batch Code', value: 'HR-SHJ-2026-B04' },
+        { label: 'Shelf Life', value: '24 months from packaging date' },
+      ],
+      galleryTypes: ['hero', 'box', 'texture', 'ritual'],
+      customImages: [
+        '/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg',
+        '/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg',
+      ],
+      active: true,
+    },
+    {
+      id: 'himrudra-shilajit-40g-duo',
+      slug: 'himalayan-shilajit-resin-twin-ritual-pack',
+      name: 'HimRudra Twin Ritual Pack (2 × 20 g)',
+      subtitle: 'Two 20 g Apothecary Jars · Extended Daily Supply',
+      netQuantity: '40 g (2 × 20 g)',
+      sku: 'HR-SHJ-40G-DUO',
+      hsnCode: '30049011',
+      mrp: 2598,
+      price: 1499,
+      costPerUnit: 560,
+      stock: 22,
+      lowStockThreshold: 6,
+      batchNumber: 'HR-SHJ-2026-B04',
+      gstRatePercent: 12,
+      shortDescription:
+        'Two individually sealed 20 g jars of HimRudra Himalayan Shilajit Resin crafted for consistent two-to-four month household rituals, qualifying automatically for complimentary standard pan-India shipping.',
+      usageGuidance:
+        'Dissolve a pea-sized portion (~250–300 mg) in lukewarm water or milk once daily. Keep the second jar sealed until ready to open.',
+      storageInstructions:
+        'Store in a cool, dry cabinet away from moisture and direct heat.',
+      shippingNote:
+        'Qualifies automatically for complimentary standard shipping across India.',
+      returnPolicy:
+        'Unopened jars with intact tamper seals qualify for return within 7 days of delivery.',
+      specifications: [
+        { label: 'Net Quantity', value: '40 g (Two 20 g jars)' },
+        { label: 'Form', value: 'Traditional mineral-rich resin' },
+        { label: 'Packaging', value: 'Dual keepsake boxes with 2 brass spoons' },
+        { label: 'Active Batch Code', value: 'HR-SHJ-2026-B04' },
+      ],
+      galleryTypes: ['box', 'hero', 'texture', 'ritual'],
+      customImages: [
+        '/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg',
+        '/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg',
+      ],
+      active: true,
+    },
+  ];
+
+  const settings: StoreSettings = {
+    standardShippingFee: 79,
+    expressShippingFee: 149,
+    freeShippingThreshold: 1499,
+    codFee: 49,
+    codEnabled: true,
+    gstIncludedInPrice: true,
+    gatewayFeePercent: 2,
+    defaultShippingCostPerOrder: 65,
+    orderNotificationEmail: 'himrudraofficial@gmail.com',
+    emailNotificationsEnabled: true,
+    brandEmail: 'himrudraofficial@gmail.com',
+    brandPhone: '9549572457',
+    brandAddress:
+      'Marketed by- KP Enterprise, Office No 4-D fourth, Vardan Exclusive, Tower, Lakhudi Rd, near SARDAR PATEL STADIUM, Navrangpura, Ahmedabad, Gujarat 380009',
+    announcementText: 'LIMITED-TIME OFFER — FREE SHIPPING ON ALL ORDERS UNTIL 30 NOVEMBER 2026!',
+    seoTitle: 'HimRudra — Pure by Himalayas | Himalayan Shilajit Resin (20 g)',
+    seoDescription:
+      'Born in the Himalayas. Crafted for Your Ritual. Shop HimRudra Himalayan Shilajit Resin (20 g) with batch-level laboratory documentation.',
+  };
+
+  const coupons: Coupon[] = [
+    {
+      code: 'RITUAL10',
+      discountType: 'percent',
+      value: 10,
+      minOrderAmount: 799,
+      active: true,
+      description: '10% privilege savings on orders ₹799+',
+    },
+    {
+      code: 'HIMALAYA50',
+      discountType: 'flat',
+      value: 50,
+      minOrderAmount: 799,
+      active: true,
+      description: 'Flat ₹50 off on single or twin pack orders',
+    },
+  ];
+
+  const promotions: Promotion[] = [
+    {
+      id: 'promo-freeship-nov26',
+      title: 'Limited-Time Free Shipping Offer',
+      description: 'Free standard pan-India shipping on all orders placed before 1 December 2026.',
+      bannerHeadline: 'LIMITED-TIME OFFER — FREE SHIPPING ON ALL ORDERS UNTIL 30 NOVEMBER 2026!',
+      bannerSubtext: 'Hurry! Order Your HimRudra Shilajit Today.',
+      bannerTheme: 'crystal-brown-gold',
+      startsAt: '2026-11-01T00:00:00+05:30',
+      endsAt: FREE_SHIPPING_PROMO_END_ISO,
+      freeShipping: true,
+      freeShippingSpeed: 'standard',
+      discountPercent: 0,
+      enabled: true,
+      usageCount: 1,
+      revenueGenerated: 1349,
+      createdAt: '2026-11-01T00:00:00.000Z',
+      updatedAt: '2026-11-01T00:00:00.000Z',
+    },
+  ];
+
+  const orders: Order[] = [
+    {
+      id: 'ord-1041',
+      orderNumber: 'HIM-2026-0001',
+      userId: 'usr-cust-1',
+      customerName: 'Aarav Mehta',
+      customerEmail: 'aarav.mehta@example.in',
+      customerPhone: '9876543210',
+      shippingAddress: {
+        fullName: 'Aarav Mehta',
+        phone: '9876543210',
+        email: 'aarav.mehta@example.in',
+        houseFlatNumber: 'Flat 402, Shivalik Heights',
+        line1: '42 Rajpur Road, Jakhan',
+        landmark: 'Near Silver City Mall',
+        city: 'Dehradun',
+        state: 'Uttarakhand',
+        pincode: '248001',
+      },
+      deliveryInstructions: 'Call upon arrival at main gate.',
+      items: [
+        {
+          productId: 'himrudra-shilajit-20g',
+          name: 'HimRudra Himalayan Shilajit Resin',
+          sku: 'HR-SHJ-20G',
+          netQuantity: '20 g',
+          quantity: 1,
+          unitPrice: 799,
+          unitMrp: 1299,
+          unitCost: 295,
+          batchNumber: 'HR-SHJ-2026-B04',
+        },
+      ],
+      subtotal: 799,
+      mrpTotal: 1299,
+      instantSavings: 500,
+      couponDiscount: 0,
+      shippingFee: 79,
+      shippingSpeed: 'standard',
+      codFee: 0,
+      taxableValue: 713.39,
+      gstAmount: 85.61,
+      totalAmount: 878,
+      gatewayFeeAmount: 17.56,
+      actualShippingCost: 65,
+      paymentMethod: 'UPI',
+      paymentStatus: 'Paid',
+      razorpayOrderId: 'order_HRdemo1041',
+      razorpayPaymentId: 'pay_HRdemo1041upi',
+      paymentVerifiedAt: '2026-10-14T09:20:00.000Z',
+      status: 'Delivered',
+      courierPartner: 'BlueDart Express',
+      trackingNumber: 'BD774829104IN',
+      estimatedDelivery: '2026-10-18',
+      dispatchedAt: '2026-10-15T11:00:00.000Z',
+      deliveredAt: '2026-10-17T16:40:00.000Z',
+      timeline: [
+        { status: 'Pending Payment', timestamp: '2026-10-14T09:15:00.000Z', note: 'Order initiated via UPI' },
+        { status: 'Payment Confirmed', timestamp: '2026-10-14T09:20:00.000Z', note: 'Payment verified' },
+        {
+          status: 'Packed',
+          timestamp: '2026-10-14T14:10:00.000Z',
+          note: 'Batch HR-SHJ-2026-B04 seal verified & packed',
+        },
+        {
+          status: 'Dispatched',
+          timestamp: '2026-10-15T11:00:00.000Z',
+          note: 'Dispatched via BlueDart Express (BD774829104IN)',
+        },
+        {
+          status: 'Delivered',
+          timestamp: '2026-10-17T16:40:00.000Z',
+          note: 'Delivered in Dehradun',
+        },
+      ],
+      createdAt: '2026-10-14T09:15:00.000Z',
+    },
+    {
+      id: 'ord-1042',
+      orderNumber: 'HIM-2026-0002',
+      userId: 'usr-cust-1',
+      customerName: 'Aarav Mehta',
+      customerEmail: 'aarav.mehta@example.in',
+      customerPhone: '9876543210',
+      shippingAddress: {
+        fullName: 'Aarav Mehta',
+        phone: '9876543210',
+        email: 'aarav.mehta@example.in',
+        houseFlatNumber: 'Flat 402, Shivalik Heights',
+        line1: '42 Rajpur Road, Jakhan',
+        landmark: 'Near Silver City Mall',
+        city: 'Dehradun',
+        state: 'Uttarakhand',
+        pincode: '248001',
+      },
+      items: [
+        {
+          productId: 'himrudra-shilajit-40g-duo',
+          name: 'HimRudra Twin Ritual Pack (2 × 20 g)',
+          sku: 'HR-SHJ-40G-DUO',
+          netQuantity: '40 g (2 × 20 g)',
+          quantity: 1,
+          unitPrice: 1499,
+          unitMrp: 2598,
+          unitCost: 560,
+          batchNumber: 'HR-SHJ-2026-B04',
+        },
+      ],
+      subtotal: 1499,
+      mrpTotal: 2598,
+      instantSavings: 1099,
+      couponCode: 'RITUAL10',
+      couponDiscount: 150,
+      promotionId: 'promo-freeship-nov26',
+      promotionTitle: 'Limited-Time Free Shipping Offer',
+      shippingFee: 0,
+      shippingSpeed: 'standard',
+      codFee: 0,
+      taxableValue: 1204.46,
+      gstAmount: 144.54,
+      totalAmount: 1349,
+      gatewayFeeAmount: 26.98,
+      actualShippingCost: 65,
+      paymentMethod: 'Card',
+      paymentStatus: 'Paid',
+      razorpayOrderId: 'order_HRdemo1042',
+      razorpayPaymentId: 'pay_HRdemo1042card',
+      paymentVerifiedAt: '2026-11-17T11:22:00.000Z',
+      status: 'Dispatched',
+      courierPartner: 'Delhivery Air',
+      trackingNumber: 'DLV991042882IN',
+      estimatedDelivery: '2026-11-22',
+      dispatchedAt: '2026-11-18T17:30:00.000Z',
+      timeline: [
+        { status: 'Pending Payment', timestamp: '2026-11-17T11:20:00.000Z', note: 'Order placed online' },
+        { status: 'Payment Confirmed', timestamp: '2026-11-17T11:22:00.000Z', note: 'Card payment captured' },
+        {
+          status: 'Packed',
+          timestamp: '2026-11-18T08:45:00.000Z',
+          note: 'Tamper seal & batch QR verified',
+        },
+        {
+          status: 'Dispatched',
+          timestamp: '2026-11-18T17:30:00.000Z',
+          note: 'In transit with Delhivery Air (DLV991042882IN)',
+        },
+      ],
+      createdAt: '2026-11-17T11:20:00.000Z',
+    },
+  ];
+
+  const labReports: LabReport[] = [
+    {
+      id: 'lab-b04',
+      laboratoryName: 'Eurofins Analytical Services (Reference Document Format)',
+      reportNumber: 'COA-1026134',
+      testedBatchNumber: '1026134',
+      testDate: '2026-10-05',
+      mappedProductIds: ['himrudra-shilajit-20g', 'himrudra-shilajit-40g-duo'],
+      testingMethodology: 'Fulvic Acid Assay (77.15%), Heavy Metals & Microbiological Screening',
+      verifiedStatus: 'Reference Sample',
+      notes:
+        'Reference Certificate of Analysis document attached for store review (Batch 1026134, Mfg. 10/2026, Exp. 09/2029). Kept unaltered as a reference format until the store owner uploads and marks an independently verifiable laboratory PDF as Verified.',
+      customDocumentUrl: '/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.56.54_PM__1__2115dbef.jpeg',
+      heavyMetals: [
+        {
+          parameter: 'Fulvic Acid (Active Component)',
+          method: 'Eurofins Assay',
+          specificationLimit: 'Reference Batch',
+          observedResult: '77.15%',
+          status: 'Within Limit',
+        },
+        {
+          parameter: 'Lead (Pb)',
+          method: 'Reference COA',
+          specificationLimit: 'NMT Specification',
+          observedResult: 'Meets Specification (Pass)',
+          status: 'Within Limit',
+        },
+        {
+          parameter: 'Arsenic (As)',
+          method: 'Reference COA',
+          specificationLimit: 'NMT Specification',
+          observedResult: 'Meets Specification (Pass)',
+          status: 'Within Limit',
+        },
+        {
+          parameter: 'Mercury (Hg)',
+          method: 'Reference COA',
+          specificationLimit: 'NMT Specification',
+          observedResult: 'Meets Specification (Pass)',
+          status: 'Within Limit',
+        },
+        {
+          parameter: 'Cadmium (Cd)',
+          method: 'Reference COA',
+          specificationLimit: 'NMT Specification',
+          observedResult: 'Meets Specification (Pass)',
+          status: 'Within Limit',
+        },
+      ],
+      microbiological: [
+        {
+          parameter: 'Aerobic Plate Count',
+          method: 'Plate Count',
+          limit: 'Acceptable Limit',
+          observedResult: '<100 CFU/g',
+          status: 'Conforms',
+        },
+        {
+          parameter: 'Yeast & Mold Count',
+          method: 'Plate Count',
+          limit: 'Acceptable Limit',
+          observedResult: '≤200 CFU/g (within acceptable limits)',
+          status: 'Conforms',
+        },
+        {
+          parameter: 'E. coli / Salmonella / Pseudomonas / Staphylococcus',
+          method: 'Pathogen Screen',
+          limit: 'Absent',
+          observedResult: 'Absent',
+          status: 'Absent',
+        },
+      ],
+      updatedAt: now,
+    },
+  ];
+
+  const cmsSections: CmsSection[] = [
+    {
+      id: 'cms-what-is',
+      key: 'what_is_shilajit',
+      title: 'What is Shilajit?',
+      category: 'product',
+      content:
+        'Shilajit is a dark, tar-like mineral resin traditionally gathered from high-altitude Himalayan rock crevices, where plant matter and geological minerals undergo slow natural transformation over centuries. In classical Indian traditions, it is valued as a concentrated mineral-organic substance prepared for mindful daily use.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'cms-ingredients',
+      key: 'product_ingredients',
+      title: 'Product Ingredients',
+      category: 'product',
+      content:
+        '100% Shilajit Resin (Asphaltum punjabianum) presented in a 20 g semi-solid resin format with no added synthetic colors, artificial flavors, gums, or fillers.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'cms-origin',
+      key: 'origin_sourcing',
+      title: 'Origin and Sourcing',
+      category: 'product',
+      content:
+        'Sourced from Himalayan mineral-bearing regions and processed in small batches with water-based purification and controlled low-temperature concentration. Every jar carries a batch code linked to the Quality & Transparency registry.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'cms-how-to-use',
+      key: 'how_to_use',
+      title: 'How to Use',
+      category: 'product',
+      content:
+        'Scoop a pea-sized amount (approx. 250–300 mg) with the provided brass spoon. Dissolve completely in 150–200 ml of lukewarm water, warm milk, or herbal tea. Stir until the liquid turns a rich amber-brown and consume calmly as part of your morning or evening routine.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'cms-storage',
+      key: 'storage_handling',
+      title: 'Storage and Handling',
+      category: 'product',
+      content:
+        'Always close the inner protective disc and outer gold cap tightly after use. Keep at room temperature in a cool, dry place away from direct sunlight. Natural resin stiffens slightly in winter and becomes more pliable in warmer weather; warming the closed jar briefly in your palms restores smooth scooping.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'cms-precautions',
+      key: 'precautions',
+      title: 'Precautions',
+      category: 'product',
+      content:
+        'Intended for adult use only. Not recommended for pregnant or nursing women, children, or individuals with elevated uric acid, gout, hemochromatosis, or known kidney conditions without medical guidance. This traditional wellness product is not intended to diagnose, treat, cure, or prevent any disease.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'cms-batch-testing',
+      key: 'batch_testing',
+      title: 'Batch Testing',
+      category: 'product',
+      content:
+        'Each production batch is logged in our Quality & Transparency center alongside heavy metal screening parameters, microbiological limits, and view-only laboratory reference records maintained by the store administrator.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+    {
+      id: 'cms-faq-dissolve',
+      key: 'faq_dissolve',
+      title: 'Frequently Asked Questions — Texture, Solubility & Authenticity',
+      category: 'faq',
+      content:
+        'Q: Why does the resin texture change between summer and winter? A: Genuine mineral resin responds naturally to ambient temperature—firmer when cool and softer when warm. Q: Does HimRudra Shilajit dissolve in warm water? A: Yes, it disperses smoothly in lukewarm water or milk without leaving gritty sand residue. Q: How long does one 20 g jar last? A: At 250–300 mg per serving, a single 20 g jar lasts roughly 65 to 75 days.',
+      approvedByAdmin: true,
+      approvedAt: now,
+      updatedAt: now,
+    },
+  ];
+
+  const expenses: Expense[] = [
+    {
+      id: 'exp-1',
+      date: '2026-10-02',
+      category: 'Sourcing',
+      description: 'Batch B04 raw resin procurement & purification',
+      amount: 14500,
+    },
+    {
+      id: 'exp-2',
+      date: '2026-10-06',
+      category: 'Lab Testing',
+      description: 'Batch ICP-MS & microbiological assay screening',
+      amount: 4800,
+    },
+    {
+      id: 'exp-3',
+      date: '2026-10-12',
+      category: 'Packaging',
+      description: 'UV amber glass jars, gold caps & brass spoons',
+      amount: 6200,
+    },
+    {
+      id: 'exp-4',
+      date: '2026-11-05',
+      category: 'Marketing',
+      description: 'Search & brand editorial campaigns',
+      amount: 5500,
+    },
+  ];
+
+  const inquiries: ContactInquiry[] = [
+    {
+      id: 'inq-1',
+      name: 'Kavya Nair',
+      email: 'kavya.nair@example.in',
+      phone: '9845012345',
+      subject: 'Bulk gifting inquiry for corporate wellness',
+      message: 'We would like to inquire about 25 jars of the 20 g edition for our leadership retreat.',
+      status: 'New',
+      createdAt: '2026-11-16T14:20:00.000Z',
+    },
+  ];
+
+  const adminNotifications: AdminNotification[] = [
+    {
+      id: 'notif-1042',
+      type: 'new_paid_order',
+      title: 'New Paid Order Received!',
+      message: 'HIM-2026-0002 from Aarav Mehta (₹1,349)',
+      orderId: 'ord-1042',
+      orderNumber: 'HIM-2026-0002',
+      customerName: 'Aarav Mehta',
+      amount: 1349,
+      read: true,
+      emailNotifiedTo: 'himrudraofficial@gmail.com',
+      createdAt: '2026-11-17T11:22:00.000Z',
+    },
+  ];
+
+  return {
+    users,
+    products,
+    settings,
+    coupons,
+    promotions,
+    orders,
+    labReports,
+    cmsSections,
+    expenses,
+    inquiries,
+    adminNotifications,
+    paymentIntents: {},
+  };
+}
+
+class StoreRepository {
+  private state: DatabaseState;
+
+  constructor() {
+    this.state = this.load();
+  }
+
+  private load(): DatabaseState {
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      if (fs.existsSync(DB_FILE)) {
+        const raw = fs.readFileSync(DB_FILE, 'utf-8');
+        const parsed = JSON.parse(raw) as DatabaseState;
+        if (parsed && Array.isArray(parsed.products) && Array.isArray(parsed.users)) {
+          let mutated = false;
+          for (const p of parsed.products) {
+            const expectedGallery: Product['galleryTypes'] =
+              p.id === 'himrudra-shilajit-40g-duo'
+                ? ['box', 'hero', 'texture', 'ritual']
+                : ['hero', 'box', 'texture', 'ritual'];
+            if (
+              !p.customImages ||
+              p.customImages.length === 0 ||
+              JSON.stringify(p.galleryTypes) !== JSON.stringify(expectedGallery)
+            ) {
+              p.galleryTypes = expectedGallery;
+              p.customImages =
+                p.id === 'himrudra-shilajit-40g-duo'
+                  ? [
+                      '/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg',
+                      '/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg',
+                    ]
+                  : [
+                      '/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg',
+                      '/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg',
+                    ];
+              mutated = true;
+            }
+          }
+          if (
+            parsed.settings?.announcementText &&
+            parsed.settings.announcementText.length > 68
+          ) {
+            parsed.settings.announcementText =
+              'Batch HR-SHJ-2026-B04 Now Shipping · Free Delivery ₹1,499+';
+            mutated = true;
+          }
+          for (const rep of parsed.labReports ?? []) {
+            if (rep.id === 'lab-b04' && rep.heavyMetals?.[0]?.parameter !== 'Fulvic Acid (Active Component)') {
+              rep.customDocumentUrl =
+                '/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.56.54_PM__1__2115dbef.jpeg';
+              rep.laboratoryName = 'Eurofins Analytical Services (Reference Document Format)';
+              rep.reportNumber = 'COA-1026134';
+              rep.testedBatchNumber = '1026134';
+              rep.testingMethodology =
+                'Fulvic Acid Assay (77.15%), Heavy Metals & Microbiological Screening';
+              rep.notes =
+                'Reference Certificate of Analysis document attached for store review (Batch 1026134, Mfg. 10/2026, Exp. 09/2029). Kept unaltered as a reference format until the store owner uploads and marks an independently verifiable laboratory PDF as Verified.';
+              rep.heavyMetals = [
+                {
+                  parameter: 'Fulvic Acid (Active Component)',
+                  method: 'Eurofins Assay',
+                  specificationLimit: 'Reference Batch',
+                  observedResult: '77.15%',
+                  status: 'Within Limit',
+                },
+                {
+                  parameter: 'Lead (Pb)',
+                  method: 'Reference COA',
+                  specificationLimit: 'NMT Specification',
+                  observedResult: 'Meets Specification (Pass)',
+                  status: 'Within Limit',
+                },
+                {
+                  parameter: 'Arsenic (As)',
+                  method: 'Reference COA',
+                  specificationLimit: 'NMT Specification',
+                  observedResult: 'Meets Specification (Pass)',
+                  status: 'Within Limit',
+                },
+                {
+                  parameter: 'Mercury (Hg)',
+                  method: 'Reference COA',
+                  specificationLimit: 'NMT Specification',
+                  observedResult: 'Meets Specification (Pass)',
+                  status: 'Within Limit',
+                },
+                {
+                  parameter: 'Cadmium (Cd)',
+                  method: 'Reference COA',
+                  specificationLimit: 'NMT Specification',
+                  observedResult: 'Meets Specification (Pass)',
+                  status: 'Within Limit',
+                },
+              ];
+              rep.microbiological = [
+                {
+                  parameter: 'Aerobic Plate Count',
+                  method: 'Plate Count',
+                  limit: 'Acceptable Limit',
+                  observedResult: '<100 CFU/g',
+                  status: 'Conforms',
+                },
+                {
+                  parameter: 'Yeast & Mold Count',
+                  method: 'Plate Count',
+                  limit: 'Acceptable Limit',
+                  observedResult: '≤200 CFU/g (within acceptable limits)',
+                  status: 'Conforms',
+                },
+                {
+                  parameter: 'E. coli / Salmonella / Pseudomonas / Staphylococcus',
+                  method: 'Pathogen Screen',
+                  limit: 'Absent',
+                  observedResult: 'Absent',
+                  status: 'Absent',
+                },
+              ];
+              mutated = true;
+            }
+          }
+          const ownerEmail = getAdminOwnerEmail();
+          const filteredUsers = (parsed.users ?? []).filter(
+            (u) => u.email.toLowerCase() !== 'admin@himrudra.in'
+          );
+          if (filteredUsers.length !== (parsed.users ?? []).length) {
+            parsed.users = filteredUsers;
+            mutated = true;
+          }
+          for (const u of parsed.users) {
+            if (u.email.toLowerCase() !== ownerEmail && u.role === 'admin') {
+              u.role = 'customer';
+              mutated = true;
+            }
+          }
+          const existingOwner = parsed.users.find((u) => u.email.toLowerCase() === ownerEmail);
+          if (!existingOwner) {
+            parsed.users.unshift({
+              id: 'usr-owner-1',
+              name: 'Atyan Sharma (Store Owner)',
+              email: ownerEmail,
+              phone: '9810011223',
+              role: 'admin',
+              passwordHash: hashPassword(getInitialAdminPassword()),
+              createdAt: '2026-08-01T08:00:00.000Z',
+              wishlistProductIds: [],
+            });
+            mutated = true;
+          } else if (existingOwner.role !== 'admin') {
+            existingOwner.role = 'admin';
+            mutated = true;
+          }
+          if (!Array.isArray(parsed.promotions) || parsed.promotions.length === 0) {
+            parsed.promotions = [
+              {
+                id: 'promo-freeship-nov26',
+                title: 'Limited-Time Free Shipping Offer',
+                description:
+                  'Free standard pan-India shipping on all orders placed before 1 December 2026.',
+                bannerHeadline:
+                  'LIMITED-TIME OFFER — FREE SHIPPING ON ALL ORDERS UNTIL 30 NOVEMBER 2026!',
+                bannerSubtext: 'Hurry! Order Your HimRudra Shilajit Today.',
+                bannerTheme: 'crystal-brown-gold',
+                startsAt: '2026-11-01T00:00:00+05:30',
+                endsAt: FREE_SHIPPING_PROMO_END_ISO,
+                freeShipping: true,
+                freeShippingSpeed: 'standard',
+                discountPercent: 0,
+                enabled: true,
+                usageCount: 1,
+                revenueGenerated: 1349,
+                createdAt: '2026-11-01T00:00:00.000Z',
+                updatedAt: '2026-11-01T00:00:00.000Z',
+              },
+            ];
+            mutated = true;
+          }
+          if (!Array.isArray(parsed.adminNotifications)) {
+            parsed.adminNotifications = [];
+            mutated = true;
+          }
+          if (!parsed.paymentIntents || typeof parsed.paymentIntents !== 'object') {
+            parsed.paymentIntents = {};
+            mutated = true;
+          }
+          if (parsed.settings) {
+            const s = parsed.settings;
+            if (typeof s.gatewayFeePercent !== 'number') {
+              s.gatewayFeePercent = 2;
+              mutated = true;
+            }
+            if (typeof s.defaultShippingCostPerOrder !== 'number') {
+              s.defaultShippingCostPerOrder = 65;
+              mutated = true;
+            }
+            if (!s.brandEmail) {
+              s.brandEmail = 'himrudraofficial@gmail.com';
+              s.orderNotificationEmail = 'himrudraofficial@gmail.com';
+              s.emailNotificationsEnabled = true;
+              mutated = true;
+            }
+            if (!s.brandPhone) {
+              s.brandPhone = '9549572457';
+              mutated = true;
+            }
+            if (!s.brandAddress) {
+              s.brandAddress =
+                'Marketed by- KP Enterprise, Office No 4-D fourth, Vardan Exclusive, Tower, Lakhudi Rd, near SARDAR PATEL STADIUM, Navrangpura, Ahmedabad, Gujarat 380009';
+              mutated = true;
+            }
+            if (
+              s.announcementText ===
+              'Batch HR-SHJ-2026-B04 Now Shipping · Free Delivery ₹1,499+'
+            ) {
+              s.announcementText =
+                'LIMITED-TIME OFFER — FREE SHIPPING ON ALL ORDERS UNTIL 30 NOVEMBER 2026!';
+              mutated = true;
+            }
+          }
+          for (const sec of parsed.cmsSections ?? []) {
+            if (sec.id === 'cms-batch-testing' && sec.content.includes('downloadable')) {
+              sec.content = sec.content.replace(
+                'downloadable laboratory reference records',
+                'view-only laboratory reference records'
+              );
+              mutated = true;
+            }
+          }
+          for (const ord of parsed.orders ?? []) {
+            const normStatus = normalizeLegacyOrderStatus(ord.status);
+            if (normStatus !== ord.status) {
+              ord.status = normStatus;
+              mutated = true;
+            }
+            for (const ev of ord.timeline ?? []) {
+              const normEv = normalizeLegacyOrderStatus(ev.status);
+              if (normEv !== ev.status) {
+                ev.status = normEv;
+                mutated = true;
+              }
+            }
+            if (typeof ord.gatewayFeeAmount !== 'number') {
+              ord.gatewayFeeAmount =
+                ord.paymentMethod !== 'COD' && ord.paymentStatus === 'Paid'
+                  ? Math.round(ord.totalAmount * 0.02 * 100) / 100
+                  : 0;
+              mutated = true;
+            }
+            if (typeof ord.actualShippingCost !== 'number') {
+              ord.actualShippingCost =
+                ord.status !== 'Cancelled' ? parsed.settings?.defaultShippingCostPerOrder ?? 65 : 0;
+              mutated = true;
+            }
+          }
+          if (mutated) {
+            this.save(parsed);
+          }
+          return parsed;
+        }
+      }
+    } catch (err) {
+      console.error('Failed to load store file, initializing seed state:', err);
+    }
+    const seed = createSeedState();
+    this.save(seed);
+    return seed;
+  }
+
+  private save(nextState: DatabaseState) {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    const tmpFile = `${DB_FILE}.tmp`;
+    fs.writeFileSync(tmpFile, JSON.stringify(nextState, null, 2), 'utf-8');
+    fs.renameSync(tmpFile, DB_FILE);
+  }
+
+  getState(): DatabaseState {
+    return this.state;
+  }
+
+  commit() {
+    this.save(this.state);
+  }
+
+  sanitizeUser(u: StoredUser): User {
+    const { passwordHash: _ignored, ...safe } = u;
+    return {
+      ...safe,
+      role:
+        safe.role === 'admin' && safe.email.toLowerCase() === getAdminOwnerEmail()
+          ? 'admin'
+          : 'customer',
+    };
+  }
+}
+
+export const storeRepo = new StoreRepository();

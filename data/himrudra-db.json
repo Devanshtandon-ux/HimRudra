@@ -1,0 +1,1174 @@
+{
+  "users": [
+    {
+      "id": "usr-owner-1",
+      "name": "Atyan Sharma (Store Owner)",
+      "email": "atyansharma04488@gmail.com",
+      "phone": "9810011223",
+      "role": "admin",
+      "passwordHash": "3acf681896dd87d579ba3be23000db40:1a05baee7419d8cd4a85915d0571eb0db96659b00a336c6a07c119948d147e44ec4602584cefccb56a24244ce6c76d6766837f45f87d16e6c7c2d1d818e2b16e",
+      "createdAt": "2026-08-01T08:00:00.000Z",
+      "wishlistProductIds": []
+    },
+    {
+      "id": "usr-cust-1",
+      "name": "Aarav Mehta",
+      "email": "aarav.mehta@example.in",
+      "phone": "9876543210",
+      "role": "customer",
+      "passwordHash": "8a42e2b7955df8f31aecb5d11075c5a8:bb7779b2ce72f4ab4384ccfc6ad2873106420cabee26cdcf8e0e39e58664fe387290a3e48dac05b5bd4dd0d8fbbc4a9866ad9bfe9f5e20758f65743259ad5398",
+      "createdAt": "2026-09-12T10:30:00.000Z",
+      "wishlistProductIds": [
+        "himrudra-shilajit-20g"
+      ],
+      "defaultAddress": {
+        "fullName": "Aarav Mehta",
+        "phone": "9876543210",
+        "email": "aarav.mehta@example.in",
+        "line1": "42 Rajpur Road, Jakhan",
+        "line2": "Near Silver City Mall",
+        "city": "Dehradun",
+        "state": "Uttarakhand",
+        "pincode": "248001"
+      }
+    }
+  ],
+  "products": [
+    {
+      "id": "himrudra-shilajit-20g",
+      "slug": "himalayan-shilajit-resin-20g",
+      "name": "HimRudra Himalayan Shilajit Resin",
+      "subtitle": "Pure by Himalayas · 20 g Glass Apothecary Jar",
+      "netQuantity": "20 g",
+      "sku": "HR-SHJ-20G",
+      "hsnCode": "30049011",
+      "mrp": 1299,
+      "price": 799,
+      "costPerUnit": 295,
+      "stock": 38,
+      "lowStockThreshold": 10,
+      "batchNumber": "HR-SHJ-2026-B04",
+      "gstRatePercent": 12,
+      "shortDescription": "HimRudra Himalayan Shilajit Resin brings a traditional Himalayan wellness ingredient into a modern, premium experience. Presented in a 20 g jar, this resin is designed for customers who value thoughtful sourcing, clear product information and an uncomplicated daily routine.",
+      "usageGuidance": "Take a pea-sized portion (approximately 250–300 mg) using the included brass spoon. Stir gently into lukewarm water or milk until dissolved. Use once daily or as advised by a qualified practitioner.",
+      "storageInstructions": "Keep the amber glass jar tightly sealed after each use. Store in a cool, dry place away from direct sunlight. Resin consistency naturally firms in cooler weather and softens in warmth.",
+      "shippingNote": "Standard pan-India shipping is ₹79 (3–5 business days). Complimentary standard shipping applies on orders of ₹1,499 or above. Express air dispatch available for ₹149.",
+      "returnPolicy": "Unopened, tamper-sealed jars are eligible for return or replacement within 7 days of delivery. Damaged-in-transit replacements are processed within 48 hours of photo verification.",
+      "specifications": [
+        {
+          "label": "Net Quantity",
+          "value": "20 g (approx. 65–75 servings)"
+        },
+        {
+          "label": "Form",
+          "value": "Semi-solid dark mineral resin"
+        },
+        {
+          "label": "Container",
+          "value": "UV-protected amber glass jar with brushed gold cap"
+        },
+        {
+          "label": "Included Accessory",
+          "value": "Calibrated brass measuring spoon"
+        },
+        {
+          "label": "Active Batch Code",
+          "value": "HR-SHJ-2026-B04"
+        },
+        {
+          "label": "Shelf Life",
+          "value": "24 months from packaging date"
+        }
+      ],
+      "galleryTypes": [
+        "hero",
+        "box",
+        "texture",
+        "ritual"
+      ],
+      "active": true,
+      "customImages": [
+        "/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg",
+        "/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg"
+      ]
+    },
+    {
+      "id": "himrudra-shilajit-40g-duo",
+      "slug": "himalayan-shilajit-resin-twin-ritual-pack",
+      "name": "HimRudra Twin Ritual Pack (2 × 20 g)",
+      "subtitle": "Two 20 g Apothecary Jars · Extended Daily Supply",
+      "netQuantity": "40 g (2 × 20 g)",
+      "sku": "HR-SHJ-40G-DUO",
+      "hsnCode": "30049011",
+      "mrp": 2598,
+      "price": 1499,
+      "costPerUnit": 560,
+      "stock": 22,
+      "lowStockThreshold": 6,
+      "batchNumber": "HR-SHJ-2026-B04",
+      "gstRatePercent": 12,
+      "shortDescription": "Two individually sealed 20 g jars of HimRudra Himalayan Shilajit Resin crafted for consistent two-to-four month household rituals, qualifying automatically for complimentary standard pan-India shipping.",
+      "usageGuidance": "Dissolve a pea-sized portion (~250–300 mg) in lukewarm water or milk once daily. Keep the second jar sealed until ready to open.",
+      "storageInstructions": "Store in a cool, dry cabinet away from moisture and direct heat.",
+      "shippingNote": "Qualifies automatically for complimentary standard shipping across India.",
+      "returnPolicy": "Unopened jars with intact tamper seals qualify for return within 7 days of delivery.",
+      "specifications": [
+        {
+          "label": "Net Quantity",
+          "value": "40 g (Two 20 g jars)"
+        },
+        {
+          "label": "Form",
+          "value": "Traditional mineral-rich resin"
+        },
+        {
+          "label": "Packaging",
+          "value": "Dual keepsake boxes with 2 brass spoons"
+        },
+        {
+          "label": "Active Batch Code",
+          "value": "HR-SHJ-2026-B04"
+        }
+      ],
+      "galleryTypes": [
+        "box",
+        "hero",
+        "texture",
+        "ritual"
+      ],
+      "active": true,
+      "customImages": [
+        "/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg",
+        "/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg"
+      ]
+    }
+  ],
+  "settings": {
+    "standardShippingFee": 79,
+    "expressShippingFee": 149,
+    "freeShippingThreshold": 1499,
+    "codFee": 49,
+    "codEnabled": true,
+    "gstIncludedInPrice": true,
+    "announcementText": "LIMITED-TIME OFFER — FREE SHIPPING ON ALL ORDERS UNTIL 30 NOVEMBER 2026!",
+    "seoTitle": "HimRudra — Pure by Himalayas | Himalayan Shilajit Resin (20 g)",
+    "seoDescription": "Born in the Himalayas. Crafted for Your Ritual. Shop HimRudra Himalayan Shilajit Resin (20 g) with batch-level laboratory documentation.",
+    "gatewayFeePercent": 2,
+    "defaultShippingCostPerOrder": 65,
+    "brandEmail": "himrudraofficial@gmail.com",
+    "orderNotificationEmail": "himrudraofficial@gmail.com",
+    "emailNotificationsEnabled": true,
+    "brandPhone": "9549572457",
+    "brandAddress": "Marketed by- KP Enterprise, Office No 4-D fourth, Vardan Exclusive, Tower, Lakhudi Rd, near SARDAR PATEL STADIUM, Navrangpura, Ahmedabad, Gujarat 380009"
+  },
+  "coupons": [
+    {
+      "code": "RITUAL10",
+      "discountType": "percent",
+      "value": 10,
+      "minOrderAmount": 799,
+      "active": true,
+      "description": "10% privilege savings on orders ₹799+"
+    },
+    {
+      "code": "HIMALAYA50",
+      "discountType": "flat",
+      "value": 50,
+      "minOrderAmount": 799,
+      "active": true,
+      "description": "Flat ₹50 off on single or twin pack orders"
+    }
+  ],
+  "orders": [
+    {
+      "id": "ord-76c1f940",
+      "orderNumber": "HIM-2026-0010",
+      "customerName": "Rohan Deshmukh",
+      "customerEmail": "rohan.deshmukh@example.in",
+      "customerPhone": "9820198201",
+      "shippingAddress": {
+        "fullName": "Rohan Deshmukh",
+        "phone": "9820198201",
+        "email": "rohan.deshmukh@example.in",
+        "houseFlatNumber": "Flat 402, Shivalik Heights",
+        "line1": "CG Road, Navrangpura",
+        "line2": "",
+        "landmark": "Near Navrangpura Stadium",
+        "city": "Ahmedabad",
+        "state": "Gujarat",
+        "pincode": "380009"
+      },
+      "deliveryInstructions": "Please call 10 mins before delivery",
+      "items": [
+        {
+          "productId": "himrudra-shilajit-20g",
+          "name": "HimRudra Himalayan Shilajit Resin",
+          "sku": "HR-SHJ-20G",
+          "netQuantity": "20 g",
+          "quantity": 1,
+          "unitPrice": 799,
+          "unitMrp": 1299,
+          "unitCost": 295,
+          "batchNumber": "HR-SHJ-2026-B04"
+        }
+      ],
+      "subtotal": 799,
+      "mrpTotal": 1299,
+      "instantSavings": 500,
+      "couponDiscount": 0,
+      "promotionId": "promo-freeship-nov26",
+      "promotionTitle": "Limited-Time Free Shipping Offer",
+      "shippingFee": 0,
+      "shippingSpeed": "standard",
+      "codFee": 0,
+      "taxableValue": 713.39,
+      "gstAmount": 85.61,
+      "totalAmount": 799,
+      "gatewayFeeAmount": 15.98,
+      "actualShippingCost": 65,
+      "paymentMethod": "UPI",
+      "paymentStatus": "Paid",
+      "razorpayOrderId": "order_HRd0dc74490f47",
+      "razorpayPaymentId": "pay_HR_mwnoi2j4",
+      "paymentVerifiedAt": "2026-11-19T15:02:00.806Z",
+      "status": "Dispatched",
+      "estimatedDelivery": "2026-11-24",
+      "timeline": [
+        {
+          "status": "Pending Payment",
+          "timestamp": "2026-11-19T15:02:00.806Z",
+          "note": "Order created (UPI)"
+        },
+        {
+          "status": "Payment Confirmed",
+          "timestamp": "2026-11-19T15:02:00.806Z",
+          "note": "Server-verified payment (pay_HR_mwnoi2j4)"
+        },
+        {
+          "status": "Dispatched",
+          "timestamp": "2026-11-19T15:02:27.074Z",
+          "note": "Status updated to Dispatched (Delhivery Surface: DLV99887766IN)"
+        }
+      ],
+      "createdAt": "2026-11-19T15:02:00.806Z",
+      "courierPartner": "Delhivery Surface",
+      "trackingNumber": "DLV99887766IN",
+      "dispatchedAt": "2026-11-19T15:02:27.074Z"
+    },
+    {
+      "id": "ord-9d69d1a9",
+      "orderNumber": "HIM-2026-0009",
+      "customerName": "Rohan Deshmukh",
+      "customerEmail": "rohan.deshmukh@example.in",
+      "customerPhone": "9820198201",
+      "shippingAddress": {
+        "fullName": "Rohan Deshmukh",
+        "phone": "9820198201",
+        "email": "rohan.deshmukh@example.in",
+        "houseFlatNumber": "Flat 402, Shivalik Heights",
+        "line1": "CG Road, Navrangpura",
+        "line2": "",
+        "landmark": "Near Navrangpura Stadium",
+        "city": "Ahmedabad",
+        "state": "Gujarat",
+        "pincode": "380009"
+      },
+      "deliveryInstructions": "Please call 10 mins before delivery",
+      "items": [
+        {
+          "productId": "himrudra-shilajit-20g",
+          "name": "HimRudra Himalayan Shilajit Resin",
+          "sku": "HR-SHJ-20G",
+          "netQuantity": "20 g",
+          "quantity": 1,
+          "unitPrice": 799,
+          "unitMrp": 1299,
+          "unitCost": 295,
+          "batchNumber": "HR-SHJ-2026-B04"
+        }
+      ],
+      "subtotal": 799,
+      "mrpTotal": 1299,
+      "instantSavings": 500,
+      "couponDiscount": 0,
+      "promotionId": "promo-freeship-nov26",
+      "promotionTitle": "Limited-Time Free Shipping Offer",
+      "shippingFee": 0,
+      "shippingSpeed": "standard",
+      "codFee": 0,
+      "taxableValue": 713.39,
+      "gstAmount": 85.61,
+      "totalAmount": 799,
+      "gatewayFeeAmount": 15.98,
+      "actualShippingCost": 65,
+      "paymentMethod": "UPI",
+      "paymentStatus": "Paid",
+      "razorpayOrderId": "order_HR22d731dad671",
+      "razorpayPaymentId": "pay_HR_mwnog3m0",
+      "paymentVerifiedAt": "2026-11-19T15:00:28.897Z",
+      "status": "Payment Confirmed",
+      "estimatedDelivery": "2026-11-24",
+      "timeline": [
+        {
+          "status": "Pending Payment",
+          "timestamp": "2026-11-19T15:00:28.897Z",
+          "note": "Order created (UPI)"
+        },
+        {
+          "status": "Payment Confirmed",
+          "timestamp": "2026-11-19T15:00:28.897Z",
+          "note": "Server-verified payment (pay_HR_mwnog3m0)"
+        }
+      ],
+      "createdAt": "2026-11-19T15:00:28.897Z"
+    },
+    {
+      "id": "ord-f0d1ef0e",
+      "orderNumber": "HIM-2026-0008",
+      "customerName": "Rohan Deshmukh",
+      "customerEmail": "rohan.deshmukh@example.in",
+      "customerPhone": "9820198201",
+      "shippingAddress": {
+        "fullName": "Rohan Deshmukh",
+        "phone": "9820198201",
+        "email": "rohan.deshmukh@example.in",
+        "houseFlatNumber": "Flat 402, Shivalik Heights",
+        "line1": "CG Road, Navrangpura",
+        "line2": "",
+        "landmark": "Near Navrangpura Stadium",
+        "city": "Ahmedabad",
+        "state": "Gujarat",
+        "pincode": "380009"
+      },
+      "deliveryInstructions": "Please call 10 mins before delivery",
+      "items": [
+        {
+          "productId": "himrudra-shilajit-20g",
+          "name": "HimRudra Himalayan Shilajit Resin",
+          "sku": "HR-SHJ-20G",
+          "netQuantity": "20 g",
+          "quantity": 1,
+          "unitPrice": 799,
+          "unitMrp": 1299,
+          "unitCost": 295,
+          "batchNumber": "HR-SHJ-2026-B04"
+        }
+      ],
+      "subtotal": 799,
+      "mrpTotal": 1299,
+      "instantSavings": 500,
+      "couponDiscount": 0,
+      "promotionId": "promo-freeship-nov26",
+      "promotionTitle": "Limited-Time Free Shipping Offer",
+      "shippingFee": 0,
+      "shippingSpeed": "standard",
+      "codFee": 0,
+      "taxableValue": 713.39,
+      "gstAmount": 85.61,
+      "totalAmount": 799,
+      "gatewayFeeAmount": 15.98,
+      "actualShippingCost": 65,
+      "paymentMethod": "UPI",
+      "paymentStatus": "Paid",
+      "razorpayOrderId": "order_HRfad1be680a73",
+      "razorpayPaymentId": "pay_HR_mwnoeqiz",
+      "paymentVerifiedAt": "2026-11-19T14:59:25.279Z",
+      "status": "Payment Confirmed",
+      "estimatedDelivery": "2026-11-24",
+      "timeline": [
+        {
+          "status": "Pending Payment",
+          "timestamp": "2026-11-19T14:59:25.279Z",
+          "note": "Order created (UPI)"
+        },
+        {
+          "status": "Payment Confirmed",
+          "timestamp": "2026-11-19T14:59:25.279Z",
+          "note": "Server-verified payment (pay_HR_mwnoeqiz)"
+        }
+      ],
+      "createdAt": "2026-11-19T14:59:25.279Z"
+    },
+    {
+      "id": "ord-f015a5c6",
+      "orderNumber": "HIM-2026-0007",
+      "customerName": "Rohan Deshmukh",
+      "customerEmail": "rohan.deshmukh@example.in",
+      "customerPhone": "9820198201",
+      "shippingAddress": {
+        "fullName": "Rohan Deshmukh",
+        "phone": "9820198201",
+        "email": "rohan.deshmukh@example.in",
+        "houseFlatNumber": "Flat 402, Shivalik Heights",
+        "line1": "CG Road, Navrangpura",
+        "line2": "",
+        "landmark": "Near Navrangpura Stadium",
+        "city": "Ahmedabad",
+        "state": "Gujarat",
+        "pincode": "380009"
+      },
+      "deliveryInstructions": "Please call 10 mins before delivery",
+      "items": [
+        {
+          "productId": "himrudra-shilajit-20g",
+          "name": "HimRudra Himalayan Shilajit Resin",
+          "sku": "HR-SHJ-20G",
+          "netQuantity": "20 g",
+          "quantity": 1,
+          "unitPrice": 799,
+          "unitMrp": 1299,
+          "unitCost": 295,
+          "batchNumber": "HR-SHJ-2026-B04"
+        }
+      ],
+      "subtotal": 799,
+      "mrpTotal": 1299,
+      "instantSavings": 500,
+      "couponDiscount": 0,
+      "promotionId": "promo-freeship-nov26",
+      "promotionTitle": "Limited-Time Free Shipping Offer",
+      "shippingFee": 0,
+      "shippingSpeed": "standard",
+      "codFee": 0,
+      "taxableValue": 713.39,
+      "gstAmount": 85.61,
+      "totalAmount": 799,
+      "gatewayFeeAmount": 15.98,
+      "actualShippingCost": 65,
+      "paymentMethod": "UPI",
+      "paymentStatus": "Paid",
+      "razorpayOrderId": "order_HR44649b7a3b21",
+      "razorpayPaymentId": "pay_HR_mwnods7u",
+      "paymentVerifiedAt": "2026-11-19T14:58:40.826Z",
+      "status": "Payment Confirmed",
+      "estimatedDelivery": "2026-11-24",
+      "timeline": [
+        {
+          "status": "Pending Payment",
+          "timestamp": "2026-11-19T14:58:40.826Z",
+          "note": "Order created (UPI)"
+        },
+        {
+          "status": "Payment Confirmed",
+          "timestamp": "2026-11-19T14:58:40.826Z",
+          "note": "Server-verified payment (pay_HR_mwnods7u)"
+        }
+      ],
+      "createdAt": "2026-11-19T14:58:40.826Z"
+    },
+    {
+      "id": "ord-7a4cee8e",
+      "orderNumber": "HR-2026-1048",
+      "customerName": "Priya Sharma",
+      "customerEmail": "priya.sharma@example.in",
+      "customerPhone": "9876543210",
+      "shippingAddress": {
+        "fullName": "Priya Sharma",
+        "phone": "9876543210",
+        "email": "priya.sharma@example.in",
+        "line1": "42 Rajpur Road, Jakhan",
+        "line2": "",
+        "city": "Dehradun",
+        "state": "Uttarakhand",
+        "pincode": "248001"
+      },
+      "items": [
+        {
+          "productId": "himrudra-shilajit-20g",
+          "name": "HimRudra Himalayan Shilajit Resin",
+          "sku": "HR-SHJ-20G",
+          "netQuantity": "20 g",
+          "quantity": 1,
+          "unitPrice": 799,
+          "unitMrp": 1299,
+          "unitCost": 295,
+          "batchNumber": "HR-SHJ-2026-B04"
+        }
+      ],
+      "subtotal": 799,
+      "mrpTotal": 1299,
+      "instantSavings": 500,
+      "couponCode": "RITUAL10",
+      "couponDiscount": 80,
+      "shippingFee": 79,
+      "shippingSpeed": "standard",
+      "codFee": 0,
+      "taxableValue": 641.96,
+      "gstAmount": 77.04,
+      "totalAmount": 798,
+      "paymentMethod": "UPI",
+      "paymentStatus": "Paid",
+      "razorpayOrderId": "order_HRec30f2d44e6a",
+      "razorpayPaymentId": "pay_HR_mwndn4kc",
+      "status": "Payment Confirmed",
+      "estimatedDelivery": "2026-11-24",
+      "timeline": [
+        {
+          "status": "Pending Payment",
+          "timestamp": "2026-11-19T09:58:00.927Z",
+          "note": "Order placed (UPI)"
+        },
+        {
+          "status": "Payment Confirmed",
+          "timestamp": "2026-11-19T09:58:00.927Z",
+          "note": "Online payment authorized (pay_HR_mwndn4kc)"
+        }
+      ],
+      "createdAt": "2026-11-19T09:58:00.927Z",
+      "gatewayFeeAmount": 15.96,
+      "actualShippingCost": 65
+    },
+    {
+      "id": "ord-10770690",
+      "orderNumber": "HR-2026-1047",
+      "customerName": "Priya Sharma",
+      "customerEmail": "priya.sharma@example.in",
+      "customerPhone": "9876543210",
+      "shippingAddress": {
+        "fullName": "Priya Sharma",
+        "phone": "9876543210",
+        "email": "priya.sharma@example.in",
+        "line1": "42 Rajpur Road, Jakhan",
+        "line2": "",
+        "city": "Dehradun",
+        "state": "Uttarakhand",
+        "pincode": "248001"
+      },
+      "items": [
+        {
+          "productId": "himrudra-shilajit-20g",
+          "name": "HimRudra Himalayan Shilajit Resin",
+          "sku": "HR-SHJ-20G",
+          "netQuantity": "20 g",
+          "quantity": 1,
+          "unitPrice": 799,
+          "unitMrp": 1299,
+          "unitCost": 295,
+          "batchNumber": "HR-SHJ-2026-B04"
+        }
+      ],
+      "subtotal": 799,
+      "mrpTotal": 1299,
+      "instantSavings": 500,
+      "couponCode": "RITUAL10",
+      "couponDiscount": 80,
+      "shippingFee": 79,
+      "shippingSpeed": "standard",
+      "codFee": 0,
+      "taxableValue": 641.96,
+      "gstAmount": 77.04,
+      "totalAmount": 798,
+      "paymentMethod": "UPI",
+      "paymentStatus": "Paid",
+      "razorpayOrderId": "order_HR77d6e6f8490c",
+      "razorpayPaymentId": "pay_HR_mwndkhnp",
+      "status": "Payment Confirmed",
+      "estimatedDelivery": "2026-11-24",
+      "timeline": [
+        {
+          "status": "Pending Payment",
+          "timestamp": "2026-11-19T09:55:57.930Z",
+          "note": "Order placed (UPI)"
+        },
+        {
+          "status": "Payment Confirmed",
+          "timestamp": "2026-11-19T09:55:57.930Z",
+          "note": "Online payment authorized (pay_HR_mwndkhnp)"
+        }
+      ],
+      "createdAt": "2026-11-19T09:55:57.930Z",
+      "gatewayFeeAmount": 15.96,
+      "actualShippingCost": 65
+    },
+    {
+      "id": "ord-f26ada2c",
+      "orderNumber": "HR-2026-1046",
+      "customerName": "Rohan Joshi",
+      "customerEmail": "rohan.joshi@example.in",
+      "customerPhone": "9876501234",
+      "shippingAddress": {
+        "fullName": "Rohan Joshi",
+        "phone": "9876501234",
+        "email": "rohan.joshi@example.in",
+        "line1": "14 Mall Road, Mussoorie",
+        "line2": "",
+        "city": "Mussoorie",
+        "state": "Uttarakhand",
+        "pincode": "248179"
+      },
+      "items": [
+        {
+          "productId": "himrudra-shilajit-20g",
+          "name": "HimRudra Himalayan Shilajit Resin",
+          "sku": "HR-SHJ-20G",
+          "netQuantity": "20 g",
+          "quantity": 2,
+          "unitPrice": 799,
+          "unitMrp": 1299,
+          "unitCost": 295,
+          "batchNumber": "HR-SHJ-2026-B04"
+        }
+      ],
+      "subtotal": 1598,
+      "mrpTotal": 2598,
+      "instantSavings": 1000,
+      "couponCode": "RITUAL10",
+      "couponDiscount": 160,
+      "shippingFee": 79,
+      "shippingSpeed": "standard",
+      "codFee": 0,
+      "taxableValue": 1283.93,
+      "gstAmount": 154.07,
+      "totalAmount": 1517,
+      "paymentMethod": "UPI",
+      "paymentStatus": "Paid",
+      "razorpayOrderId": "order_HR9d37e26ac858",
+      "razorpayPaymentId": "pay_HR_mwncq24l",
+      "status": "Payment Confirmed",
+      "estimatedDelivery": "2026-11-24",
+      "timeline": [
+        {
+          "status": "Pending Payment",
+          "timestamp": "2026-11-19T09:32:18.121Z",
+          "note": "Order placed (UPI)"
+        },
+        {
+          "status": "Payment Confirmed",
+          "timestamp": "2026-11-19T09:32:18.121Z",
+          "note": "Online payment authorized (pay_HR_mwncq24l)"
+        }
+      ],
+      "createdAt": "2026-11-19T09:32:18.121Z",
+      "gatewayFeeAmount": 30.34,
+      "actualShippingCost": 65
+    },
+    {
+      "id": "ord-73ec9487",
+      "orderNumber": "HR-2026-1045",
+      "customerName": "Rohan Joshi",
+      "customerEmail": "rohan.joshi@example.in",
+      "customerPhone": "9876501234",
+      "shippingAddress": {
+        "fullName": "Rohan Joshi",
+        "phone": "9876501234",
+        "email": "rohan.joshi@example.in",
+        "line1": "14 Mall Road, Mussoorie",
+        "line2": "",
+        "city": "Mussoorie",
+        "state": "Uttarakhand",
+        "pincode": "248179"
+      },
+      "items": [
+        {
+          "productId": "himrudra-shilajit-20g",
+          "name": "HimRudra Himalayan Shilajit Resin",
+          "sku": "HR-SHJ-20G",
+          "netQuantity": "20 g",
+          "quantity": 2,
+          "unitPrice": 799,
+          "unitMrp": 1299,
+          "unitCost": 295,
+          "batchNumber": "HR-SHJ-2026-B04"
+        }
+      ],
+      "subtotal": 1598,
+      "mrpTotal": 2598,
+      "instantSavings": 1000,
+      "couponCode": "RITUAL10",
+      "couponDiscount": 160,
+      "shippingFee": 79,
+      "shippingSpeed": "standard",
+      "codFee": 0,
+      "taxableValue": 1283.93,
+      "gstAmount": 154.07,
+      "totalAmount": 1517,
+      "paymentMethod": "UPI",
+      "paymentStatus": "Paid",
+      "razorpayOrderId": "order_HR43011fa273a1",
+      "razorpayPaymentId": "pay_HR_mwncp0yz",
+      "status": "Payment Confirmed",
+      "estimatedDelivery": "2026-11-24",
+      "timeline": [
+        {
+          "status": "Pending Payment",
+          "timestamp": "2026-11-19T09:31:29.967Z",
+          "note": "Order placed (UPI)"
+        },
+        {
+          "status": "Payment Confirmed",
+          "timestamp": "2026-11-19T09:31:29.967Z",
+          "note": "Online payment authorized (pay_HR_mwncp0yz)"
+        }
+      ],
+      "createdAt": "2026-11-19T09:31:29.967Z",
+      "gatewayFeeAmount": 30.34,
+      "actualShippingCost": 65
+    },
+    {
+      "id": "ord-1041",
+      "orderNumber": "HR-2026-1041",
+      "userId": "usr-cust-1",
+      "customerName": "Aarav Mehta",
+      "customerEmail": "aarav.mehta@example.in",
+      "customerPhone": "9876543210",
+      "shippingAddress": {
+        "fullName": "Aarav Mehta",
+        "phone": "9876543210",
+        "email": "aarav.mehta@example.in",
+        "line1": "42 Rajpur Road, Jakhan",
+        "city": "Dehradun",
+        "state": "Uttarakhand",
+        "pincode": "248001"
+      },
+      "items": [
+        {
+          "productId": "himrudra-shilajit-20g",
+          "name": "HimRudra Himalayan Shilajit Resin",
+          "sku": "HR-SHJ-20G",
+          "netQuantity": "20 g",
+          "quantity": 1,
+          "unitPrice": 799,
+          "unitMrp": 1299,
+          "unitCost": 295,
+          "batchNumber": "HR-SHJ-2026-B04"
+        }
+      ],
+      "subtotal": 799,
+      "mrpTotal": 1299,
+      "instantSavings": 500,
+      "couponDiscount": 0,
+      "shippingFee": 79,
+      "shippingSpeed": "standard",
+      "codFee": 0,
+      "taxableValue": 713.39,
+      "gstAmount": 85.61,
+      "totalAmount": 878,
+      "paymentMethod": "UPI",
+      "paymentStatus": "Paid",
+      "razorpayOrderId": "order_HRdemo1041",
+      "razorpayPaymentId": "pay_HRdemo1041upi",
+      "status": "Delivered",
+      "courierPartner": "BlueDart Express",
+      "trackingNumber": "BD774829104IN",
+      "estimatedDelivery": "2026-10-18",
+      "timeline": [
+        {
+          "status": "Pending Payment",
+          "timestamp": "2026-10-14T09:15:00.000Z",
+          "note": "Order received via UPI"
+        },
+        {
+          "status": "Payment Confirmed",
+          "timestamp": "2026-10-14T09:20:00.000Z",
+          "note": "Payment verified"
+        },
+        {
+          "status": "Packed",
+          "timestamp": "2026-10-14T14:10:00.000Z",
+          "note": "Batch HR-SHJ-2026-B04 seal verified"
+        },
+        {
+          "status": "Dispatched",
+          "timestamp": "2026-10-15T11:00:00.000Z",
+          "note": "Dispatched via BlueDart Express (BD774829104IN)"
+        },
+        {
+          "status": "Delivered",
+          "timestamp": "2026-10-17T16:40:00.000Z",
+          "note": "Delivered in Dehradun"
+        }
+      ],
+      "createdAt": "2026-10-14T09:15:00.000Z",
+      "gatewayFeeAmount": 17.56,
+      "actualShippingCost": 65
+    },
+    {
+      "id": "ord-1042",
+      "orderNumber": "HR-2026-1042",
+      "userId": "usr-cust-1",
+      "customerName": "Aarav Mehta",
+      "customerEmail": "aarav.mehta@example.in",
+      "customerPhone": "9876543210",
+      "shippingAddress": {
+        "fullName": "Aarav Mehta",
+        "phone": "9876543210",
+        "email": "aarav.mehta@example.in",
+        "line1": "42 Rajpur Road, Jakhan",
+        "city": "Dehradun",
+        "state": "Uttarakhand",
+        "pincode": "248001"
+      },
+      "items": [
+        {
+          "productId": "himrudra-shilajit-40g-duo",
+          "name": "HimRudra Twin Ritual Pack (2 × 20 g)",
+          "sku": "HR-SHJ-40G-DUO",
+          "netQuantity": "40 g (2 × 20 g)",
+          "quantity": 1,
+          "unitPrice": 1499,
+          "unitMrp": 2598,
+          "unitCost": 560,
+          "batchNumber": "HR-SHJ-2026-B04"
+        }
+      ],
+      "subtotal": 1499,
+      "mrpTotal": 2598,
+      "instantSavings": 1099,
+      "couponCode": "RITUAL10",
+      "couponDiscount": 150,
+      "shippingFee": 0,
+      "shippingSpeed": "standard",
+      "codFee": 0,
+      "taxableValue": 1204.46,
+      "gstAmount": 144.54,
+      "totalAmount": 1349,
+      "paymentMethod": "Card",
+      "paymentStatus": "Paid",
+      "razorpayOrderId": "order_HRdemo1042",
+      "razorpayPaymentId": "pay_HRdemo1042card",
+      "status": "Dispatched",
+      "courierPartner": "Delhivery Air",
+      "trackingNumber": "DLV991042882IN",
+      "estimatedDelivery": "2026-11-22",
+      "timeline": [
+        {
+          "status": "Pending Payment",
+          "timestamp": "2026-11-17T11:20:00.000Z",
+          "note": "Order placed online"
+        },
+        {
+          "status": "Payment Confirmed",
+          "timestamp": "2026-11-17T11:22:00.000Z",
+          "note": "Card payment captured"
+        },
+        {
+          "status": "Packed",
+          "timestamp": "2026-11-18T08:45:00.000Z",
+          "note": "Tamper seal & batch QR verified"
+        },
+        {
+          "status": "Dispatched",
+          "timestamp": "2026-11-18T17:30:00.000Z",
+          "note": "In transit with Delhivery Air (DLV991042882IN)"
+        }
+      ],
+      "createdAt": "2026-11-17T11:20:00.000Z",
+      "gatewayFeeAmount": 26.98,
+      "actualShippingCost": 65
+    }
+  ],
+  "labReports": [
+    {
+      "id": "lab-b04",
+      "laboratoryName": "Eurofins Analytical Services (Reference Document Format)",
+      "reportNumber": "COA-1026134",
+      "testedBatchNumber": "1026134",
+      "testDate": "2026-10-05",
+      "mappedProductIds": [
+        "himrudra-shilajit-20g",
+        "himrudra-shilajit-40g-duo"
+      ],
+      "testingMethodology": "Fulvic Acid Assay (77.15%), Heavy Metals & Microbiological Screening",
+      "verifiedStatus": "Reference Sample",
+      "notes": "Reference Certificate of Analysis document attached for store review (Batch 1026134, Mfg. 10/2026, Exp. 09/2029). Kept unaltered as a reference format until the store owner uploads and marks an independently verifiable laboratory PDF as Verified.",
+      "heavyMetals": [
+        {
+          "parameter": "Fulvic Acid (Active Component)",
+          "method": "Eurofins Assay",
+          "specificationLimit": "Reference Batch",
+          "observedResult": "77.15%",
+          "status": "Within Limit"
+        },
+        {
+          "parameter": "Lead (Pb)",
+          "method": "Reference COA",
+          "specificationLimit": "NMT Specification",
+          "observedResult": "Meets Specification (Pass)",
+          "status": "Within Limit"
+        },
+        {
+          "parameter": "Arsenic (As)",
+          "method": "Reference COA",
+          "specificationLimit": "NMT Specification",
+          "observedResult": "Meets Specification (Pass)",
+          "status": "Within Limit"
+        },
+        {
+          "parameter": "Mercury (Hg)",
+          "method": "Reference COA",
+          "specificationLimit": "NMT Specification",
+          "observedResult": "Meets Specification (Pass)",
+          "status": "Within Limit"
+        },
+        {
+          "parameter": "Cadmium (Cd)",
+          "method": "Reference COA",
+          "specificationLimit": "NMT Specification",
+          "observedResult": "Meets Specification (Pass)",
+          "status": "Within Limit"
+        }
+      ],
+      "microbiological": [
+        {
+          "parameter": "Aerobic Plate Count",
+          "method": "Plate Count",
+          "limit": "Acceptable Limit",
+          "observedResult": "<100 CFU/g",
+          "status": "Conforms"
+        },
+        {
+          "parameter": "Yeast & Mold Count",
+          "method": "Plate Count",
+          "limit": "Acceptable Limit",
+          "observedResult": "≤200 CFU/g (within acceptable limits)",
+          "status": "Conforms"
+        },
+        {
+          "parameter": "E. coli / Salmonella / Pseudomonas / Staphylococcus",
+          "method": "Pathogen Screen",
+          "limit": "Absent",
+          "observedResult": "Absent",
+          "status": "Absent"
+        }
+      ],
+      "updatedAt": "2026-11-19T09:30:16.533Z",
+      "customDocumentUrl": "/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.56.54_PM__1__2115dbef.jpeg"
+    }
+  ],
+  "cmsSections": [
+    {
+      "id": "cms-what-is",
+      "key": "what_is_shilajit",
+      "title": "What is Shilajit?",
+      "category": "product",
+      "content": "Shilajit is a dark, tar-like mineral resin traditionally gathered from high-altitude Himalayan rock crevices, where plant matter and geological minerals undergo slow natural transformation over centuries. In classical Indian traditions, it is valued as a concentrated mineral-organic substance prepared for mindful daily use.",
+      "approvedByAdmin": true,
+      "approvedAt": "2026-11-19T09:30:16.533Z",
+      "updatedAt": "2026-11-19T09:30:16.533Z"
+    },
+    {
+      "id": "cms-ingredients",
+      "key": "product_ingredients",
+      "title": "Product Ingredients",
+      "category": "product",
+      "content": "100% Shilajit Resin (Asphaltum punjabianum) presented in a 20 g semi-solid resin format with no added synthetic colors, artificial flavors, gums, or fillers.",
+      "approvedByAdmin": true,
+      "approvedAt": "2026-11-19T09:30:16.533Z",
+      "updatedAt": "2026-11-19T09:30:16.533Z"
+    },
+    {
+      "id": "cms-origin",
+      "key": "origin_sourcing",
+      "title": "Origin and Sourcing",
+      "category": "product",
+      "content": "Sourced from Himalayan mineral-bearing regions and processed in small batches with water-based purification and controlled low-temperature concentration. Every jar carries a batch code linked to the Quality & Transparency registry.",
+      "approvedByAdmin": true,
+      "approvedAt": "2026-11-19T09:30:16.533Z",
+      "updatedAt": "2026-11-19T09:30:16.533Z"
+    },
+    {
+      "id": "cms-how-to-use",
+      "key": "how_to_use",
+      "title": "How to Use",
+      "category": "product",
+      "content": "Scoop a pea-sized amount (approx. 250–300 mg) with the provided brass spoon. Dissolve completely in 150–200 ml of lukewarm water, warm milk, or herbal tea. Stir until the liquid turns a rich amber-brown and consume calmly as part of your morning or evening routine.",
+      "approvedByAdmin": true,
+      "approvedAt": "2026-11-19T09:30:16.533Z",
+      "updatedAt": "2026-11-19T09:30:16.533Z"
+    },
+    {
+      "id": "cms-storage",
+      "key": "storage_handling",
+      "title": "Storage and Handling",
+      "category": "product",
+      "content": "Always close the inner protective disc and outer gold cap tightly after use. Keep at room temperature in a cool, dry place away from direct sunlight. Natural resin stiffens slightly in winter and becomes more pliable in warmer weather; warming the closed jar briefly in your palms restores smooth scooping.",
+      "approvedByAdmin": true,
+      "approvedAt": "2026-11-19T09:30:16.533Z",
+      "updatedAt": "2026-11-19T09:30:16.533Z"
+    },
+    {
+      "id": "cms-precautions",
+      "key": "precautions",
+      "title": "Precautions",
+      "category": "product",
+      "content": "Intended for adult use only. Not recommended for pregnant or nursing women, children, or individuals with elevated uric acid, gout, hemochromatosis, or known kidney conditions without medical guidance. This traditional wellness product is not intended to diagnose, treat, cure, or prevent any disease.",
+      "approvedByAdmin": true,
+      "approvedAt": "2026-11-19T09:30:16.533Z",
+      "updatedAt": "2026-11-19T09:30:16.533Z"
+    },
+    {
+      "id": "cms-batch-testing",
+      "key": "batch_testing",
+      "title": "Batch Testing",
+      "category": "product",
+      "content": "Each production batch is logged in our Quality & Transparency center alongside heavy metal screening parameters, microbiological limits, and view-only laboratory reference records maintained by the store administrator.",
+      "approvedByAdmin": true,
+      "approvedAt": "2026-11-19T09:30:16.533Z",
+      "updatedAt": "2026-11-19T09:30:16.533Z"
+    },
+    {
+      "id": "cms-faq-dissolve",
+      "key": "faq_dissolve",
+      "title": "Frequently Asked Questions — Texture, Solubility & Authenticity",
+      "category": "faq",
+      "content": "Q: Why does the resin texture change between summer and winter? A: Genuine mineral resin responds naturally to ambient temperature—firmer when cool and softer when warm. Q: Does HimRudra Shilajit dissolve in warm water? A: Yes, it disperses smoothly in lukewarm water or milk without leaving gritty sand residue. Q: How long does one 20 g jar last? A: At 250–300 mg per serving, a single 20 g jar lasts roughly 65 to 75 days.",
+      "approvedByAdmin": true,
+      "approvedAt": "2026-11-19T09:30:16.533Z",
+      "updatedAt": "2026-11-19T09:30:16.533Z"
+    }
+  ],
+  "expenses": [
+    {
+      "id": "exp-1",
+      "date": "2026-10-02",
+      "category": "Sourcing",
+      "description": "Batch B04 raw resin procurement & purification",
+      "amount": 14500
+    },
+    {
+      "id": "exp-2",
+      "date": "2026-10-06",
+      "category": "Lab Testing",
+      "description": "Batch ICP-MS & microbiological assay screening",
+      "amount": 4800
+    },
+    {
+      "id": "exp-3",
+      "date": "2026-10-12",
+      "category": "Packaging",
+      "description": "UV amber glass jars, gold caps & brass spoons",
+      "amount": 6200
+    },
+    {
+      "id": "exp-4",
+      "date": "2026-11-05",
+      "category": "Marketing",
+      "description": "Search & brand editorial campaigns",
+      "amount": 5500
+    }
+  ],
+  "inquiries": [
+    {
+      "id": "inq-1",
+      "name": "Kavya Nair",
+      "email": "kavya.nair@example.in",
+      "phone": "9845012345",
+      "subject": "Bulk gifting inquiry for corporate wellness",
+      "message": "We would like to inquire about 25 jars of the 20 g edition for our leadership retreat.",
+      "status": "New",
+      "createdAt": "2026-11-16T14:20:00.000Z"
+    }
+  ],
+  "promotions": [
+    {
+      "id": "promo-freeship-nov26",
+      "title": "Limited-Time Free Shipping Offer",
+      "description": "Free standard pan-India shipping on all orders placed before 1 December 2026.",
+      "bannerHeadline": "LIMITED-TIME OFFER — FREE SHIPPING ON ALL ORDERS UNTIL 30 NOVEMBER 2026!",
+      "bannerSubtext": "Hurry! Order Your HimRudra Shilajit Today.",
+      "bannerTheme": "crystal-brown-gold",
+      "startsAt": "2026-11-01T00:00:00+05:30",
+      "endsAt": "2026-11-30T23:59:59+05:30",
+      "freeShipping": true,
+      "freeShippingSpeed": "standard",
+      "discountPercent": 0,
+      "enabled": true,
+      "usageCount": 5,
+      "revenueGenerated": 4545,
+      "createdAt": "2026-11-01T00:00:00.000Z",
+      "updatedAt": "2026-11-01T00:00:00.000Z"
+    }
+  ],
+  "adminNotifications": [
+    {
+      "id": "notif-5c723038",
+      "type": "new_paid_order",
+      "title": "New Paid Order Received!",
+      "message": "HIM-2026-0010 from Rohan Deshmukh (₹799)",
+      "orderId": "ord-76c1f940",
+      "orderNumber": "HIM-2026-0010",
+      "customerName": "Rohan Deshmukh",
+      "amount": 799,
+      "read": false,
+      "emailNotifiedTo": "himrudraofficial@gmail.com",
+      "createdAt": "2026-11-19T15:02:00.806Z"
+    },
+    {
+      "id": "notif-859f0da5",
+      "type": "new_paid_order",
+      "title": "New Paid Order Received!",
+      "message": "HIM-2026-0009 from Rohan Deshmukh (₹799)",
+      "orderId": "ord-9d69d1a9",
+      "orderNumber": "HIM-2026-0009",
+      "customerName": "Rohan Deshmukh",
+      "amount": 799,
+      "read": false,
+      "emailNotifiedTo": "himrudraofficial@gmail.com",
+      "createdAt": "2026-11-19T15:00:28.897Z"
+    },
+    {
+      "id": "notif-a2ab00d3",
+      "type": "new_paid_order",
+      "title": "New Paid Order Received!",
+      "message": "HIM-2026-0008 from Rohan Deshmukh (₹799)",
+      "orderId": "ord-f0d1ef0e",
+      "orderNumber": "HIM-2026-0008",
+      "customerName": "Rohan Deshmukh",
+      "amount": 799,
+      "read": false,
+      "emailNotifiedTo": "himrudraofficial@gmail.com",
+      "createdAt": "2026-11-19T14:59:25.279Z"
+    },
+    {
+      "id": "notif-6e749d1e",
+      "type": "new_paid_order",
+      "title": "New Paid Order Received!",
+      "message": "HIM-2026-0007 from Rohan Deshmukh (₹799)",
+      "orderId": "ord-f015a5c6",
+      "orderNumber": "HIM-2026-0007",
+      "customerName": "Rohan Deshmukh",
+      "amount": 799,
+      "read": false,
+      "emailNotifiedTo": "himrudraofficial@gmail.com",
+      "createdAt": "2026-11-19T14:58:40.826Z"
+    }
+  ],
+  "paymentIntents": {
+    "order_HR44649b7a3b21": {
+      "razorpayOrderId": "order_HR44649b7a3b21",
+      "amountPaise": 79900,
+      "verified": true,
+      "signatureVerified": true,
+      "method": "UPI",
+      "createdAt": "2026-11-19T14:58:40.681Z",
+      "paymentId": "pay_HR_mwnods7u"
+    },
+    "order_HRfad1be680a73": {
+      "razorpayOrderId": "order_HRfad1be680a73",
+      "amountPaise": 79900,
+      "verified": true,
+      "signatureVerified": true,
+      "method": "UPI",
+      "createdAt": "2026-11-19T14:59:25.102Z",
+      "paymentId": "pay_HR_mwnoeqiz"
+    },
+    "order_HR22d731dad671": {
+      "razorpayOrderId": "order_HR22d731dad671",
+      "amountPaise": 79900,
+      "verified": true,
+      "signatureVerified": true,
+      "method": "UPI",
+      "createdAt": "2026-11-19T15:00:28.703Z",
+      "paymentId": "pay_HR_mwnog3m0"
+    },
+    "order_HRd0dc74490f47": {
+      "razorpayOrderId": "order_HRd0dc74490f47",
+      "amountPaise": 79900,
+      "verified": true,
+      "signatureVerified": true,
+      "method": "UPI",
+      "createdAt": "2026-11-19T15:02:00.661Z",
+      "paymentId": "pay_HR_mwnoi2j4"
+    }
+  }
+}
