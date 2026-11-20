@@ -7,13 +7,26 @@
       "includeFiles": "{data/**,public/assets/**}"
     }
   },
+  "redirects": [
+    {
+      "source": "/(.*)",
+      "has": [
+        {
+          "type": "host",
+          "value": "www.himrudra.com"
+        }
+      ],
+      "destination": "https://himrudra.com/$1",
+      "permanent": true
+    }
+  ],
   "rewrites": [
     {
       "source": "/api/(.*)",
       "destination": "/api"
     },
     {
-      "source": "/((?!api/).*)",
+      "source": "/((?!api/|robots\\.txt|sitemap\\.xml).*)",
       "destination": "/index.html"
     }
   ]
