@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   FREE_SHIPPING_PROMO_END_ISO,
+  buildInquiryReplyLinks,
   calculateCartTotals,
   calculateProfitMetrics,
   formatChargeForEditor,
@@ -9,6 +10,7 @@ import {
   getCountdownParts,
   getOrderStageIndex,
   isAuthorizedAdmin,
+  normalizeInquiryPhone,
   normalizeLegacyOrderStatus,
   parseShippingOrCodInput,
   validateCheckoutForm,
@@ -520,6 +522,44 @@ test('parseShippingOrCodInput accepts N/A or numeric charges and N/A triggers fr
   assert.equal(naCodOrder.codFee, 0);
   assert.equal(naCodOrder.grandTotal, 799);
 });
+
+test('buildInquiryReplyLinks targets exact customer email and normalized phone for WhatsApp/SMS', () => {
+  assert.equal(normalizeInquiryPhone('9876543210'), '919876543210');
+  assert.equal(normalizeInquiryPhone('+91 98765-43210'), '919876543210');
+  assert.equal(normalizeInquiryPhone('09876543210'), '919876543210');
+  assert.equal(normalizeInquiryPhone('123'), null);
+
+  const links = buildInquiryReplyLinks(
+    {
+      name: 'Priya Sharma',
+      email: 'priya@example.in',
+      phone: '9876543210',
+      subject: 'Batch Lab Report',
+      message: 'Please share batch B04 report.',
+    },
+    'Your lab report is attached and live on our Lab Certified page.'
+  );
+
+  assert.equal(links.recipientEmail, 'priya@example.in');
+  assert.equal(links.recipientPhone, '919876543210');
+  assert.ok(links.mailtoUrl.startsWith('mailto:priya%40example.in?'));
+  assert.ok(links.mailtoUrl.includes(encodeURIComponent('Re: Batch Lab Report')));
+  assert.ok(links.whatsappUrl?.startsWith('https://wa.me/919876543210?text='));
+  assert.ok(links.smsUrl?.startsWith('sms:+919876543210?body='));
+
+  const noPhoneLinks = buildInquiryReplyLinks(
+    {
+      name: 'Rohan',
+      email: 'rohan@example.in',
+      subject: 'Delivery query',
+      message: 'When will it ship?',
+    },
+    'Ships within 24 hours.'
+  );
+  assert.equal(noPhoneLinks.whatsappUrl, null);
+  assert.equal(noPhoneLinks.smsUrl, null);
+});
+
 
 
 

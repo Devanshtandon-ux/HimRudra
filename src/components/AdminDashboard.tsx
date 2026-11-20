@@ -24,6 +24,7 @@ import {
 } from 'lucide-react';
 import { formatINR, type ProfitSummary } from '../lib/commerce';
 import { AdminAnalyticsSection } from './admin/AdminAnalyticsSection';
+import { AdminInquiriesPanel, type InquiryReplyResult } from './admin/AdminInquiriesPanel';
 import { AdminOrdersSection } from './admin/AdminOrdersSection';
 import { AdminPromotionsSection } from './admin/AdminPromotionsSection';
 import { ShippingCodQuickCard } from './admin/ShippingCodQuickCard';
@@ -33,6 +34,7 @@ import type {
   ContactInquiry,
   Coupon,
   Expense,
+  InquiryReplyChannel,
   LabReport,
   Order,
   OrderPaymentStatus,
@@ -571,9 +573,33 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       body: JSON.stringify({ status: nextStatus }),
     });
     if (res.ok) {
-      showToast(`Inquiry marked ${nextStatus}`);
+      showToast(nextStatus === 'Responded' ? 'Query marked done ✓' : 'Query reopened');
       await fetchOverview();
     }
+  };
+
+  const replyToInquiry = async (
+    inquiryId: string,
+    replyMessage: string,
+    channel: InquiryReplyChannel
+  ): Promise<InquiryReplyResult | null> => {
+    const res = await fetch(`/api/admin/inquiries/${inquiryId}/reply`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ replyMessage, channel }),
+    });
+    const payload = (await res.json().catch(() => null)) as InquiryReplyResult | { error?: string } | null;
+    if (!res.ok || !payload || !('inquiry' in payload)) {
+      showToast((payload && 'error' in payload && payload.error) || 'Failed to save reply.');
+      return null;
+    }
+    showToast(
+      payload.emailDelivered
+        ? `Reply emailed to ${payload.inquiry.email} — Query Done ✓`
+        : `Response saved for ${payload.inquiry.name} — Query Done ✓`
+    );
+    await fetchOverview();
+    return payload;
   };
 
   const addExpense = async (e: React.FormEvent) => {
@@ -888,19 +914,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                 {/* 3. OFFERS & PROMOTIONS CMS */}
                 {section === 'promotions' && (
-                  <div className="space-y-5">
-                    <ShippingCodQuickCard
-                      settings={data.settings}
-                      onSave={saveSettings}
-                    />
-                    <AdminPromotionsSection
-                      promotions={data.promotions ?? []}
-                      serverNow={data.serverNow}
-                      onCreatePromotion={createPromotion}
-                      onUpdatePromotion={updatePromotion}
-                      onDeletePromotion={deletePromotion}
-                    />
-                  </div>
+                  <AdminPromotionsSection
+                    promotions={data.promotions ?? []}
+                    serverNow={data.serverNow}
+                    onCreatePromotion={createPromotion}
+                    onUpdatePromotion={updatePromotion}
+                    onDeletePromotion={deletePromotion}
+                  />
                 )}
 
                 {/* 4. PRODUCTS & INVENTORY */}
@@ -1535,29 +1555,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </div>
                       </div>
 
-                      <div className="rounded-xl border border-[#79543D]/18 bg-[#FAF8F4] p-5 space-y-3">
-                        <h4 className="font-serif text-xl font-semibold text-[#281A15]">
-                          Customer Inquiries ({data.inquiries.length})
-                        </h4>
-                        <div className="divide-y divide-[#79543D]/12 text-xs">
-                          {data.inquiries.map((inq) => (
-                            <div key={inq.id} className="py-2.5 space-y-1.5">
-                              <div className="flex justify-between font-semibold text-[#281A15]">
-                                <span>{inq.name}</span>
-                                <button
-                                  type="button"
-                                  onClick={() => void toggleInquiryStatus(inq)}
-                                  className="text-[#79543D] underline underline-offset-2 hover:text-[#281A15]"
-                                >
-                                  {inq.status}
-                                </button>
-                              </div>
-                              <div className="text-[#79543D]">{inq.subject}</div>
-                              <p className="text-[#241B17]/80">{inq.message}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
+                      <AdminInquiriesPanel
+                        inquiries={data.inquiries}
+                        onReplyInquiry={replyToInquiry}
+                        onToggleStatus={toggleInquiryStatus}
+                      />
                     </div>
                   </div>
                 )}

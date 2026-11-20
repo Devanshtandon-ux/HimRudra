@@ -255,6 +255,8 @@ export interface Expense {
   amount: number;
 }
 
+export type InquiryReplyChannel = 'Email' | 'WhatsApp' | 'SMS' | 'Direct';
+
 export interface ContactInquiry {
   id: string;
   name: string;
@@ -264,6 +266,10 @@ export interface ContactInquiry {
   message: string;
   status: 'New' | 'Responded';
   createdAt: string;
+  replyMessage?: string;
+  repliedAt?: string;
+  repliedVia?: InquiryReplyChannel[];
+  emailDeliveryStatus?: 'sent' | 'mailto_ready';
 }
 
 export interface PublicStoreBootstrap {

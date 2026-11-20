@@ -674,3 +674,90 @@ export function isAuthorizedAdmin(
     user.email.trim().toLowerCase() === ownerEmail.trim().toLowerCase()
   );
 }
+
+export function normalizeInquiryPhone(rawPhone?: string): string | null {
+  if (!rawPhone) return null;
+  const digits = rawPhone.replace(/\D/g, '');
+  if (digits.length === 10) {
+    return `91${digits}`;
+  }
+  if (digits.length === 11 && digits.startsWith('0')) {
+    return `91${digits.slice(1)}`;
+  }
+  if (digits.length >= 11 && digits.length <= 15) {
+    return digits;
+  }
+  return null;
+}
+
+export interface InquiryReplyLinks {
+  recipientEmail: string;
+  recipientPhone: string | null;
+  subject: string;
+  formattedBody: string;
+  mailtoUrl: string;
+  whatsappUrl: string | null;
+  smsUrl: string | null;
+}
+
+export function buildInquiryReplyLinks(
+  inquiry: {
+    name: string;
+    email: string;
+    phone?: string;
+    subject: string;
+    message: string;
+  },
+  replyMessage: string,
+  brandName = 'HimRudra Support'
+): InquiryReplyLinks {
+  const recipientEmail = inquiry.email.trim();
+  const recipientPhone = normalizeInquiryPhone(inquiry.phone);
+  const cleanReply = replyMessage.trim();
+  const cleanSubject = inquiry.subject?.trim() || 'Your Inquiry';
+  const subject = `Re: ${cleanSubject} — ${brandName}`;
+
+  const formattedBody = [
+    `Hello ${inquiry.name.trim() || 'Customer'},`,
+    '',
+    cleanReply,
+    '',
+    '---',
+    `Your original query (${cleanSubject}):`,
+    inquiry.message.trim(),
+    '',
+    `Warm regards,`,
+    brandName,
+  ].join('\n');
+
+  const mailtoUrl = `mailto:${encodeURIComponent(recipientEmail)}?subject=${encodeURIComponent(
+    subject
+  )}&body=${encodeURIComponent(formattedBody)}`;
+
+  const whatsappText = [
+    `Hello ${inquiry.name.trim() || 'Customer'}, regarding your HimRudra inquiry (${cleanSubject}):`,
+    '',
+    cleanReply,
+    '',
+    `— ${brandName}`,
+  ].join('\n');
+
+  const whatsappUrl = recipientPhone
+    ? `https://wa.me/${recipientPhone}?text=${encodeURIComponent(whatsappText)}`
+    : null;
+
+  const smsUrl = recipientPhone
+    ? `sms:+${recipientPhone}?body=${encodeURIComponent(whatsappText)}`
+    : null;
+
+  return {
+    recipientEmail,
+    recipientPhone,
+    subject,
+    formattedBody,
+    mailtoUrl,
+    whatsappUrl,
+    smsUrl,
+  };
+}
+

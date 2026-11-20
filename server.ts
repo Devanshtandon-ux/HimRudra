@@ -7,6 +7,7 @@ import dotenv from 'dotenv';
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { GoogleGenAI } from '@google/genai';
 import {
+  buildInquiryReplyLinks,
   calculateCartTotals,
   calculateProfitMetrics,
   getActivePromotions,
@@ -1755,8 +1756,84 @@ ${labContext}`;
     const inq = state.inquiries.find((i) => i.id === req.params.id);
     if (!inq) return res.status(404).json({ error: 'Inquiry not found.' });
     inq.status = req.body.status === 'Responded' ? 'Responded' : 'New';
+    if (inq.status === 'Responded' && !inq.repliedAt) {
+      inq.repliedAt = new Date().toISOString();
+    }
     storeRepo.commit();
     res.json({ inquiry: inq });
+  });
+
+  app.post('/api/admin/inquiries/:id/reply', requireAdmin, async (req, res) => {
+    const state = storeRepo.getState();
+    const inq = state.inquiries.find((i) => i.id === req.params.id);
+    if (!inq) return res.status(404).json({ error: 'Inquiry not found.' });
+
+    const { replyMessage, channel } = req.body as {
+      replyMessage?: string;
+      channel?: 'Email' | 'WhatsApp' | 'SMS' | 'Direct';
+    };
+
+    const trimmedReply = (replyMessage ?? '').trim();
+    if (!trimmedReply) {
+      return res.status(400).json({ error: 'Please write a response before sending.' });
+    }
+
+    const usedChannel: 'Email' | 'WhatsApp' | 'SMS' | 'Direct' =
+      channel === 'WhatsApp' || channel === 'SMS' || channel === 'Direct' ? channel : 'Email';
+
+    const links = buildInquiryReplyLinks(inq, trimmedReply, 'HimRudra Support');
+
+    let emailDelivered = false;
+    let emailError: string | undefined;
+
+    const resendKey = process.env.RESEND_API_KEY?.trim();
+    const resendFrom =
+      process.env.RESEND_FROM_EMAIL?.trim() || 'HimRudra Support <onboarding@resend.dev>';
+
+    if (resendKey && (usedChannel === 'Email' || usedChannel === 'Direct')) {
+      try {
+        const emailRes = await fetch('https://api.resend.com/emails', {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${resendKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            from: resendFrom,
+            to: [inq.email],
+            reply_to: state.settings.brandEmail,
+            subject: links.subject,
+            text: links.formattedBody,
+          }),
+        });
+        if (emailRes.ok) {
+          emailDelivered = true;
+        } else {
+          const errPayload = (await emailRes.json().catch(() => ({}))) as { message?: string };
+          emailError = errPayload.message || 'Direct mail server rejected request; use email client link.';
+        }
+      } catch {
+        emailError = 'Could not reach mail server; use the direct email link below.';
+      }
+    }
+
+    inq.status = 'Responded';
+    inq.replyMessage = trimmedReply;
+    inq.repliedAt = new Date().toISOString();
+    const prevChannels = Array.isArray(inq.repliedVia) ? inq.repliedVia : [];
+    inq.repliedVia = prevChannels.includes(usedChannel)
+      ? prevChannels
+      : [...prevChannels, usedChannel];
+    inq.emailDeliveryStatus = emailDelivered ? 'sent' : 'mailto_ready';
+
+    storeRepo.commit();
+
+    res.json({
+      inquiry: inq,
+      emailDelivered,
+      emailError,
+      links,
+    });
   });
 
   app.put('/api/admin/password', requireAdmin, (req: AuthRequest, res) => {
