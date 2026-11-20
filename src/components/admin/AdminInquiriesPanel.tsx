@@ -283,7 +283,7 @@ export const AdminInquiriesPanel: React.FC<AdminInquiriesPanelProps> = ({
                         <span>Query Done</span>
                       </span>
                     ) : (
-                      <span className="inline-flex items-center gap-1 rounded-full border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">
+                      <span className="inline-flex items-center gap-1 rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-[11px] font-semibold text-amber-800">
                         <Clock className="h-3 w-3 text-amber-700" />
                         <span>Pending</span>
                       </span>

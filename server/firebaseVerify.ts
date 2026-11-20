@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import firebaseAppletConfig from '../firebase-applet-config.json' with { type: 'json' };
+import { adminAuth } from '../src/lib/firebase-admin.ts';
 
 export interface VerifiedGoogleIdentity {
   localId: string;
@@ -130,7 +131,22 @@ export async function verifyFirebaseIdToken(idToken: string): Promise<VerifiedGo
     throw new Error('Firebase authentication is not configured on the server.');
   }
 
-  // 1. Primary: Cryptographic RS256 verification via Google's official public X.509 certs
+  // 0. Primary: Official Firebase Admin SDK token verification
+  try {
+    const decoded = await adminAuth.verifyIdToken(trimmed);
+    if (decoded.uid && decoded.email) {
+      return {
+        localId: decoded.uid,
+        email: decoded.email.trim().toLowerCase(),
+        displayName: typeof decoded.name === 'string' ? decoded.name.trim() || undefined : undefined,
+        emailVerified: Boolean(decoded.email_verified),
+      };
+    }
+  } catch (adminErr) {
+    console.warn('Firebase Admin verifyIdToken fallback triggered:', adminErr);
+  }
+
+  // 1. Secondary: Cryptographic RS256 verification via Google's official public X.509 certs
   // (works reliably on Vercel & servers even if API key has HTTP referrer restrictions)
   if (projectId) {
     try {

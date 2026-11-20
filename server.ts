@@ -16,12 +16,24 @@ import {
 } from './src/lib/commerce.ts';
 import {
   getAdminOwnerEmail,
-  hashPassword,
+  hashPasswordAsync,
   storeRepo,
-  verifyPassword,
+  verifyPasswordAsync,
   type StoredUser,
 } from './server/store.ts';
 import { verifyFirebaseIdToken } from './server/firebaseVerify.ts';
+import { getOrCreateUser } from './src/db/users.ts';
+import { s3MediaService } from './server/s3.ts';
+import {
+  BootstrapResponseCache,
+  createTrafficGuardMiddleware,
+} from './server/trafficGuard.ts';
+import { logStructured } from './server/logger.ts';
+import {
+  MAX_INLINE_DATA_URI_BYTES,
+  StorePersistenceError,
+  validateAllowedUploadMime,
+} from './server/validation.ts';
 import type {
   AdminNotification,
   BannerTheme,
@@ -93,6 +105,8 @@ function parseCookies(cookieHeader?: string): Record<string, string> {
 
 interface AuthRequest extends Request {
   currentUser?: StoredUser;
+  rawBody?: string;
+  requestId?: string;
 }
 
 function attachUser(req: AuthRequest, _res: Response, next: NextFunction) {
@@ -164,22 +178,119 @@ function escapeHtml(str: string): string {
 export function createApiApp(): express.Express {
   const app = express();
   app.set('trust proxy', 1);
-  app.use(express.json({ limit: '5mb' }));
+  app.disable('x-powered-by');
+  app.use(
+    express.json({
+      limit: '5mb',
+      verify: (req, _res, buf) => {
+        (req as AuthRequest).rawBody = buf.toString('utf-8');
+      },
+    })
+  );
+
+  const trafficGuard = createTrafficGuardMiddleware({ maxInFlight: 800 });
+  const bootstrapCache = new BootstrapResponseCache(10_000);
+  let lastBootstrapStateVersion = -1;
+
+  // High-concurrency protection: request ID, 800 in-flight shedding, bounded sliding-window rate limiter
+  app.use('/api', trafficGuard.middleware);
+
+  // Ensure AWS DynamoDB state is hydrated before auth/routes run, and fail-loud if durable write fails
+  app.use('/api', async (req: AuthRequest, res, next) => {
+    try {
+      const isMutation = req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS';
+      await storeRepo.ensureLoaded({ forceRefresh: isMutation });
+
+      const origJson = res.json.bind(res);
+      res.json = ((body: unknown) => {
+        if (storeRepo.hasPendingSync()) {
+          void storeRepo
+            .flushPendingSync()
+            .then(() => {
+              origJson(body);
+            })
+            .catch((err: unknown) => {
+              const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+              const code = err instanceof StorePersistenceError ? err.code : 'PERSISTENCE_FAILED';
+              const message =
+                err instanceof Error
+                  ? err.message
+                  : 'Unable to save changes to AWS DynamoDB. Please retry.';
+              logStructured('error', 'api', 'dynamodb_flush_failed', {
+                requestId: req.requestId,
+                method: req.method,
+                path: req.path,
+                code,
+                statusCode,
+                error: message,
+              });
+              if (!res.headersSent) {
+                res.status(statusCode);
+                origJson({ error: message, code, requestId: req.requestId });
+              }
+            });
+          return res;
+        }
+        return origJson(body);
+      }) as typeof res.json;
+
+      next();
+    } catch (err) {
+      next(err);
+    }
+  });
+
   app.use(attachUser);
 
-  // Storefront bootstrap
-  app.get('/api/store/bootstrap', (_req, res) => {
-    const state = storeRepo.getState();
-    const nowMs = Date.now();
+  // Health, Database, AWS S3 & Traffic Resilience Status (secret-free)
+  app.get('/api/health', (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     res.json({
-      products: state.products.filter((p) => p.active),
-      settings: state.settings,
-      coupons: state.coupons.filter((c) => c.active),
-      promotions: getActivePromotions(state.promotions, nowMs),
-      labReports: state.labReports,
-      cmsSections: state.cmsSections.filter((s) => s.approvedByAdmin),
-      serverNow: new Date(nowMs).toISOString(),
+      ok: true,
+      database: storeRepo.getStorageStatus(),
+      mediaStorage: s3MediaService.getStatus(),
+      traffic: trafficGuard.concurrency.getStats(),
+      timestamp: new Date().toISOString(),
     });
+  });
+
+  // Storefront bootstrap — pre-serialized cache + ETag (304) + Edge CDN caching for 500+ concurrent users
+  app.get('/api/store/bootstrap', (req, res) => {
+    const stateVersion = storeRepo.getStateVersion();
+    if (stateVersion !== lastBootstrapStateVersion) {
+      bootstrapCache.invalidate();
+      lastBootstrapStateVersion = stateVersion;
+    }
+
+    let entry = bootstrapCache.get();
+    if (!entry) {
+      const state = storeRepo.getState();
+      const nowMs = Date.now();
+      entry = bootstrapCache.set(
+        {
+          products: state.products.filter((p) => p.active),
+          settings: state.settings,
+          coupons: state.coupons.filter((c) => c.active),
+          promotions: getActivePromotions(state.promotions, nowMs),
+          labReports: state.labReports,
+          cmsSections: state.cmsSections.filter((s) => s.approvedByAdmin),
+          serverNow: new Date(nowMs).toISOString(),
+        },
+        nowMs
+      );
+    }
+
+    res.setHeader(
+      'Cache-Control',
+      'public, max-age=15, s-maxage=30, stale-while-revalidate=60'
+    );
+    res.setHeader('ETag', entry.etag);
+
+    if (req.headers['if-none-match'] === entry.etag) {
+      return res.status(304).end();
+    }
+
+    res.type('application/json').send(entry.json);
   });
 
   // Auth routes
@@ -190,7 +301,7 @@ export function createApiApp(): express.Express {
     res.json({ user: storeRepo.sanitizeUser(req.currentUser) });
   });
 
-  app.post('/api/auth/register', (req: AuthRequest, res) => {
+  app.post('/api/auth/register', async (req: AuthRequest, res) => {
     const { name, email, phone, password } = req.body as {
       name?: string;
       email?: string;
@@ -220,13 +331,14 @@ export function createApiApp(): express.Express {
       return res.status(409).json({ error: 'An account with this email already exists.' });
     }
 
+    const passwordHash = await hashPasswordAsync(password);
     const newUser: StoredUser = {
       id: `usr-${crypto.randomUUID().slice(0, 8)}`,
       name: name.trim(),
       email: normalizedEmail,
       phone: phone.replace(/\D/g, ''),
       role: 'customer',
-      passwordHash: hashPassword(password),
+      passwordHash,
       createdAt: new Date().toISOString(),
       wishlistProductIds: [],
     };
@@ -237,7 +349,7 @@ export function createApiApp(): express.Express {
     res.status(201).json({ user: storeRepo.sanitizeUser(newUser) });
   });
 
-  app.post('/api/auth/login', (req: AuthRequest, res) => {
+  app.post('/api/auth/login', async (req: AuthRequest, res) => {
     const { email, password } = req.body as { email?: string; password?: string };
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required.' });
@@ -246,7 +358,7 @@ export function createApiApp(): express.Express {
     const user = storeRepo
       .getState()
       .users.find((u) => u.email.toLowerCase() === normalizedEmail);
-    if (!user || !verifyPassword(password, user.passwordHash)) {
+    if (!user || !(await verifyPasswordAsync(password, user.passwordHash))) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
@@ -290,7 +402,7 @@ export function createApiApp(): express.Express {
           email: normalizedEmail,
           phone: '',
           role: isOwner ? 'admin' : 'customer',
-          passwordHash: hashPassword(crypto.randomBytes(24).toString('hex')),
+          passwordHash: await hashPasswordAsync(crypto.randomBytes(24).toString('hex')),
           createdAt: new Date().toISOString(),
           wishlistProductIds: [],
         };
@@ -299,6 +411,16 @@ export function createApiApp(): express.Express {
       } else if (isOwner && user.role !== 'admin') {
         user.role = 'admin';
         storeRepo.commit();
+      }
+
+      if (storeRepo.isPostgresEnabled()) {
+        await getOrCreateUser({
+          uid: fbUser.localId,
+          email: normalizedEmail,
+          name: user.name,
+          role: user.role,
+          passwordHash: user.passwordHash,
+        });
       }
 
       const sessionToken = setSessionCookie(req, res, user);
@@ -365,7 +487,7 @@ export function createApiApp(): express.Express {
   });
 
   // Razorpay-compatible Payment Order Initiation + Server-Side Verification
-  app.post('/api/payments/create-order', (req, res) => {
+  app.post('/api/payments/create-order', async (req: AuthRequest, res) => {
     const { items, shippingSpeed, paymentMethod, couponCode } = req.body as {
       items?: CartItem[];
       shippingSpeed?: 'standard' | 'express';
@@ -399,8 +521,55 @@ export function createApiApp(): express.Express {
       nowMs: Date.now(),
     });
 
-    const razorpayOrderId = `order_HR${crypto.randomBytes(6).toString('hex')}`;
     const amountPaise = Math.round(calc.grandTotal * 100);
+    const keyId = process.env.RAZORPAY_KEY_ID?.trim();
+    const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
+    let razorpayOrderId = `order_HR${crypto.randomBytes(6).toString('hex')}`;
+
+    if (keyId && keySecret) {
+      try {
+        const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
+        const rzpRes = await fetch('https://api.razorpay.com/v1/orders', {
+          method: 'POST',
+          headers: {
+            Authorization: `Basic ${authHeader}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            amount: amountPaise,
+            currency: 'INR',
+            receipt: `hr_${Date.now()}`,
+            notes: { store: 'HimRudra', method: paymentMethod || 'UPI' },
+          }),
+        });
+        const rzpData = (await rzpRes.json().catch(() => ({}))) as {
+          id?: string;
+          error?: { description?: string };
+        };
+        if (!rzpRes.ok || !rzpData.id) {
+          logStructured('error', 'payments', 'razorpay_order_create_failed', {
+            requestId: req.requestId,
+            status: rzpRes.status,
+            error: rzpData.error?.description || 'Gateway rejected order creation',
+          });
+          return res.status(502).json({
+            error:
+              rzpData.error?.description ||
+              'Payment gateway could not initialize your order. Please try again.',
+          });
+        }
+        razorpayOrderId = rzpData.id;
+      } catch (err) {
+        logStructured('error', 'payments', 'razorpay_order_create_exception', {
+          requestId: req.requestId,
+          error: err instanceof Error ? err.message : 'Network error',
+        });
+        return res.status(502).json({
+          error: 'Unable to reach Razorpay payment gateway. Please retry in a moment.',
+        });
+      }
+    }
+
     state.paymentIntents[razorpayOrderId] = {
       razorpayOrderId,
       amountPaise,
@@ -415,12 +584,13 @@ export function createApiApp(): express.Express {
       razorpayOrderId,
       amountPaise,
       currency: 'INR',
-      keyId: process.env.RAZORPAY_KEY_ID || 'rzp_test_himrudra_gateway',
+      keyId: keyId || 'rzp_test_himrudra_gateway',
+      liveGateway: Boolean(keyId && keySecret),
       calculation: calc,
     });
   });
 
-  app.post('/api/payments/verify', (req, res) => {
+  app.post('/api/payments/verify', (req: AuthRequest, res) => {
     const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body as {
       razorpayOrderId?: string;
       razorpayPaymentId?: string;
@@ -435,7 +605,7 @@ export function createApiApp(): express.Express {
       return res.status(404).json({ error: 'Payment session not found or expired.' });
     }
 
-    const secret = process.env.RAZORPAY_KEY_SECRET;
+    const secret = process.env.RAZORPAY_KEY_SECRET?.trim();
     if (secret) {
       if (!razorpaySignature) {
         return res.status(400).json({ error: 'Payment signature missing.' });
@@ -447,6 +617,10 @@ export function createApiApp(): express.Express {
       const sigBuf = Buffer.from(razorpaySignature);
       const expBuf = Buffer.from(expected);
       if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+        logStructured('warn', 'payments', 'signature_mismatch', {
+          requestId: req.requestId,
+          razorpayOrderId,
+        });
         return res.status(400).json({ error: 'Payment signature verification failed.' });
       }
     } else if (!razorpayPaymentId.startsWith('pay_')) {
@@ -454,7 +628,7 @@ export function createApiApp(): express.Express {
     }
 
     intent.verified = true;
-    intent.signatureVerified = true;
+    intent.signatureVerified = Boolean(secret);
     intent.paymentId = razorpayPaymentId;
     storeRepo.commit();
 
@@ -466,27 +640,47 @@ export function createApiApp(): express.Express {
     });
   });
 
-  // Idempotent Payment Gateway Webhook Endpoint
-  app.post('/api/payments/webhook', (req, res) => {
+  // Idempotent Payment Gateway Webhook Endpoint (verifies exact raw HTTP body bytes)
+  app.post('/api/payments/webhook', (req: AuthRequest, res) => {
     const signature = String(req.headers['x-razorpay-signature'] ?? '');
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET;
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET?.trim();
     if (webhookSecret) {
+      const payloadToVerify = req.rawBody ?? JSON.stringify(req.body);
       const expected = crypto
         .createHmac('sha256', webhookSecret)
-        .update(JSON.stringify(req.body))
+        .update(payloadToVerify)
         .digest('hex');
       const sigBuf = Buffer.from(signature);
       const expBuf = Buffer.from(expected);
-      if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+      if (!signature || sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+        logStructured('warn', 'payments', 'webhook_signature_invalid', {
+          requestId: req.requestId,
+        });
         return res.status(400).json({ error: 'Invalid webhook signature.' });
       }
+    } else if (process.env.NODE_ENV === 'production' && IS_SERVERLESS) {
+      return res.status(503).json({
+        error: 'RAZORPAY_WEBHOOK_SECRET must be configured in production to process webhooks.',
+      });
     }
 
-    const { razorpayOrderId, razorpayPaymentId, event } = req.body as {
+    const body = req.body as {
       razorpayOrderId?: string;
       razorpayPaymentId?: string;
       event?: string;
+      payload?: {
+        payment?: {
+          entity?: {
+            id?: string;
+            order_id?: string;
+          };
+        };
+      };
     };
+    const event = body.event;
+    const razorpayOrderId = body.razorpayOrderId || body.payload?.payment?.entity?.order_id;
+    const razorpayPaymentId = body.razorpayPaymentId || body.payload?.payment?.entity?.id;
+
     const state = storeRepo.getState();
     const order = state.orders.find(
       (o) =>
@@ -532,8 +726,8 @@ export function createApiApp(): express.Express {
     res.json({ received: true, matched: true, orderNumber: order.orderNumber });
   });
 
-  // Checkout & Order Creation
-  app.post('/api/orders', (req: AuthRequest, res) => {
+  // Checkout & Atomic Order Creation (idempotent on razorpayPaymentId + DynamoDB TransactWrite stock guard)
+  app.post('/api/orders', async (req: AuthRequest, res) => {
     const {
       items,
       shippingAddress,
@@ -570,7 +764,24 @@ export function createApiApp(): express.Express {
     }
 
     const state = storeRepo.getState();
+    const isOnline = paymentMethod !== 'COD';
+
+    // Payment idempotency guard: prevent duplicate orders on retries or double-clicks
+    if (isOnline && razorpayPaymentId) {
+      const existingOrder = state.orders.find(
+        (o) => o.razorpayPaymentId && o.razorpayPaymentId === razorpayPaymentId
+      );
+      if (existingOrder) {
+        return res.status(200).json({
+          order: existingOrder,
+          updatedProducts: state.products.filter((p) => p.active),
+          idempotent: true,
+        });
+      }
+    }
+
     const orderItems: Order['items'] = [];
+    const stockDecrements: Array<{ productId: string; quantity: number }> = [];
 
     for (const item of items) {
       const product = state.products.find((p) => p.id === item.productId && p.active);
@@ -593,6 +804,7 @@ export function createApiApp(): express.Express {
         unitCost: product.costPerUnit,
         batchNumber: product.batchNumber,
       });
+      stockDecrements.push({ productId: product.id, quantity: item.quantity });
     }
 
     const nowMs = Date.now();
@@ -605,7 +817,6 @@ export function createApiApp(): express.Express {
       nowMs,
     });
 
-    const isOnline = paymentMethod !== 'COD';
     if (isOnline) {
       const intent = razorpayOrderId ? state.paymentIntents[razorpayOrderId] : undefined;
       if (
@@ -621,21 +832,24 @@ export function createApiApp(): express.Express {
       }
     }
 
-    // Decrement inventory atomically
-    for (const item of items) {
-      const product = state.products.find((p) => p.id === item.productId);
+    // Snapshot previous values so we can roll back cleanly if DynamoDB TransactWrite rejects a stock race
+    const stockSnapshots = new Map<string, number>();
+    for (const dec of stockDecrements) {
+      const product = state.products.find((p) => p.id === dec.productId);
       if (product) {
-        product.stock = Math.max(0, product.stock - item.quantity);
+        stockSnapshots.set(product.id, product.stock);
+        product.stock = Math.max(0, product.stock - dec.quantity);
       }
     }
 
-    // Update promotion usage metrics when applied
-    if (calc.appliedPromotion) {
-      const promo = state.promotions.find((p) => p.id === calc.appliedPromotion!.id);
-      if (promo) {
-        promo.usageCount += 1;
-        promo.revenueGenerated += calc.grandTotal;
-      }
+    const appliedPromo = calc.appliedPromotion
+      ? state.promotions.find((p) => p.id === calc.appliedPromotion!.id)
+      : undefined;
+    const prevPromoUsage = appliedPromo?.usageCount;
+    const prevPromoRevenue = appliedPromo?.revenueGenerated;
+    if (appliedPromo) {
+      appliedPromo.usageCount += 1;
+      appliedPromo.revenueGenerated += calc.grandTotal;
     }
 
     const now = new Date(nowMs);
@@ -724,9 +938,11 @@ export function createApiApp(): express.Express {
 
     state.orders.unshift(newOrder);
 
+    let addedNotifId: string | null = null;
     if (isOnline) {
+      addedNotifId = `notif-${crypto.randomUUID().slice(0, 8)}`;
       const notif: AdminNotification = {
-        id: `notif-${crypto.randomUUID().slice(0, 8)}`,
+        id: addedNotifId,
         type: 'new_paid_order',
         title: 'New Paid Order Received!',
         message: `${newOrder.orderNumber} from ${newOrder.customerName} (₹${newOrder.totalAmount})`,
@@ -743,12 +959,50 @@ export function createApiApp(): express.Express {
       state.adminNotifications.unshift(notif);
     }
 
-    if (req.currentUser && !req.currentUser.defaultAddress) {
+    const hadDefaultAddress = Boolean(req.currentUser?.defaultAddress);
+    if (req.currentUser && !hadDefaultAddress) {
       req.currentUser.defaultAddress = newOrder.shippingAddress;
     }
-    storeRepo.commit();
 
-    res.status(201).json({ order: newOrder, updatedProducts: state.products.filter((p) => p.active) });
+    try {
+      await storeRepo.commitOrderAtomic(newOrder, stockDecrements);
+    } catch (err) {
+      // Roll back in-memory mutations cleanly if DynamoDB atomic transaction failed or rejected stock race
+      state.orders = state.orders.filter((o) => o.id !== newOrder.id);
+      if (addedNotifId) {
+        state.adminNotifications = state.adminNotifications.filter((n) => n.id !== addedNotifId);
+      }
+      for (const [prodId, prevStock] of stockSnapshots.entries()) {
+        const product = state.products.find((p) => p.id === prodId);
+        if (product) product.stock = prevStock;
+      }
+      if (appliedPromo && prevPromoUsage !== undefined && prevPromoRevenue !== undefined) {
+        appliedPromo.usageCount = prevPromoUsage;
+        appliedPromo.revenueGenerated = prevPromoRevenue;
+      }
+      if (req.currentUser && !hadDefaultAddress) {
+        req.currentUser.defaultAddress = undefined;
+      }
+
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const code = err instanceof StorePersistenceError ? err.code : 'ORDER_COMMIT_FAILED';
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Unable to confirm your order right now. Please retry.';
+      logStructured('error', 'orders', 'atomic_commit_failed', {
+        requestId: req.requestId,
+        orderNumber: newOrder.orderNumber,
+        code,
+        statusCode,
+        error: message,
+      });
+      return res.status(statusCode).json({ error: message, code, requestId: req.requestId });
+    }
+
+    res
+      .status(201)
+      .json({ order: newOrder, updatedProducts: state.products.filter((p) => p.active) });
   });
 
   app.get('/api/orders/mine', requireAuth, (req: AuthRequest, res) => {
@@ -793,8 +1047,8 @@ export function createApiApp(): express.Express {
     res.json({ order });
   });
 
-  // Downloadable Lab Certificate / Report endpoint
-  app.get('/api/lab-reports/:id/download', (req, res) => {
+  // Downloadable Lab Certificate / Report endpoint (supports AWS S3 streaming, data URIs, and local files)
+  app.get('/api/lab-reports/:id/download', async (req, res) => {
     const state = storeRepo.getState();
     const report =
       req.params.id === 'latest'
@@ -806,7 +1060,36 @@ export function createApiApp(): express.Express {
     }
 
     const safeBatch = report.testedBatchNumber.replace(/[^a-zA-Z0-9_-]/g, '_') || 'batch';
-    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+
+    if (report.customDocumentUrl && /^https?:\/\//i.test(report.customDocumentUrl)) {
+      if (s3MediaService.isEnabled()) {
+        try {
+          const obj = await s3MediaService.fetchObjectByUrl(report.customDocumentUrl);
+          if (obj) {
+            const ext =
+              obj.contentType === 'application/pdf'
+                ? '.pdf'
+                : obj.contentType === 'image/png'
+                ? '.png'
+                : obj.contentType === 'image/webp'
+                ? '.webp'
+                : '.jpg';
+            const downloadName =
+              report.originalFileName || `HimRudra-Lab-Certified-Batch-${safeBatch}${ext}`;
+            res.setHeader('Content-Type', obj.contentType);
+            res.setHeader('Content-Disposition', `attachment; filename="${downloadName}"`);
+            return res.send(obj.buffer);
+          }
+        } catch (err) {
+          logStructured('warn', 'aws-s3', 'lab_report_stream_fallback', {
+            reportId: report.id,
+            error: err instanceof Error ? err.message : 'S3 stream error',
+          });
+        }
+      }
+      return res.redirect(302, report.customDocumentUrl);
+    }
 
     if (report.customDocumentUrl?.startsWith('data:')) {
       const match = /^data:([^;]+);base64,(.+)$/.exec(report.customDocumentUrl);
@@ -1634,17 +1917,24 @@ ${labContext}`;
     res.json({ ok: true });
   });
 
-  app.post('/api/admin/upload-report', requireAdmin, (req, res) => {
-    const { fileName, mimeType, base64Data } = req.body as {
+  app.post('/api/admin/upload-report', requireAdmin, async (req: AuthRequest, res) => {
+    const { fileName, mimeType, base64Data, folder } = req.body as {
       fileName?: string;
       mimeType?: string;
       base64Data?: string;
+      folder?: 'products' | 'lab-reports' | 'uploads';
     };
     if (!fileName || !base64Data) {
       return res.status(400).json({ error: 'File name and data are required.' });
     }
-    const allowedMimes = ['application/pdf', 'image/jpeg', 'image/png', 'image/webp'];
-    const safeMime = allowedMimes.includes(mimeType || '') ? mimeType! : 'application/octet-stream';
+
+    const mimeCheck = validateAllowedUploadMime(mimeType || '');
+    if (!mimeCheck.valid) {
+      return res.status(400).json({
+        error: 'Unsupported file format. Upload PDF, JPG, PNG, or WEBP files only.',
+      });
+    }
+    const safeMime = mimeCheck.safeMime;
     const ext =
       safeMime === 'application/pdf'
         ? '.pdf'
@@ -1661,9 +1951,53 @@ ${labContext}`;
     const cleanB64 = base64Data.includes(',') ? base64Data.split(',')[1] : base64Data;
     const buffer = Buffer.from(cleanB64, 'base64');
 
+    if (buffer.length === 0) {
+      return res.status(400).json({ error: 'Uploaded file is empty.' });
+    }
+    if (buffer.length > 5 * 1024 * 1024) {
+      return res.status(413).json({ error: 'File exceeds the 5 MB upload limit.' });
+    }
+
+    // Prefer AWS S3 whenever AWS_S3_BUCKET is configured (keeps DynamoDB items small & fast)
+    if (s3MediaService.isEnabled()) {
+      try {
+        const targetFolder =
+          folder === 'products' || folder === 'lab-reports' ? folder : 'lab-reports';
+        const uploaded = await s3MediaService.uploadBuffer({
+          buffer,
+          fileName: outName,
+          contentType: safeMime,
+          folder: targetFolder,
+        });
+        return res.status(201).json({
+          url: uploaded.url,
+          storage: 'aws-s3',
+          key: uploaded.key,
+          bytes: uploaded.bytes,
+          originalFileName: fileName,
+          originalMimeType: safeMime,
+        });
+      } catch (err) {
+        const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+        const message =
+          err instanceof Error ? err.message : 'Failed to upload file to AWS S3.';
+        return res.status(statusCode).json({ error: message, requestId: req.requestId });
+      }
+    }
+
     if (IS_SERVERLESS) {
+      // Protect DynamoDB's 400 KB item ceiling when S3 is not configured
+      if (storeRepo.isDynamoEnabled() && buffer.length > MAX_INLINE_DATA_URI_BYTES) {
+        return res.status(413).json({
+          error:
+            'File is larger than 260 KB. Configure AWS_S3_BUCKET to store large product images and PDF certificates safely in AWS S3, or compress the file below 260 KB.',
+          code: 'S3_REQUIRED_FOR_LARGE_FILE',
+        });
+      }
       return res.status(201).json({
         url: `data:${safeMime};base64,${cleanB64}`,
+        storage: 'inline-data-uri',
+        bytes: buffer.length,
         originalFileName: fileName,
         originalMimeType: safeMime,
       });
@@ -1677,6 +2011,8 @@ ${labContext}`;
 
     res.status(201).json({
       url: `/uploads/${outName}`,
+      storage: 'local-disk',
+      bytes: buffer.length,
       originalFileName: fileName,
       originalMimeType: safeMime,
     });
@@ -1836,19 +2172,19 @@ ${labContext}`;
     });
   });
 
-  app.put('/api/admin/password', requireAdmin, (req: AuthRequest, res) => {
+  app.put('/api/admin/password', requireAdmin, async (req: AuthRequest, res) => {
     const user = req.currentUser!;
     const { currentPassword, newPassword } = req.body as {
       currentPassword?: string;
       newPassword?: string;
     };
-    if (!currentPassword || !verifyPassword(currentPassword, user.passwordHash)) {
+    if (!currentPassword || !(await verifyPasswordAsync(currentPassword, user.passwordHash))) {
       return res.status(401).json({ error: 'Current password is incorrect.' });
     }
     if (!newPassword || newPassword.trim().length < 8) {
       return res.status(400).json({ error: 'New password must be at least 8 characters long.' });
     }
-    user.passwordHash = hashPassword(newPassword.trim());
+    user.passwordHash = await hashPasswordAsync(newPassword.trim());
     storeRepo.commit();
     res.json({ ok: true });
   });
@@ -1856,6 +2192,55 @@ ${labContext}`;
   // Ensure unmatched /api/* routes always return JSON 404
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'API route not found.' });
+  });
+
+  // Global error handler — never crash Express on malformed JSON, DB errors, or unexpected throws
+  app.use((err: unknown, req: AuthRequest, res: Response, _next: NextFunction) => {
+    const isBodyTooLarge =
+      typeof err === 'object' &&
+      err !== null &&
+      'type' in err &&
+      (err as { type?: string }).type === 'entity.too.large';
+    const isBadJson =
+      err instanceof SyntaxError &&
+      typeof err === 'object' &&
+      'status' in err &&
+      (err as { status?: number }).status === 400;
+
+    const statusCode = isBodyTooLarge
+      ? 413
+      : isBadJson
+      ? 400
+      : err instanceof StorePersistenceError
+      ? err.statusCode
+      : 500;
+    const code = isBodyTooLarge
+      ? 'PAYLOAD_TOO_LARGE'
+      : isBadJson
+      ? 'INVALID_JSON'
+      : err instanceof StorePersistenceError
+      ? err.code
+      : 'INTERNAL_SERVER_ERROR';
+    const message = isBodyTooLarge
+      ? 'Request payload exceeds the 5 MB limit.'
+      : isBadJson
+      ? 'Malformed JSON request payload.'
+      : err instanceof Error
+      ? err.message
+      : 'Unexpected server error.';
+
+    logStructured('error', 'express', 'unhandled_route_error', {
+      requestId: req.requestId,
+      method: req.method,
+      path: req.path,
+      statusCode,
+      code,
+      error: message,
+    });
+
+    if (!res.headersSent) {
+      res.status(statusCode).json({ error: message, code, requestId: req.requestId });
+    }
   });
 
   return app;
@@ -1876,16 +2261,32 @@ async function startServer() {
   } else {
     const publicDir = path.resolve(process.cwd(), 'public');
     const distDir = path.resolve(process.cwd(), 'dist');
-    app.use(express.static(publicDir));
-    app.use(express.static(distDir));
+    app.use(
+      '/assets',
+      express.static(path.join(distDir, 'assets'), {
+        maxAge: '365d',
+        immutable: true,
+      })
+    );
+    app.use(express.static(publicDir, { maxAge: '1h' }));
+    app.use(express.static(distDir, { maxAge: '1h' }));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`HimRudra platform running on http://localhost:${PORT}`);
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    logStructured('info', 'server', 'listening', {
+      port: PORT,
+      database: storeRepo.getStorageStatus().engine,
+      mediaStorage: s3MediaService.getStatus().engine,
+    });
   });
+
+  // High-concurrency HTTP keep-alive & header timeout tuning (safe for ALBs, CloudFront, and 500+ concurrent clients)
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
+  server.maxConnections = 2_000;
 }
 
 const isDirectRun =
@@ -1894,5 +2295,15 @@ const isDirectRun =
   path.resolve(process.argv[1]) === path.resolve(fileURLToPath(import.meta.url));
 
 if (isDirectRun) {
+  process.on('unhandledRejection', (reason) => {
+    logStructured('error', 'process', 'unhandled_rejection', {
+      error: reason instanceof Error ? reason.message : String(reason),
+    });
+  });
+  process.on('uncaughtException', (err) => {
+    logStructured('error', 'process', 'uncaught_exception', {
+      error: err.message,
+    });
+  });
   void startServer();
 }
