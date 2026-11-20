@@ -28,14 +28,14 @@
       "batchNumber": "HR-SHJ-2026-B04",
       "gstRatePercent": 12,
       "shortDescription": "HimRudra Himalayan Shilajit Resin brings a traditional Himalayan wellness ingredient into a modern, premium experience. Presented in a 20 g jar, this resin is designed for customers who value thoughtful sourcing, clear product information and an uncomplicated daily routine.",
-      "usageGuidance": "Take a pea-sized portion (approximately 250–300 mg) using the included brass spoon. Stir gently into lukewarm water or milk until dissolved. Use once daily or as advised by a qualified practitioner.",
+      "usageGuidance": "Take a small amount using a normal spoon and dissolve completely in lukewarm water, warm milk, or herbal tea. Stir well until dissolved and consume once daily or as advised by a qualified practitioner.",
       "storageInstructions": "Keep the amber glass jar tightly sealed after each use. Store in a cool, dry place away from direct sunlight. Resin consistency naturally firms in cooler weather and softens in warmth.",
       "shippingNote": "Free standard pan-India delivery during our launch offer (until 30 November 2026). After the offer ends, standard delivery is ₹100 (3–5 business days). Cash on Delivery fee is ₹100.",
       "returnPolicy": "Unopened, tamper-sealed jars are eligible for return or replacement within 7 days of delivery. Damaged-in-transit replacements are processed within 48 hours of photo verification.",
       "specifications": [
         {
           "label": "Net Quantity",
-          "value": "20 g (approx. 65–75 servings)"
+          "value": "20 g (approx. 40 servings)"
         },
         {
           "label": "Form",
@@ -47,7 +47,7 @@
         },
         {
           "label": "Included Accessory",
-          "value": "Calibrated brass measuring spoon"
+          "value": "Normal measuring spoon"
         },
         {
           "label": "Active Batch Code",
@@ -86,7 +86,7 @@
       "batchNumber": "HR-SHJ-2026-B04",
       "gstRatePercent": 12,
       "shortDescription": "Two individually sealed 20 g jars of HimRudra Himalayan Shilajit Resin crafted for consistent two-to-four month household rituals.",
-      "usageGuidance": "Dissolve a pea-sized portion (~250–300 mg) in lukewarm water or milk once daily. Keep the second jar sealed until ready to open.",
+      "usageGuidance": "Take a small amount using a normal spoon and dissolve completely in lukewarm water, warm milk, or herbal tea once daily. Keep the second jar sealed until ready to open.",
       "storageInstructions": "Store in a cool, dry cabinet away from moisture and direct heat.",
       "shippingNote": "Free standard pan-India delivery during our launch offer (until 30 November 2026). After the offer ends, standard delivery is ₹100. Cash on Delivery fee is ₹100.",
       "returnPolicy": "Unopened jars with intact tamper seals qualify for return within 7 days of delivery.",
@@ -101,7 +101,7 @@
         },
         {
           "label": "Packaging",
-          "value": "Dual keepsake boxes with 2 brass spoons"
+          "value": "Dual keepsake boxes with 2 normal spoons"
         },
         {
           "label": "Active Batch Code",
@@ -272,7 +272,7 @@
       "key": "how_to_use",
       "title": "How to Use",
       "category": "product",
-      "content": "Scoop a pea-sized amount (approx. 250–300 mg) with the provided brass spoon. Dissolve completely in 150–200 ml of lukewarm water, warm milk, or herbal tea. Stir until the liquid turns a rich amber-brown and consume calmly as part of your morning or evening routine.",
+      "content": "Take a small amount using a normal spoon and dissolve completely in lukewarm water, warm milk, or herbal tea. Stir until the liquid turns a rich amber-brown and consume once daily as part of your morning or evening routine.",
       "approvedByAdmin": true,
       "approvedAt": "2026-11-19T09:30:16.533Z",
       "updatedAt": "2026-11-19T09:30:16.533Z"
@@ -322,7 +322,7 @@
       "key": "faq_solubility",
       "title": "Does HimRudra Shilajit dissolve completely in warm water?",
       "category": "faq",
-      "content": "Yes. A pea-sized portion dissolves smoothly in lukewarm water, warm milk, or herbal tea into a rich amber-brown infusion without leaving gritty sand residue.",
+      "content": "Yes. A serving dissolves smoothly in lukewarm water, warm milk, or herbal tea into a rich amber-brown infusion without leaving gritty sand residue.",
       "approvedByAdmin": true,
       "approvedAt": "2026-11-19T09:30:16.533Z",
       "updatedAt": "2026-11-19T09:30:16.533Z"
@@ -332,7 +332,7 @@
       "key": "faq_duration",
       "title": "How long does one 20 g jar of HimRudra Shilajit last?",
       "category": "faq",
-      "content": "At the recommended serving of 250–300 mg (one pea-sized scoop daily), a single 20 g apothecary jar lasts approximately 65 to 75 days.",
+      "content": "At the recommended serving of 500 mg daily, a single 20 g apothecary jar lasts approximately 40 days.",
       "approvedByAdmin": true,
       "approvedAt": "2026-11-19T09:30:16.533Z",
       "updatedAt": "2026-11-19T09:30:16.533Z"

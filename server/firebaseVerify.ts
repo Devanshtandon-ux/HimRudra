@@ -16,9 +16,21 @@ let certsExpiresAt = 0;
 
 function getFirebaseProjectConfig() {
   return {
-    apiKey: process.env.FIREBASE_API_KEY?.trim() || firebaseAppletConfig.apiKey || '',
-    projectId: process.env.FIREBASE_PROJECT_ID?.trim() || firebaseAppletConfig.projectId || '',
-    authDomain: process.env.FIREBASE_AUTH_DOMAIN?.trim() || firebaseAppletConfig.authDomain || '',
+    apiKey:
+      process.env.FIREBASE_API_KEY?.trim() ||
+      process.env.VITE_FIREBASE_API_KEY?.trim() ||
+      firebaseAppletConfig.apiKey ||
+      '',
+    projectId:
+      process.env.FIREBASE_PROJECT_ID?.trim() ||
+      process.env.VITE_FIREBASE_PROJECT_ID?.trim() ||
+      firebaseAppletConfig.projectId ||
+      '',
+    authDomain:
+      process.env.FIREBASE_AUTH_DOMAIN?.trim() ||
+      process.env.VITE_FIREBASE_AUTH_DOMAIN?.trim() ||
+      firebaseAppletConfig.authDomain ||
+      '',
   };
 }
 

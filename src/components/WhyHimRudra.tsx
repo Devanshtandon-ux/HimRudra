@@ -20,7 +20,7 @@ const PILLARS = [
     title: 'Carefully Selected Resin',
     icon: Gem,
     description:
-      'Presented in its classic semi-solid mineral resin state inside a UV-shielded amber glass jar with an accompanying brass dosing spoon for consistent handling.',
+      'Presented in its classic semi-solid mineral resin state inside a UV-shielded amber glass jar with an accompanying normal spoon for consistent handling.',
   },
   {
     number: '03',

@@ -13,9 +13,24 @@ import firebaseConfig from '../../firebase-applet-config.json';
 let cachedApp: FirebaseApp | null = null;
 let cachedAuth: Auth | null = null;
 
+function resolveFirebaseWebConfig() {
+  const env = import.meta.env as Record<string, string | undefined>;
+  const apiKey = env.VITE_FIREBASE_API_KEY?.trim() || firebaseConfig.apiKey;
+  const authDomain = env.VITE_FIREBASE_AUTH_DOMAIN?.trim() || firebaseConfig.authDomain;
+  const projectId = env.VITE_FIREBASE_PROJECT_ID?.trim() || firebaseConfig.projectId;
+  const appId = env.VITE_FIREBASE_APP_ID?.trim() || firebaseConfig.appId;
+  return {
+    ...firebaseConfig,
+    apiKey,
+    authDomain,
+    projectId,
+    appId,
+  };
+}
+
 function getFirebaseAuth(): Auth {
   if (cachedAuth) return cachedAuth;
-  cachedApp = getApps().length > 0 ? getApps()[0] : initializeApp(firebaseConfig);
+  cachedApp = getApps().length > 0 ? getApps()[0] : initializeApp(resolveFirebaseWebConfig());
   cachedAuth = getAuth(cachedApp);
   // Best-effort persistence setup; non-fatal in strict sandboxed iframes
   setPersistence(cachedAuth, browserLocalPersistence).catch(() => {});

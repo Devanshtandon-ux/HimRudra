@@ -1308,6 +1308,7 @@ ${labContext}`;
       'Customer Name',
       'Email',
       'Phone',
+      'Address',
       'City',
       'State',
       'PIN',
@@ -1328,6 +1329,14 @@ ${labContext}`;
         o.customerName,
         o.customerEmail,
         o.customerPhone,
+        [
+          o.shippingAddress.houseFlatNumber,
+          o.shippingAddress.line1,
+          o.shippingAddress.line2,
+          o.shippingAddress.landmark,
+        ]
+          .filter(Boolean)
+          .join(', '),
         o.shippingAddress.city,
         o.shippingAddress.state,
         o.shippingAddress.pincode,

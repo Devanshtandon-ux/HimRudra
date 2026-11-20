@@ -143,7 +143,13 @@ export const AdminOrdersSection: React.FC<AdminOrdersSectionProps> = ({
           ord.customerEmail,
           ord.customerPhone,
           ord.trackingNumber || '',
+          ord.shippingAddress.houseFlatNumber || '',
+          ord.shippingAddress.line1,
+          ord.shippingAddress.line2 || '',
+          ord.shippingAddress.landmark || '',
           ord.shippingAddress.city,
+          ord.shippingAddress.state,
+          ord.shippingAddress.pincode,
         ]
           .join(' ')
           .toLowerCase();
@@ -214,7 +220,7 @@ export const AdminOrdersSection: React.FC<AdminOrdersSectionProps> = ({
               aria-label="Search orders"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Search Order ID, Customer, Phone, Email, or AWB..."
+              placeholder="Search Order ID, Customer, Phone, Address, PIN, or AWB..."
               className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] pl-9 pr-3 py-2 text-xs"
             />
           </div>
@@ -318,6 +324,7 @@ export const AdminOrdersSection: React.FC<AdminOrdersSectionProps> = ({
               <th className="py-3 px-3.5 font-semibold">Order ID</th>
               <th className="py-3 px-3.5 font-semibold">Customer Name</th>
               <th className="py-3 px-3.5 font-semibold">Phone</th>
+              <th className="py-3 px-3.5 font-semibold">Address</th>
               <th className="py-3 px-3.5 font-semibold">Amount Paid</th>
               <th className="py-3 px-3.5 font-semibold">Payment Status</th>
               <th className="py-3 px-3.5 font-semibold">Order Status</th>
@@ -329,21 +336,40 @@ export const AdminOrdersSection: React.FC<AdminOrdersSectionProps> = ({
           <tbody className="divide-y divide-[#79543D]/12 tabular-nums">
             {filteredOrders.length === 0 ? (
               <tr>
-                <td colSpan={9} className="py-8 text-center text-[#79543D]">
+                <td colSpan={10} className="py-8 text-center text-[#79543D]">
                   No orders match the current filter criteria.
                 </td>
               </tr>
             ) : (
-              filteredOrders.map((ord) => (
+              filteredOrders.map((ord) => {
+                const streetAddress = [
+                  ord.shippingAddress.houseFlatNumber,
+                  ord.shippingAddress.line1,
+                  ord.shippingAddress.line2,
+                  ord.shippingAddress.landmark,
+                ]
+                  .filter(Boolean)
+                  .join(', ');
+
+                return (
                 <tr key={ord.id} className="hover:bg-[#F3EDE5]/40">
                   <td className="py-3 px-3.5 font-mono font-semibold text-[#281A15] whitespace-nowrap">
                     {ord.orderNumber}
                   </td>
                   <td className="py-3 px-3.5">
                     <div className="font-medium text-[#281A15]">{ord.customerName}</div>
-                    <div className="text-[11px] text-[#79543D]">{ord.shippingAddress.city}</div>
+                    <div className="text-[11px] text-[#79543D]">{ord.customerEmail}</div>
                   </td>
                   <td className="py-3 px-3.5 font-mono whitespace-nowrap">{ord.customerPhone}</td>
+                  <td className="py-3 px-3.5 min-w-[200px] max-w-[260px]">
+                    <div className="text-[#281A15] leading-snug break-words">
+                      {streetAddress || '—'}
+                    </div>
+                    <div className="text-[11px] text-[#79543D] mt-0.5">
+                      {ord.shippingAddress.city}, {ord.shippingAddress.state} —{' '}
+                      <span className="font-mono">{ord.shippingAddress.pincode}</span>
+                    </div>
+                  </td>
                   <td className="py-3 px-3.5 font-mono font-semibold text-[#281A15] whitespace-nowrap">
                     {formatINR(ord.totalAmount)}
                   </td>
@@ -406,7 +432,8 @@ export const AdminOrdersSection: React.FC<AdminOrdersSectionProps> = ({
                     </div>
                   </td>
                 </tr>
-              ))
+                );
+              })
             )}
           </tbody>
         </table>
