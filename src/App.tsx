@@ -58,13 +58,22 @@ export default function App() {
   const [selectedLabReportId, setSelectedLabReportId] = useState('');
 
   const loadStoreBootstrap = async () => {
-    try {
-      const res = await fetch('/api/store/bootstrap');
-      if (!res.ok) throw new Error('Failed to load storefront data.');
-      const data = (await res.json()) as PublicStoreBootstrap;
-      setBootstrap(data);
-    } catch {
-      setLoadError('Unable to load HimRudra store catalog. Please refresh.');
+    const maxAttempts = 2;
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      try {
+        const res = await fetch('/api/store/bootstrap');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = (await res.json()) as PublicStoreBootstrap;
+        setBootstrap(data);
+        setLoadError('');
+        return;
+      } catch {
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        } else {
+          setLoadError('Unable to load HimRudra store catalog. Please refresh.');
+        }
+      }
     }
   };
 

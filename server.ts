@@ -90,15 +90,20 @@ function verifySession(token: string): SessionPayload | null {
   }
 }
 
-function parseCookies(cookieHeader?: string): Record<string, string> {
+export function parseCookies(cookieHeader?: string): Record<string, string> {
   const map: Record<string, string> = {};
   if (!cookieHeader) return map;
   for (const part of cookieHeader.split(';')) {
     const idx = part.indexOf('=');
     if (idx === -1) continue;
     const k = part.slice(0, idx).trim();
-    const v = decodeURIComponent(part.slice(idx + 1).trim());
-    map[k] = v;
+    if (!k) continue;
+    const rawValue = part.slice(idx + 1).trim();
+    try {
+      map[k] = decodeURIComponent(rawValue);
+    } catch {
+      map[k] = rawValue;
+    }
   }
   return map;
 }
@@ -201,38 +206,40 @@ export function createApiApp(): express.Express {
       const isMutation = req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS';
       await storeRepo.ensureLoaded({ forceRefresh: isMutation });
 
-      const origJson = res.json.bind(res);
-      res.json = ((body: unknown) => {
-        if (storeRepo.hasPendingSync()) {
-          void storeRepo
-            .flushPendingSync()
-            .then(() => {
-              origJson(body);
-            })
-            .catch((err: unknown) => {
-              const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
-              const code = err instanceof StorePersistenceError ? err.code : 'PERSISTENCE_FAILED';
-              const message =
-                err instanceof Error
-                  ? err.message
-                  : 'Unable to save changes to AWS DynamoDB. Please retry.';
-              logStructured('error', 'api', 'dynamodb_flush_failed', {
-                requestId: req.requestId,
-                method: req.method,
-                path: req.path,
-                code,
-                statusCode,
-                error: message,
+      if (isMutation) {
+        const origJson = res.json.bind(res);
+        res.json = ((body: unknown) => {
+          if (storeRepo.hasPendingSync()) {
+            void storeRepo
+              .flushPendingSync()
+              .then(() => {
+                origJson(body);
+              })
+              .catch((err: unknown) => {
+                const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+                const code = err instanceof StorePersistenceError ? err.code : 'PERSISTENCE_FAILED';
+                const message =
+                  err instanceof Error
+                    ? err.message
+                    : 'Unable to save changes to the cloud database. Please retry.';
+                logStructured('error', 'api', 'db_flush_failed', {
+                  requestId: req.requestId,
+                  method: req.method,
+                  path: req.path,
+                  code,
+                  statusCode,
+                  error: message,
+                });
+                if (!res.headersSent) {
+                  res.status(statusCode);
+                  origJson({ error: message, code, requestId: req.requestId });
+                }
               });
-              if (!res.headersSent) {
-                res.status(statusCode);
-                origJson({ error: message, code, requestId: req.requestId });
-              }
-            });
-          return res;
-        }
-        return origJson(body);
-      }) as typeof res.json;
+            return res;
+          }
+          return origJson(body);
+        }) as typeof res.json;
+      }
 
       next();
     } catch (err) {
@@ -2251,8 +2258,11 @@ export default app;
 
 async function startServer() {
   // Vite dev middleware or static production serving for non-Vercel hosts & local dev
-  if (process.env.NODE_ENV !== 'production') {
-    const { createServer: createViteServer } = await import('vite');
+  if (!IS_SERVERLESS && process.env.NODE_ENV !== 'production') {
+    const vitePkg = 'vite';
+    const { createServer: createViteServer } = (await import(
+      /* @vite-ignore */ vitePkg
+    )) as typeof import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',

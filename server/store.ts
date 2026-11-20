@@ -515,7 +515,7 @@ class StoreRepository {
   private lastPersistedFingerprints = new Map<string, string>();
   private hydratedFromCloud = false;
   private lastHydratedAtMs = 0;
-  private hydrationPromise: Promise<void> | null = null;
+  private hydrationPromise: Promise<Error | null> | null = null;
   private syncChain: Promise<void> = Promise.resolve();
   private pendingSyncCount = 0;
   private lastCommitError: Error | null = null;
@@ -573,14 +573,7 @@ class StoreRepository {
         mutated = true;
       }
     }
-    if (
-      parsed.settings?.announcementText &&
-      parsed.settings.announcementText.length > 68
-    ) {
-      parsed.settings.announcementText =
-        'Batch HR-SHJ-2026-B04 Now Shipping · Free Delivery ₹1,499+';
-      mutated = true;
-    }
+    // Legacy announcement text migration is handled below in settings normalization (avoid length-based ping-pong rewrites).
     for (const rep of parsed.labReports ?? []) {
       if (rep.id === 'lab-b04' && rep.heavyMetals?.[0]?.parameter !== 'Fulvic Acid (Active Component)') {
         rep.customDocumentUrl =
@@ -899,11 +892,14 @@ class StoreRepository {
     }
 
     if (this.hydrationPromise) {
-      await this.hydrationPromise;
+      const sharedErr = await this.hydrationPromise;
+      if (sharedErr && options?.forceRefresh) {
+        throw sharedErr;
+      }
       return;
     }
 
-    this.hydrationPromise = (async () => {
+    this.hydrationPromise = (async (): Promise<Error | null> => {
       try {
         if (pg) {
           const fallbackSeed = createSeedState();
@@ -916,7 +912,7 @@ class StoreRepository {
             this.lastSyncedAt = new Date().toISOString();
             this.lastCloudError = null;
             this.stateVersion += 1;
-            return;
+            return null;
           }
 
           const mutated = this.normalizeState(loaded.state);
@@ -930,7 +926,7 @@ class StoreRepository {
           if (mutated) {
             await pg.persistState(this.state);
           }
-          return;
+          return null;
         }
 
         if (adapter) {
@@ -947,7 +943,7 @@ class StoreRepository {
             this.lastSyncedAt = new Date().toISOString();
             this.lastCloudError = null;
             this.stateVersion += 1;
-            return;
+            return null;
           }
 
           const fallbackSeed = createSeedState();
@@ -972,18 +968,20 @@ class StoreRepository {
             }
           }
         }
+        return null;
       } catch (err) {
-        this.lastCloudError =
-          err instanceof Error ? err.message : 'Failed to connect to cloud database';
-        if (options?.forceRefresh) {
-          throw err;
-        }
+        const errorObj = err instanceof Error ? err : new Error(String(err));
+        this.lastCloudError = errorObj.message;
+        return errorObj;
       } finally {
         this.hydrationPromise = null;
       }
     })();
 
-    await this.hydrationPromise;
+    const hydrationErr = await this.hydrationPromise;
+    if (hydrationErr && options?.forceRefresh) {
+      throw hydrationErr;
+    }
   }
 
   getState(): DatabaseState {

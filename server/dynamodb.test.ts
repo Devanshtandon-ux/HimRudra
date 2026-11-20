@@ -22,6 +22,7 @@ import {
   InFlightConcurrencyGuard,
 } from './trafficGuard.ts';
 import { redactSensitiveData } from './logger.ts';
+import { parseCookies } from '../server.ts';
 
 function makeMinimalState(): DatabaseState {
   return {
@@ -336,4 +337,13 @@ test('redactSensitiveData strips AWS secrets, passwords, and tokens from logs', 
   assert.equal((redacted.nested as Record<string, unknown>).authorization, '[REDACTED]');
   assert.equal((redacted.nested as Record<string, unknown>).safe, 'ok');
 });
+
+test('parseCookies safely handles malformed percent-encoded cookies without throwing URIError', () => {
+  const parsed = parseCookies('good=hello%20world; broken=%E0%A4%A; himrudra_session=abc.def; =emptykey');
+  assert.equal(parsed.good, 'hello world');
+  assert.equal(parsed.broken, '%E0%A4%A');
+  assert.equal(parsed.himrudra_session, 'abc.def');
+  assert.equal(Object.prototype.hasOwnProperty.call(parsed, ''), false);
+});
+
 
