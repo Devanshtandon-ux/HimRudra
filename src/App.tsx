@@ -58,8 +58,9 @@ export default function App() {
   const [selectedLabReportId, setSelectedLabReportId] = useState('');
 
   const loadStoreBootstrap = async () => {
-    const maxAttempts = 2;
-    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    setLoadError('');
+    const retryDelaysMs = [1200, 2500];
+    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
       try {
         const res = await fetch('/api/store/bootstrap');
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -68,8 +69,8 @@ export default function App() {
         setLoadError('');
         return;
       } catch {
-        if (attempt < maxAttempts) {
-          await new Promise((resolve) => window.setTimeout(resolve, 1500));
+        if (attempt < retryDelaysMs.length) {
+          await new Promise((resolve) => window.setTimeout(resolve, retryDelaysMs[attempt]));
         } else {
           setLoadError('Unable to load HimRudra store catalog. Please refresh.');
         }
@@ -205,9 +206,19 @@ export default function App() {
   if (loadError) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#FAF8F4] p-6">
-        <div className="max-w-md rounded-2xl border border-[#79543D]/20 bg-[#F3EDE5] p-6 text-center">
-          <h1 className="font-serif text-2xl text-[#281A15] mb-2">HimRudra</h1>
+        <div className="max-w-md rounded-2xl border border-[#79543D]/20 bg-[#F3EDE5] p-6 text-center space-y-4">
+          <h1 className="font-serif text-2xl text-[#281A15]">HimRudra</h1>
           <p className="text-sm text-[#241B17]/80">{loadError}</p>
+          <button
+            type="button"
+            onClick={() => {
+              void loadStoreBootstrap();
+              void loadCurrentUser();
+            }}
+            className="inline-flex items-center justify-center rounded-lg bg-[#281A15] px-5 py-2.5 text-xs font-medium uppercase tracking-[0.14em] text-[#FAF8F4] transition hover:bg-[#3d2820]"
+          >
+            Try Again
+          </button>
         </div>
       </div>
     );

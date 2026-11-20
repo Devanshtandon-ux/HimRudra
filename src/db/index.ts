@@ -30,7 +30,7 @@ export const createPool = () => {
       database: process.env.SQL_DB_NAME,
       max: 15,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: 20000,
+      connectionTimeoutMillis: process.env.VERCEL ? 6000 : 20000,
     });
 
     global._postgresPool.on('error', (err) => {
