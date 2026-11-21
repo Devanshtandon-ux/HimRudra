@@ -1,3 +1,4 @@
+
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "npm run build",
@@ -7,19 +8,6 @@
       "includeFiles": "{data/**,public/assets/**,firebase-applet-config.json}"
     }
   },
-  "redirects": [
-    {
-      "source": "/(.*)",
-      "has": [
-        {
-          "type": "host",
-          "value": "www.himrudra.com"
-        }
-      ],
-      "destination": "https://himrudra.com/$1",
-      "permanent": true
-    }
-  ],
   "rewrites": [
     {
       "source": "/api/(.*)",
