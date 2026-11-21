@@ -84,7 +84,7 @@ export const SupportChatbot: React.FC = () => {
   };
 
   return (
-    <div className="fixed bottom-18 lg:bottom-6 right-4 sm:right-5 z-40">
+    <div className="himrudra-floating-action fixed bottom-18 lg:bottom-6 right-3 sm:right-5 z-40">
       {!open ? (
         <button
           type="button"
@@ -99,7 +99,7 @@ export const SupportChatbot: React.FC = () => {
         <div
           role="dialog"
           aria-label="HimRudra Multilingual Support Concierge"
-          className="w-[340px] sm:w-[385px] rounded-2xl border border-[#79543D]/25 bg-[#FAF8F4] shadow-2xl overflow-hidden flex flex-col max-h-[520px]"
+          className="himrudra-chat-panel w-[min(340px,calc(100vw-1.5rem))] sm:w-[385px] rounded-2xl border border-[#79543D]/25 bg-[#FAF8F4] shadow-2xl overflow-hidden flex flex-col max-h-[min(520px,calc(100dvh-7.5rem))]"
         >
           {/* Header */}
           <div className="bg-[#281A15] text-[#FAF8F4] px-4 py-3.5 flex items-center justify-between">

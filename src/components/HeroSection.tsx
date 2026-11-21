@@ -66,7 +66,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
               )}
             </div>
 
-            <h1 className="font-serif text-4xl sm:text-5xl lg:text-[3.5rem] font-semibold leading-[1.08] tracking-tight text-[#281A15] text-balance mb-5">
+            <h1 className="himrudra-hero-title font-serif text-4xl sm:text-5xl lg:text-[3.5rem] font-semibold leading-[1.08] tracking-tight text-[#281A15] text-balance mb-5">
               Born in the Himalayas. Crafted for Your Ritual.
             </h1>
 
@@ -130,7 +130,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
                   </span>
                   <div
                     aria-label="Free shipping offer countdown"
-                    className="grid grid-cols-4 gap-2 text-center font-mono tabular-nums"
+                    className="himrudra-countdown-grid grid grid-cols-4 gap-1.5 sm:gap-2 text-center font-mono tabular-nums"
                   >
                     {[
                       ['Days', countdown.days],
@@ -140,9 +140,9 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
                     ].map(([unit, val]) => (
                       <div
                         key={String(unit)}
-                        className="rounded-lg bg-[#FAF8F4]/10 border border-[#C69B51]/35 px-2.5 py-1.5 min-w-[52px]"
+                        className="himrudra-countdown-cell rounded-lg bg-[#FAF8F4]/10 border border-[#C69B51]/35 px-1.5 sm:px-2.5 py-1.5 min-w-0 sm:min-w-[52px]"
                       >
-                        <div className="text-base font-semibold leading-none text-[#FAF8F4]">
+                        <div className="text-sm sm:text-base font-semibold leading-none text-[#FAF8F4]">
                           {String(val).padStart(2, '0')}
                         </div>
                         <div className="text-[9px] uppercase tracking-wider text-[#C69B51] mt-1">
@@ -156,11 +156,11 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
             )}
 
             {/* CTAs */}
-            <div className="flex flex-wrap items-center gap-4">
+            <div className="himrudra-hero-actions flex flex-wrap items-center gap-3 sm:gap-4">
               <button
                 type="button"
                 onClick={onShopNow}
-                className="inline-flex items-center justify-center gap-2.5 rounded-lg bg-[#281A15] px-7 py-3.5 text-sm font-semibold tracking-wide text-[#FAF8F4] hover:bg-[#3A2720] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#C69B51] transition-colors whitespace-nowrap"
+                className="inline-flex items-center justify-center gap-2.5 rounded-lg bg-[#281A15] px-6 sm:px-7 py-3.5 text-sm font-semibold tracking-wide text-[#FAF8F4] hover:bg-[#3A2720] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#C69B51] transition-colors whitespace-nowrap"
               >
                 <span>SHOP NOW — {formatINR(primaryProduct.price)}</span>
                 <ArrowRight className="h-4 w-4 text-[#C69B51]" />
@@ -183,7 +183,7 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
             transition={{ duration: 0.75, delay: 0.1, ease: [0.16, 1, 0.3, 1] }}
             className="lg:col-span-6 flex items-stretch"
           >
-            <div className="relative w-full min-h-[380px] sm:min-h-[460px] lg:min-h-[540px] rounded-2xl border border-[#79543D]/15 shadow-[0_24px_60px_-20px_rgba(40,26,21,0.16)] overflow-hidden">
+            <div className="relative w-full min-h-[300px] sm:min-h-[440px] lg:min-h-[540px] rounded-2xl border border-[#79543D]/15 shadow-[0_24px_60px_-20px_rgba(40,26,21,0.16)] overflow-hidden">
               <ProductArt
                 kind="hero"
                 customImageUrl={primaryProduct.customImages?.[0]}

@@ -18,6 +18,20 @@
     font-family: var(--font-sans);
     background-color: #FAF8F4;
     color: #241B17;
+    overflow-x: clip;
+    -webkit-text-size-adjust: 100%;
+    scroll-behavior: smooth;
+  }
+
+  body {
+    overflow-x: clip;
+    min-height: 100dvh;
+  }
+
+  img,
+  svg,
+  video {
+    max-width: 100%;
   }
 
   h1, h2, h3, .font-display {
@@ -31,6 +45,120 @@
 
 .text-balance {
   text-wrap: balance;
+}
+
+/* ==========================================================================
+   Responsive Media Queries (Mobile, Tablet, Laptop, Desktop, Touch & Landscape)
+   ========================================================================== */
+
+/* Extra-small mobile devices (<= 480px) */
+@media (max-width: 480px) {
+  html {
+    font-size: 15px;
+  }
+
+  .himrudra-hero-title {
+    font-size: clamp(2rem, 8.5vw, 2.5rem);
+    line-height: 1.1;
+  }
+
+  .himrudra-hero-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .himrudra-hero-actions > button,
+  .himrudra-hero-actions > a {
+    width: 100%;
+  }
+
+  .himrudra-countdown-grid {
+    width: 100%;
+    gap: 0.375rem;
+  }
+
+  .himrudra-countdown-cell {
+    padding: 0.375rem 0.25rem;
+  }
+
+  .himrudra-chat-panel {
+    width: calc(100vw - 1.5rem);
+    max-height: calc(100dvh - 7.5rem);
+  }
+}
+
+/* Mobile portrait & small screens (<= 639px) */
+@media (max-width: 639px) {
+  .himrudra-floating-action {
+    bottom: calc(4.75rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .himrudra-mobile-sticky-bar {
+    padding-bottom: calc(0.625rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .himrudra-tablist {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .himrudra-tablist::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+/* Tablet screens (640px – 1023px) */
+@media (min-width: 640px) and (max-width: 1023px) {
+  .himrudra-floating-action {
+    bottom: calc(4.5rem + env(safe-area-inset-bottom, 0px));
+  }
+
+  .himrudra-hero-title {
+    font-size: clamp(2.65rem, 5.2vw, 3.25rem);
+    line-height: 1.09;
+  }
+}
+
+/* Small laptop screens (1024px – 1279px) */
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .himrudra-floating-action {
+    bottom: 1.5rem;
+  }
+}
+
+/* Desktop & wide displays (>= 1280px) */
+@media (min-width: 1280px) {
+  .himrudra-floating-action {
+    bottom: 1.5rem;
+  }
+}
+
+/* Short mobile landscape viewports */
+@media (max-height: 520px) and (orientation: landscape) {
+  .himrudra-floating-action {
+    bottom: 0.75rem;
+  }
+
+  .himrudra-chat-panel {
+    max-height: calc(100dvh - 2rem);
+  }
+}
+
+/* Touch devices: prevent sticky hover lift & keep controls tap-friendly */
+@media (hover: none) and (pointer: coarse) {
+  .himrudra-floating-action:hover {
+    transform: none;
+  }
+}
+
+/* Clean print layout */
+@media print {
+  .himrudra-floating-action,
+  .himrudra-mobile-sticky-bar {
+    display: none !important;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -296,10 +296,10 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
                     type="button"
                     disabled={selectedProduct.stock === 0}
                     onClick={() => onAddToCart(selectedProduct.id, quantity, true)}
-                    className="flex-1 min-w-[180px] inline-flex items-center justify-center gap-2 rounded-lg bg-[#281A15] px-6 py-3.5 text-sm font-semibold text-[#FAF8F4] hover:bg-[#3A2720] disabled:opacity-50 transition-colors whitespace-nowrap"
+                    className="flex-1 min-w-0 sm:min-w-[180px] inline-flex items-center justify-center gap-2 rounded-lg bg-[#281A15] px-4 sm:px-6 py-3.5 text-sm font-semibold text-[#FAF8F4] hover:bg-[#3A2720] disabled:opacity-50 transition-colors whitespace-nowrap"
                   >
-                    <ShoppingBag className="h-4 w-4 text-[#C69B51]" />
-                    <span>Add to Cart — {formatINR(lineSubtotal)}</span>
+                    <ShoppingBag className="h-4 w-4 text-[#C69B51] shrink-0" />
+                    <span className="truncate">Add to Cart — {formatINR(lineSubtotal)}</span>
                   </button>
                 </div>
               </div>
@@ -321,11 +321,11 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
                     value={pincodeCheck}
                     onChange={(e) => setPincodeCheck(e.target.value)}
                     placeholder="Enter 6-digit PIN (e.g. 248001)"
-                    className="flex-1 rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3.5 py-2 text-sm text-[#241B17] placeholder:text-[#241B17]/40 focus:border-[#281A15] focus:outline-none"
+                    className="flex-1 min-w-0 rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 sm:px-3.5 py-2 text-sm text-[#241B17] placeholder:text-[#241B17]/40 focus:border-[#281A15] focus:outline-none"
                   />
                   <button
                     type="submit"
-                    className="rounded-lg border border-[#79543D]/35 bg-[#FAF8F4] px-4 py-2 text-xs font-semibold text-[#281A15] hover:bg-[#EAE1D4] transition-colors whitespace-nowrap"
+                    className="rounded-lg border border-[#79543D]/35 bg-[#FAF8F4] px-4 py-2 text-xs font-semibold text-[#281A15] hover:bg-[#EAE1D4] transition-colors whitespace-nowrap shrink-0"
                   >
                     Check
                   </button>
@@ -337,11 +337,11 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
             </div>
 
             {/* Interactive Specification & Policy Tabs */}
-            <div className="rounded-2xl border border-[#79543D]/18 bg-[#FAF8F4] p-6">
+            <div className="rounded-2xl border border-[#79543D]/18 bg-[#FAF8F4] p-4 sm:p-6">
               <div
                 role="tablist"
                 aria-label="Product details"
-                className="flex flex-wrap gap-1.5 border-b border-[#79543D]/15 pb-3 mb-4"
+                className="himrudra-tablist flex flex-wrap gap-1.5 border-b border-[#79543D]/15 pb-3 mb-4"
               >
                 {(
                   [
@@ -472,7 +472,7 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
 
       {/* Compact Mobile Sticky Add-to-Cart Bar (<15% mobile viewport height) */}
       {showMobileStickyBar && (
-        <div className="lg:hidden fixed bottom-0 inset-x-0 z-30 border-t border-[#79543D]/20 bg-[#FAF8F4] px-4 py-2.5 flex items-center justify-between gap-3 shadow-lg">
+        <div className="himrudra-mobile-sticky-bar lg:hidden fixed bottom-0 inset-x-0 z-30 border-t border-[#79543D]/20 bg-[#FAF8F4] px-4 py-2.5 flex items-center justify-between gap-3 shadow-lg">
           <div className="min-w-0">
             <div className="text-xs font-semibold text-[#281A15] truncate">
               {selectedProduct.name}
