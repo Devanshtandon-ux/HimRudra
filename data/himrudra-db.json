@@ -7,8 +7,18 @@
       "phone": "9549572457",
       "role": "admin",
       "passwordHash": "b1d173bea7a93cae1c13cc6471511159:aae99e97d2854ccee1d7d9f2cb1aafa91e21847fc0196f3f5a2492e19b29ab4c70ac64a8d83ee45caa5ba3155030d1084ae523edf0e7d8540d48ec365c23e91e",
-      "createdAt": "2026-08-01T08:00:00.000Z",
-      "wishlistProductIds": []
+      "wishlistProductIds": [],
+      "createdAt": "2026-08-01T08:00:00.000Z"
+    },
+    {
+      "id": "usr-dbb11054",
+      "name": "Verify Updated",
+      "email": "verify-auth-fast@example.com",
+      "phone": "9876543210",
+      "role": "customer",
+      "passwordHash": "829589d5ad99aab5f988b62124c2bf9e:904971966b2c9a51191cc2d08028745a326970bc748f9fb83ba29a63fd0d348ccadf319d204565fd176d65dfbff6695ba42e2466456951c32b8ab8dae2280639",
+      "wishlistProductIds": [],
+      "createdAt": "2026-11-21T13:08:57.499Z"
     }
   ],
   "products": [
@@ -64,11 +74,11 @@
         "texture",
         "ritual"
       ],
-      "active": true,
       "customImages": [
         "/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg",
         "/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg"
-      ]
+      ],
+      "active": true
     },
     {
       "id": "himrudra-shilajit-40g-duo",
@@ -114,30 +124,30 @@
         "texture",
         "ritual"
       ],
-      "active": true,
       "customImages": [
         "/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg",
         "/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg"
-      ]
+      ],
+      "active": true
     }
   ],
   "settings": {
-    "standardShippingFee": 100,
-    "expressShippingFee": 149,
-    "freeShippingThreshold": 0,
     "codFee": 100,
-    "codEnabled": true,
-    "gstIncludedInPrice": true,
-    "announcementText": "LIMITED-TIME OFFER — FREE SHIPPING ON ALL ORDERS UNTIL 30 NOVEMBER 2026!",
     "seoTitle": "HimRudra — Pure by Himalayas | Himalayan Shilajit Resin (20 g)",
-    "seoDescription": "Born in the Himalayas. Crafted for Your Ritual. Shop HimRudra Himalayan Shilajit Resin (20 g) with batch-level laboratory documentation.",
-    "gatewayFeePercent": 2,
-    "defaultShippingCostPerOrder": 65,
     "brandEmail": "himrudraofficial@gmail.com",
+    "brandPhone": "9549572457",
+    "codEnabled": true,
+    "brandAddress": "Marketed by- KP Enterprise, Office No 4-D fourth, Vardan Exclusive, Tower, Lakhudi Rd, near SARDAR PATEL STADIUM, Navrangpura, Ahmedabad, Gujarat 380009",
+    "seoDescription": "Born in the Himalayas. Crafted for Your Ritual. Shop HimRudra Himalayan Shilajit Resin (20 g) with batch-level laboratory documentation.",
+    "announcementText": "LIMITED-TIME OFFER — FREE SHIPPING ON ALL ORDERS UNTIL 30 NOVEMBER 2026!",
+    "gatewayFeePercent": 2,
+    "expressShippingFee": 149,
+    "gstIncludedInPrice": true,
+    "standardShippingFee": 100,
+    "freeShippingThreshold": 0,
     "orderNotificationEmail": "himrudraofficial@gmail.com",
     "emailNotificationsEnabled": true,
-    "brandPhone": "9549572457",
-    "brandAddress": "Marketed by- KP Enterprise, Office No 4-D fourth, Vardan Exclusive, Tower, Lakhudi Rd, near SARDAR PATEL STADIUM, Navrangpura, Ahmedabad, Gujarat 380009"
+    "defaultShippingCostPerOrder": 65
   },
   "coupons": [
     {
@@ -157,6 +167,26 @@
       "description": "Flat ₹50 off on single or twin pack orders"
     }
   ],
+  "promotions": [
+    {
+      "id": "promo-freeship-nov26",
+      "title": "Limited-Time Free Shipping Offer",
+      "description": "Free standard pan-India shipping on all orders placed before 1 December 2026.",
+      "bannerHeadline": "LIMITED-TIME OFFER — FREE SHIPPING ON ALL ORDERS UNTIL 30 NOVEMBER 2026!",
+      "bannerSubtext": "Hurry! Order Your HimRudra Shilajit Today.",
+      "bannerTheme": "crystal-brown-gold",
+      "startsAt": "2026-11-01T00:00:00+05:30",
+      "endsAt": "2026-11-30T23:59:59+05:30",
+      "freeShipping": true,
+      "freeShippingSpeed": "standard",
+      "discountPercent": 0,
+      "enabled": true,
+      "usageCount": 0,
+      "revenueGenerated": 0,
+      "createdAt": "2026-11-01T00:00:00.000Z",
+      "updatedAt": "2026-11-01T00:00:00.000Z"
+    }
+  ],
   "orders": [],
   "labReports": [
     {
@@ -172,68 +202,68 @@
       "testingMethodology": "Fulvic Acid Assay (77.15%), Heavy Metals & Microbiological Screening",
       "verifiedStatus": "Reference Sample",
       "notes": "Reference Certificate of Analysis document attached for store review (Batch 1026134, Mfg. 10/2026, Exp. 09/2029). Kept unaltered as a reference format until the store owner uploads and marks an independently verifiable laboratory PDF as Verified.",
+      "customDocumentUrl": "/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.56.54_PM__1__2115dbef.jpeg",
       "heavyMetals": [
         {
-          "parameter": "Fulvic Acid (Active Component)",
           "method": "Eurofins Assay",
-          "specificationLimit": "Reference Batch",
+          "status": "Within Limit",
+          "parameter": "Fulvic Acid (Active Component)",
           "observedResult": "77.15%",
-          "status": "Within Limit"
+          "specificationLimit": "Reference Batch"
         },
         {
+          "method": "Reference COA",
+          "status": "Within Limit",
           "parameter": "Lead (Pb)",
-          "method": "Reference COA",
-          "specificationLimit": "NMT Specification",
           "observedResult": "Meets Specification (Pass)",
-          "status": "Within Limit"
+          "specificationLimit": "NMT Specification"
         },
         {
+          "method": "Reference COA",
+          "status": "Within Limit",
           "parameter": "Arsenic (As)",
-          "method": "Reference COA",
-          "specificationLimit": "NMT Specification",
           "observedResult": "Meets Specification (Pass)",
-          "status": "Within Limit"
+          "specificationLimit": "NMT Specification"
         },
         {
+          "method": "Reference COA",
+          "status": "Within Limit",
           "parameter": "Mercury (Hg)",
-          "method": "Reference COA",
-          "specificationLimit": "NMT Specification",
           "observedResult": "Meets Specification (Pass)",
-          "status": "Within Limit"
+          "specificationLimit": "NMT Specification"
         },
         {
-          "parameter": "Cadmium (Cd)",
           "method": "Reference COA",
-          "specificationLimit": "NMT Specification",
+          "status": "Within Limit",
+          "parameter": "Cadmium (Cd)",
           "observedResult": "Meets Specification (Pass)",
-          "status": "Within Limit"
+          "specificationLimit": "NMT Specification"
         }
       ],
       "microbiological": [
         {
+          "limit": "Acceptable Limit",
+          "method": "Plate Count",
+          "status": "Conforms",
           "parameter": "Aerobic Plate Count",
-          "method": "Plate Count",
-          "limit": "Acceptable Limit",
-          "observedResult": "<100 CFU/g",
-          "status": "Conforms"
+          "observedResult": "<100 CFU/g"
         },
         {
+          "limit": "Acceptable Limit",
+          "method": "Plate Count",
+          "status": "Conforms",
           "parameter": "Yeast & Mold Count",
-          "method": "Plate Count",
-          "limit": "Acceptable Limit",
-          "observedResult": "≤200 CFU/g (within acceptable limits)",
-          "status": "Conforms"
+          "observedResult": "≤200 CFU/g (within acceptable limits)"
         },
         {
-          "parameter": "E. coli / Salmonella / Pseudomonas / Staphylococcus",
-          "method": "Pathogen Screen",
           "limit": "Absent",
-          "observedResult": "Absent",
-          "status": "Absent"
+          "method": "Pathogen Screen",
+          "status": "Absent",
+          "parameter": "E. coli / Salmonella / Pseudomonas / Staphylococcus",
+          "observedResult": "Absent"
         }
       ],
-      "updatedAt": "2026-11-19T09:30:16.533Z",
-      "customDocumentUrl": "/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.56.54_PM__1__2115dbef.jpeg"
+      "updatedAt": "2026-11-19T09:30:16.533Z"
     }
   ],
   "cmsSections": [
@@ -350,26 +380,6 @@
   ],
   "expenses": [],
   "inquiries": [],
-  "promotions": [
-    {
-      "id": "promo-freeship-nov26",
-      "title": "Limited-Time Free Shipping Offer",
-      "description": "Free standard pan-India shipping on all orders placed before 1 December 2026.",
-      "bannerHeadline": "LIMITED-TIME OFFER — FREE SHIPPING ON ALL ORDERS UNTIL 30 NOVEMBER 2026!",
-      "bannerSubtext": "Hurry! Order Your HimRudra Shilajit Today.",
-      "bannerTheme": "crystal-brown-gold",
-      "startsAt": "2026-11-01T00:00:00+05:30",
-      "endsAt": "2026-11-30T23:59:59+05:30",
-      "freeShipping": true,
-      "freeShippingSpeed": "standard",
-      "discountPercent": 0,
-      "enabled": true,
-      "usageCount": 0,
-      "revenueGenerated": 0,
-      "createdAt": "2026-11-01T00:00:00.000Z",
-      "updatedAt": "2026-11-01T00:00:00.000Z"
-    }
-  ],
   "adminNotifications": [],
   "paymentIntents": {}
 }

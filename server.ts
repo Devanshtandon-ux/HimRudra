@@ -22,7 +22,6 @@ import {
   type StoredUser,
 } from './server/store.ts';
 import { verifyFirebaseIdToken } from './server/firebaseVerify.ts';
-import { getOrCreateUser } from './src/db/users.ts';
 import { s3MediaService } from './server/s3.ts';
 import {
   BootstrapResponseCache,
@@ -114,24 +113,28 @@ interface AuthRequest extends Request {
   requestId?: string;
 }
 
-function attachUser(req: AuthRequest, _res: Response, next: NextFunction) {
-  const cookies = parseCookies(req.headers.cookie);
-  const authHeader = req.headers.authorization;
-  const bearerToken =
-    typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
-      ? authHeader.slice(7).trim()
-      : undefined;
-  const rawToken = cookies[SESSION_COOKIE] || bearerToken;
-  if (rawToken) {
-    const session = verifySession(rawToken);
-    if (session) {
-      const user = storeRepo.getState().users.find((u) => u.id === session.userId);
-      if (user) {
-        req.currentUser = user;
+async function attachUser(req: AuthRequest, _res: Response, next: NextFunction) {
+  try {
+    const cookies = parseCookies(req.headers.cookie);
+    const authHeader = req.headers.authorization;
+    const bearerToken =
+      typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7).trim()
+        : undefined;
+    const rawToken = cookies[SESSION_COOKIE] || bearerToken;
+    if (rawToken) {
+      const session = verifySession(rawToken);
+      if (session) {
+        const user = await storeRepo.findUserById(session.userId).catch(() => null);
+        if (user) {
+          req.currentUser = user;
+        }
       }
     }
+    next();
+  } catch (err) {
+    next(err);
   }
-  next();
 }
 
 function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
@@ -204,7 +207,18 @@ export function createApiApp(): express.Express {
   app.use('/api', async (req: AuthRequest, res, next) => {
     try {
       const isMutation = req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS';
-      await storeRepo.ensureLoaded({ forceRefresh: isMutation });
+      const isDirectPostgresAuthRoute =
+        storeRepo.isPostgresEnabled() &&
+        (req.path === '/auth/login' ||
+          req.path === '/auth/register' ||
+          req.path === '/auth/google' ||
+          req.path === '/auth/logout' ||
+          req.path === '/auth/profile' ||
+          req.path === '/auth/wishlist');
+
+      if (!isDirectPostgresAuthRoute) {
+        await storeRepo.ensureLoaded({ forceRefresh: isMutation });
+      }
 
       if (isMutation) {
         const origJson = res.json.bind(res);
@@ -329,31 +343,43 @@ export function createApiApp(): express.Express {
       return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
     }
 
-    const state = storeRepo.getState();
     const normalizedEmail = email.trim().toLowerCase();
     if (normalizedEmail === getAdminOwnerEmail()) {
       return res.status(403).json({ error: 'This email is reserved for the store owner.' });
     }
-    if (state.users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
-      return res.status(409).json({ error: 'An account with this email already exists.' });
+
+    try {
+      const existing = await storeRepo.findUserByEmail(normalizedEmail);
+      if (existing) {
+        return res.status(409).json({ error: 'An account with this email already exists.' });
+      }
+
+      const passwordHash = await hashPasswordAsync(password);
+      const newUser: StoredUser = {
+        id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+        name: name.trim(),
+        email: normalizedEmail,
+        phone: phone.replace(/\D/g, ''),
+        role: 'customer',
+        passwordHash,
+        createdAt: new Date().toISOString(),
+        wishlistProductIds: [],
+      };
+
+      const savedUser = await storeRepo.createUserIfNotExists(newUser);
+      if (!savedUser) {
+        return res.status(409).json({ error: 'An account with this email already exists.' });
+      }
+      const sessionToken = setSessionCookie(req, res, savedUser);
+      return res.status(201).json({ user: storeRepo.sanitizeUser(savedUser), sessionToken });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to create your account right now. Please try again shortly.';
+      return res.status(statusCode).json({ error: message });
     }
-
-    const passwordHash = await hashPasswordAsync(password);
-    const newUser: StoredUser = {
-      id: `usr-${crypto.randomUUID().slice(0, 8)}`,
-      name: name.trim(),
-      email: normalizedEmail,
-      phone: phone.replace(/\D/g, ''),
-      role: 'customer',
-      passwordHash,
-      createdAt: new Date().toISOString(),
-      wishlistProductIds: [],
-    };
-
-    state.users.push(newUser);
-    storeRepo.commit();
-    const sessionToken = setSessionCookie(req, res, newUser);
-    res.status(201).json({ user: storeRepo.sanitizeUser(newUser), sessionToken });
   });
 
   app.post('/api/auth/login', async (req: AuthRequest, res) => {
@@ -361,16 +387,28 @@ export function createApiApp(): express.Express {
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
-    const normalizedEmail = email.trim().toLowerCase();
-    const user = storeRepo
-      .getState()
-      .users.find((u) => u.email.toLowerCase() === normalizedEmail);
-    if (!user || !(await verifyPasswordAsync(password, user.passwordHash))) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
-    }
+    try {
+      const normalizedEmail = email.trim().toLowerCase();
+      let user = await storeRepo.findUserByEmail(normalizedEmail);
+      // Ensure seeded store owner account exists if signing in on a cold database
+      if (!user && normalizedEmail === getAdminOwnerEmail()) {
+        await storeRepo.ensureLoaded({ forceRefresh: true });
+        user = await storeRepo.findUserByEmail(normalizedEmail);
+      }
+      if (!user || !(await verifyPasswordAsync(password, user.passwordHash))) {
+        return res.status(401).json({ error: 'Invalid email or password.' });
+      }
 
-    const sessionToken = setSessionCookie(req, res, user);
-    res.json({ user: storeRepo.sanitizeUser(user), sessionToken });
+      const sessionToken = setSessionCookie(req, res, user);
+      return res.json({ user: storeRepo.sanitizeUser(user), sessionToken });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to sign in right now. Please try again shortly.';
+      return res.status(statusCode).json({ error: message });
+    }
   });
 
   app.post('/api/auth/google', async (req: AuthRequest, res) => {
@@ -389,60 +427,48 @@ export function createApiApp(): express.Express {
         });
       }
 
-      const state = storeRepo.getState();
-      let user = state.users.find((u) => u.email.toLowerCase() === normalizedEmail);
+      const existing = await storeRepo.findUserByEmail(normalizedEmail);
       const isOwner = normalizedEmail === getAdminOwnerEmail();
-      let isNewAccount = false;
+      const isNewAccount = !existing;
 
-      if (!user) {
-        isNewAccount = true;
-        const fallbackName =
-          fbUser.displayName?.trim() ||
-          normalizedEmail
-            .split('@')[0]
-            .replace(/[._-]+/g, ' ')
-            .replace(/\b\w/g, (ch) => ch.toUpperCase());
+      const fallbackName =
+        fbUser.displayName?.trim() ||
+        normalizedEmail
+          .split('@')[0]
+          .replace(/[._-]+/g, ' ')
+          .replace(/\b\w/g, (ch) => ch.toUpperCase());
 
-        user = {
-          id: `usr-${crypto.randomUUID().slice(0, 8)}`,
-          name: fallbackName,
-          email: normalizedEmail,
-          phone: '',
-          role: isOwner ? 'admin' : 'customer',
-          passwordHash: await hashPasswordAsync(crypto.randomBytes(24).toString('hex')),
-          createdAt: new Date().toISOString(),
-          wishlistProductIds: [],
-        };
-        state.users.push(user);
-        storeRepo.commit();
-      } else if (isOwner && user.role !== 'admin') {
-        user.role = 'admin';
-        storeRepo.commit();
-      }
+      const userToSave: StoredUser = existing
+        ? {
+            ...existing,
+            role: isOwner ? 'admin' : existing.role,
+          }
+        : {
+            id: `usr-${crypto.randomUUID().slice(0, 8)}`,
+            name: fallbackName,
+            email: normalizedEmail,
+            phone: '',
+            role: isOwner ? 'admin' : 'customer',
+            passwordHash: await hashPasswordAsync(crypto.randomBytes(24).toString('hex')),
+            createdAt: new Date().toISOString(),
+            wishlistProductIds: [],
+          };
 
-      if (storeRepo.isPostgresEnabled()) {
-        await getOrCreateUser({
-          uid: fbUser.localId,
-          email: normalizedEmail,
-          name: user.name,
-          role: user.role,
-          passwordHash: user.passwordHash,
-        });
-      }
-
-      const sessionToken = setSessionCookie(req, res, user);
+      const savedUser = await storeRepo.upsertUser(userToSave, fbUser.localId);
+      const sessionToken = setSessionCookie(req, res, savedUser);
       return res.json({
-        user: storeRepo.sanitizeUser(user),
+        user: storeRepo.sanitizeUser(savedUser),
         isNewAccount,
         sessionToken,
       });
     } catch (err) {
       console.error('Google sign-in verification error:', err);
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 401;
       const message =
         err instanceof Error && err.message
           ? err.message
           : 'Unable to complete Google sign-in right now. Please try again.';
-      return res.status(401).json({ error: message });
+      return res.status(statusCode).json({ error: message });
     }
   });
 
@@ -457,7 +483,7 @@ export function createApiApp(): express.Express {
     res.json({ ok: true });
   });
 
-  app.put('/api/auth/profile', requireAuth, (req: AuthRequest, res) => {
+  app.put('/api/auth/profile', requireAuth, async (req: AuthRequest, res) => {
     const user = req.currentUser!;
     const { name, phone, defaultAddress } = req.body as {
       name?: string;
@@ -473,11 +499,20 @@ export function createApiApp(): express.Express {
       user.defaultAddress = defaultAddress;
     }
 
-    storeRepo.commit();
-    res.json({ user: storeRepo.sanitizeUser(user) });
+    try {
+      const savedUser = await storeRepo.upsertUser(user);
+      return res.json({ user: storeRepo.sanitizeUser(savedUser) });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to update your profile right now. Please try again.';
+      return res.status(statusCode).json({ error: message });
+    }
   });
 
-  app.post('/api/auth/wishlist', requireAuth, (req: AuthRequest, res) => {
+  app.post('/api/auth/wishlist', requireAuth, async (req: AuthRequest, res) => {
     const user = req.currentUser!;
     const { productId } = req.body as { productId?: string };
     if (!productId) {
@@ -489,8 +524,17 @@ export function createApiApp(): express.Express {
     } else {
       user.wishlistProductIds.push(productId);
     }
-    storeRepo.commit();
-    res.json({ wishlistProductIds: user.wishlistProductIds });
+    try {
+      const savedUser = await storeRepo.upsertUser(user);
+      return res.json({ wishlistProductIds: savedUser.wishlistProductIds });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to update wishlist right now. Please try again.';
+      return res.status(statusCode).json({ error: message });
+    }
   });
 
   // Razorpay-compatible Payment Order Initiation + Server-Side Verification

@@ -988,6 +988,84 @@ class StoreRepository {
     return this.state;
   }
 
+  private mergeUserIntoMemory(saved: StoredUser): StoredUser {
+    const normalizedEmail = saved.email.trim().toLowerCase();
+    const idx = this.state.users.findIndex(
+      (u) => u.id === saved.id || u.email.toLowerCase() === normalizedEmail
+    );
+    if (idx >= 0) {
+      this.state.users[idx] = saved;
+    } else {
+      this.state.users.push(saved);
+    }
+    return saved;
+  }
+
+  async findUserByEmail(email: string): Promise<StoredUser | null> {
+    const normalized = email.trim().toLowerCase();
+    const pg = this.getPostgres();
+    if (pg) {
+      const dbUser = await pg.findUserByEmail(normalized);
+      if (dbUser) {
+        return this.mergeUserIntoMemory(dbUser);
+      }
+      return null;
+    }
+    return this.state.users.find((u) => u.email.toLowerCase() === normalized) ?? null;
+  }
+
+  async findUserById(id: string): Promise<StoredUser | null> {
+    const inMemory = this.state.users.find((u) => u.id === id);
+    if (inMemory) return inMemory;
+    const pg = this.getPostgres();
+    if (pg) {
+      const dbUser = await pg.findUserById(id);
+      if (dbUser) {
+        return this.mergeUserIntoMemory(dbUser);
+      }
+    }
+    return null;
+  }
+
+  async upsertUser(user: StoredUser, uid?: string): Promise<StoredUser> {
+    const pg = this.getPostgres();
+    if (pg) {
+      const saved = await pg.upsertUser(user, uid);
+      this.mergeUserIntoMemory(saved);
+      this.stateVersion += 1;
+      this.lastSyncedAt = new Date().toISOString();
+      this.lastCloudError = null;
+      this.saveLocal(this.state);
+      return saved;
+    }
+
+    this.mergeUserIntoMemory(user);
+    this.commit();
+    return user;
+  }
+
+  async createUserIfNotExists(user: StoredUser): Promise<StoredUser | null> {
+    const normalizedEmail = user.email.trim().toLowerCase();
+    const pg = this.getPostgres();
+    if (pg) {
+      const created = await pg.createUserIfNotExists({ ...user, email: normalizedEmail });
+      if (!created) return null;
+      this.mergeUserIntoMemory(created);
+      this.stateVersion += 1;
+      this.lastSyncedAt = new Date().toISOString();
+      this.lastCloudError = null;
+      this.saveLocal(this.state);
+      return created;
+    }
+
+    if (this.state.users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
+      return null;
+    }
+    this.mergeUserIntoMemory({ ...user, email: normalizedEmail });
+    this.commit();
+    return user;
+  }
+
   /**
    * Atomically persists a newly placed Order + inventory stock decrement using a PostgreSQL ACID transaction
    * (or DynamoDB TransactWrite when DynamoDB is configured).

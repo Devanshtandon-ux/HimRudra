@@ -5,7 +5,7 @@ var __export = (target, all) => {
 };
 
 // server.ts
-import crypto6 from "node:crypto";
+import crypto5 from "node:crypto";
 import fs2 from "node:fs";
 import os2 from "node:os";
 import path2 from "node:path";
@@ -1252,14 +1252,19 @@ function isCloudSqlConfigured(env = process.env) {
 }
 var createPool = () => {
   if (!global._postgresPool) {
+    const sslMode = (process.env.SQL_SSL || "").trim().toLowerCase();
+    const useSsl = sslMode === "true" || sslMode === "require" || sslMode === "1";
+    const parsedPort = process.env.SQL_PORT ? Number(process.env.SQL_PORT) : void 0;
     global._postgresPool = new Pool({
       host: process.env.SQL_HOST,
       user: process.env.SQL_USER,
       password: process.env.SQL_PASSWORD,
       database: process.env.SQL_DB_NAME,
+      ...Number.isFinite(parsedPort) ? { port: parsedPort } : {},
+      ...useSsl ? { ssl: { rejectUnauthorized: false } } : {},
       max: 15,
       idleTimeoutMillis: 3e4,
-      connectionTimeoutMillis: process.env.VERCEL ? 6e3 : 2e4
+      connectionTimeoutMillis: process.env.VERCEL ? 15e3 : 2e4
     });
     global._postgresPool.on("error", (err) => {
       console.error("Unexpected error on idle SQL pool client:", err);
@@ -1276,6 +1281,134 @@ function isTableEmpty(state) {
   return state.userCount === 0 && state.productCount === 0 && state.settingsCount === 0;
 }
 var PostgresStateAdapter = class {
+  mapUserRow(row) {
+    return {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      phone: row.phone,
+      role: row.role === "admin" ? "admin" : "customer",
+      passwordHash: row.passwordHash,
+      defaultAddress: row.defaultAddress ?? void 0,
+      wishlistProductIds: Array.isArray(row.wishlistProductIds) ? row.wishlistProductIds : [],
+      createdAt: row.createdAt
+    };
+  }
+  async findUserByEmail(email) {
+    try {
+      const normalized = email.trim().toLowerCase();
+      const rows = await db.select().from(users).where(eq(users.email, normalized)).limit(1);
+      return rows[0] ? this.mapUserRow(rows[0]) : null;
+    } catch (error) {
+      logStructured("error", "cloud-sql", "find_user_by_email_failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new StorePersistenceError("Database read failed. Please try again shortly.", {
+        code: "POSTGRES_READ_FAILED",
+        statusCode: 503,
+        retryable: true
+      });
+    }
+  }
+  async findUserById(id) {
+    try {
+      const rows = await db.select().from(users).where(eq(users.id, id)).limit(1);
+      return rows[0] ? this.mapUserRow(rows[0]) : null;
+    } catch (error) {
+      logStructured("error", "cloud-sql", "find_user_by_id_failed", {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new StorePersistenceError("Database read failed. Please try again shortly.", {
+        code: "POSTGRES_READ_FAILED",
+        statusCode: 503,
+        retryable: true
+      });
+    }
+  }
+  /**
+   * Fast, atomic single-row user save (~20ms) that avoids full 12-table rewrites and
+   * eliminates unique email/uid constraint race conditions during Google & Email sign-in.
+   */
+  async upsertUser(user, uid) {
+    const startedAt = Date.now();
+    const normalizedEmail = user.email.trim().toLowerCase();
+    try {
+      const rows = await db.insert(users).values({
+        id: user.id,
+        ...uid ? { uid } : {},
+        name: user.name,
+        email: normalizedEmail,
+        phone: user.phone ?? "",
+        role: user.role,
+        passwordHash: user.passwordHash,
+        defaultAddress: user.defaultAddress ?? null,
+        wishlistProductIds: user.wishlistProductIds ?? [],
+        createdAt: user.createdAt,
+        updatedAt: /* @__PURE__ */ new Date()
+      }).onConflictDoUpdate({
+        target: users.email,
+        set: {
+          ...uid ? { uid } : {},
+          name: user.name,
+          phone: user.phone ?? "",
+          role: user.role,
+          defaultAddress: user.defaultAddress ?? null,
+          wishlistProductIds: user.wishlistProductIds ?? [],
+          updatedAt: /* @__PURE__ */ new Date()
+        }
+      }).returning();
+      logStructured("info", "cloud-sql", "upsert_user_success", {
+        durationMs: Date.now() - startedAt
+      });
+      return rows[0] ? this.mapUserRow(rows[0]) : { ...user, email: normalizedEmail };
+    } catch (error) {
+      logStructured("error", "cloud-sql", "upsert_user_failed", {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new StorePersistenceError("Database save failed. Please try again shortly.", {
+        code: "POSTGRES_USER_WRITE_FAILED",
+        statusCode: 503,
+        retryable: true
+      });
+    }
+  }
+  /**
+   * Atomically inserts a new email/password customer; returns null if the email already exists.
+   */
+  async createUserIfNotExists(user) {
+    const startedAt = Date.now();
+    const normalizedEmail = user.email.trim().toLowerCase();
+    try {
+      const rows = await db.insert(users).values({
+        id: user.id,
+        name: user.name,
+        email: normalizedEmail,
+        phone: user.phone ?? "",
+        role: user.role,
+        passwordHash: user.passwordHash,
+        defaultAddress: user.defaultAddress ?? null,
+        wishlistProductIds: user.wishlistProductIds ?? [],
+        createdAt: user.createdAt,
+        updatedAt: /* @__PURE__ */ new Date()
+      }).onConflictDoNothing({ target: users.email }).returning();
+      logStructured("info", "cloud-sql", "create_user_attempt", {
+        durationMs: Date.now() - startedAt,
+        created: rows.length > 0
+      });
+      return rows[0] ? this.mapUserRow(rows[0]) : null;
+    } catch (error) {
+      logStructured("error", "cloud-sql", "create_user_failed", {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new StorePersistenceError("Database save failed. Please try again shortly.", {
+        code: "POSTGRES_USER_WRITE_FAILED",
+        statusCode: 503,
+        retryable: true
+      });
+    }
+  }
   async loadState(fallbackSeed) {
     try {
       const [
@@ -1630,11 +1763,11 @@ var PostgresStateAdapter = class {
         });
         const userIds = [];
         for (const u of state.users) {
-          userIds.push(u.id);
-          await tx.insert(users).values({
+          const normalizedEmail = u.email.trim().toLowerCase();
+          const savedRows = await tx.insert(users).values({
             id: u.id,
             name: u.name,
-            email: u.email,
+            email: normalizedEmail,
             phone: u.phone,
             role: u.role,
             passwordHash: u.passwordHash,
@@ -1643,21 +1776,17 @@ var PostgresStateAdapter = class {
             createdAt: u.createdAt,
             updatedAt: /* @__PURE__ */ new Date()
           }).onConflictDoUpdate({
-            target: users.id,
+            target: users.email,
             set: {
               name: u.name,
-              email: u.email,
               phone: u.phone,
               role: u.role,
-              passwordHash: u.passwordHash,
               defaultAddress: u.defaultAddress ?? null,
               wishlistProductIds: u.wishlistProductIds ?? [],
               updatedAt: /* @__PURE__ */ new Date()
             }
-          });
-        }
-        if (userIds.length > 0) {
-          await tx.delete(users).where(notInArray(users.id, userIds));
+          }).returning({ id: users.id });
+          userIds.push(savedRows[0]?.id ?? u.id);
         }
         const productIds = [];
         for (let idx = 0; idx < state.products.length; idx += 1) {
@@ -2954,6 +3083,77 @@ var StoreRepository = class {
   getState() {
     return this.state;
   }
+  mergeUserIntoMemory(saved) {
+    const normalizedEmail = saved.email.trim().toLowerCase();
+    const idx = this.state.users.findIndex(
+      (u) => u.id === saved.id || u.email.toLowerCase() === normalizedEmail
+    );
+    if (idx >= 0) {
+      this.state.users[idx] = saved;
+    } else {
+      this.state.users.push(saved);
+    }
+    return saved;
+  }
+  async findUserByEmail(email) {
+    const normalized = email.trim().toLowerCase();
+    const pg = this.getPostgres();
+    if (pg) {
+      const dbUser = await pg.findUserByEmail(normalized);
+      if (dbUser) {
+        return this.mergeUserIntoMemory(dbUser);
+      }
+      return null;
+    }
+    return this.state.users.find((u) => u.email.toLowerCase() === normalized) ?? null;
+  }
+  async findUserById(id) {
+    const inMemory = this.state.users.find((u) => u.id === id);
+    if (inMemory) return inMemory;
+    const pg = this.getPostgres();
+    if (pg) {
+      const dbUser = await pg.findUserById(id);
+      if (dbUser) {
+        return this.mergeUserIntoMemory(dbUser);
+      }
+    }
+    return null;
+  }
+  async upsertUser(user, uid) {
+    const pg = this.getPostgres();
+    if (pg) {
+      const saved = await pg.upsertUser(user, uid);
+      this.mergeUserIntoMemory(saved);
+      this.stateVersion += 1;
+      this.lastSyncedAt = (/* @__PURE__ */ new Date()).toISOString();
+      this.lastCloudError = null;
+      this.saveLocal(this.state);
+      return saved;
+    }
+    this.mergeUserIntoMemory(user);
+    this.commit();
+    return user;
+  }
+  async createUserIfNotExists(user) {
+    const normalizedEmail = user.email.trim().toLowerCase();
+    const pg = this.getPostgres();
+    if (pg) {
+      const created = await pg.createUserIfNotExists({ ...user, email: normalizedEmail });
+      if (!created) return null;
+      this.mergeUserIntoMemory(created);
+      this.stateVersion += 1;
+      this.lastSyncedAt = (/* @__PURE__ */ new Date()).toISOString();
+      this.lastCloudError = null;
+      this.saveLocal(this.state);
+      return created;
+    }
+    if (this.state.users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
+      return null;
+    }
+    this.mergeUserIntoMemory({ ...user, email: normalizedEmail });
+    this.commit();
+    return user;
+  }
   /**
    * Atomically persists a newly placed Order + inventory stock decrement using a PostgreSQL ACID transaction
    * (or DynamoDB TransactWrite when DynamoDB is configured).
@@ -3211,51 +3411,8 @@ async function verifyFirebaseIdToken(idToken) {
   throw new Error("Could not verify Google account credentials. Please try again.");
 }
 
-// src/db/users.ts
-import crypto4 from "node:crypto";
-import { eq as eq2 } from "drizzle-orm";
-async function getOrCreateUser(params) {
-  try {
-    const normalizedEmail = params.email.trim().toLowerCase();
-    const existingByEmail = await db.select().from(users).where(eq2(users.email, normalizedEmail)).limit(1);
-    if (existingByEmail[0]) {
-      const updated = await db.update(users).set({
-        uid: params.uid,
-        role: params.role === "admin" ? "admin" : existingByEmail[0].role,
-        updatedAt: /* @__PURE__ */ new Date()
-      }).where(eq2(users.id, existingByEmail[0].id)).returning();
-      return updated[0] ?? existingByEmail[0];
-    }
-    const inserted = await db.insert(users).values({
-      id: `usr-${crypto4.randomUUID().slice(0, 8)}`,
-      uid: params.uid,
-      name: params.name,
-      email: normalizedEmail,
-      phone: "",
-      role: params.role,
-      passwordHash: params.passwordHash,
-      wishlistProductIds: [],
-      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-      updatedAt: /* @__PURE__ */ new Date()
-    }).onConflictDoUpdate({
-      target: users.uid,
-      set: {
-        email: normalizedEmail,
-        name: params.name,
-        updatedAt: /* @__PURE__ */ new Date()
-      }
-    }).returning();
-    return inserted[0];
-  } catch (error) {
-    console.error("Database user upsert failed:", error);
-    throw new Error("Unable to synchronize user profile right now. Please try again.", {
-      cause: error
-    });
-  }
-}
-
 // server/s3.ts
-import crypto5 from "node:crypto";
+import crypto4 from "node:crypto";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 function buildS3PublicUrl(config, key) {
   const cleanKey = key.replace(/^\/+/, "");
@@ -3270,7 +3427,7 @@ function buildS3PublicUrl(config, key) {
 function buildS3ObjectKey(prefix, folder, originalFileName) {
   const safeName = sanitizeUploadedFileName(originalFileName);
   const stamp = Date.now();
-  const rand = crypto5.randomBytes(4).toString("hex");
+  const rand = crypto4.randomBytes(4).toString("hex");
   return `${prefix}/${folder}/${stamp}-${rand}-${safeName}`;
 }
 var S3MediaService = class {
@@ -3600,17 +3757,17 @@ var SESSION_COOKIE = "himrudra_session";
 var SESSION_SECRET = process.env.SESSION_SECRET && process.env.SESSION_SECRET !== "change-me-in-production" ? process.env.SESSION_SECRET : "himrudra-dev-session-hmac-secret-2026";
 function signSession(payload) {
   const data = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const sig = crypto6.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
+  const sig = crypto5.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
   return `${data}.${sig}`;
 }
 function verifySession(token) {
   try {
     const [data, sig] = token.split(".");
     if (!data || !sig) return null;
-    const expected = crypto6.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
+    const expected = crypto5.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
     const sigBuf = Buffer.from(sig);
     const expBuf = Buffer.from(expected);
-    if (sigBuf.length !== expBuf.length || !crypto6.timingSafeEqual(sigBuf, expBuf)) {
+    if (sigBuf.length !== expBuf.length || !crypto5.timingSafeEqual(sigBuf, expBuf)) {
       return null;
     }
     const payload = JSON.parse(Buffer.from(data, "base64url").toString("utf-8"));
@@ -3637,21 +3794,25 @@ function parseCookies(cookieHeader) {
   }
   return map;
 }
-function attachUser(req, _res, next) {
-  const cookies = parseCookies(req.headers.cookie);
-  const authHeader = req.headers.authorization;
-  const bearerToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : void 0;
-  const rawToken = cookies[SESSION_COOKIE] || bearerToken;
-  if (rawToken) {
-    const session = verifySession(rawToken);
-    if (session) {
-      const user = storeRepo.getState().users.find((u) => u.id === session.userId);
-      if (user) {
-        req.currentUser = user;
+async function attachUser(req, _res, next) {
+  try {
+    const cookies = parseCookies(req.headers.cookie);
+    const authHeader = req.headers.authorization;
+    const bearerToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : void 0;
+    const rawToken = cookies[SESSION_COOKIE] || bearerToken;
+    if (rawToken) {
+      const session = verifySession(rawToken);
+      if (session) {
+        const user = await storeRepo.findUserById(session.userId).catch(() => null);
+        if (user) {
+          req.currentUser = user;
+        }
       }
     }
+    next();
+  } catch (err) {
+    next(err);
   }
-  next();
 }
 function requireAuth(req, res, next) {
   if (!req.currentUser) {
@@ -3705,7 +3866,10 @@ function createApiApp() {
   app2.use("/api", async (req, res, next) => {
     try {
       const isMutation = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
-      await storeRepo.ensureLoaded({ forceRefresh: isMutation });
+      const isDirectPostgresAuthRoute = storeRepo.isPostgresEnabled() && (req.path === "/auth/login" || req.path === "/auth/register" || req.path === "/auth/google" || req.path === "/auth/logout" || req.path === "/auth/profile" || req.path === "/auth/wishlist");
+      if (!isDirectPostgresAuthRoute) {
+        await storeRepo.ensureLoaded({ forceRefresh: isMutation });
+      }
       if (isMutation) {
         const origJson = res.json.bind(res);
         res.json = ((body) => {
@@ -3803,42 +3967,60 @@ function createApiApp() {
     if (!password || password.length < 6) {
       return res.status(400).json({ error: "Password must be at least 6 characters long." });
     }
-    const state = storeRepo.getState();
     const normalizedEmail = email.trim().toLowerCase();
     if (normalizedEmail === getAdminOwnerEmail()) {
       return res.status(403).json({ error: "This email is reserved for the store owner." });
     }
-    if (state.users.some((u) => u.email.toLowerCase() === normalizedEmail)) {
-      return res.status(409).json({ error: "An account with this email already exists." });
+    try {
+      const existing = await storeRepo.findUserByEmail(normalizedEmail);
+      if (existing) {
+        return res.status(409).json({ error: "An account with this email already exists." });
+      }
+      const passwordHash = await hashPasswordAsync(password);
+      const newUser = {
+        id: `usr-${crypto5.randomUUID().slice(0, 8)}`,
+        name: name.trim(),
+        email: normalizedEmail,
+        phone: phone.replace(/\D/g, ""),
+        role: "customer",
+        passwordHash,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        wishlistProductIds: []
+      };
+      const savedUser = await storeRepo.createUserIfNotExists(newUser);
+      if (!savedUser) {
+        return res.status(409).json({ error: "An account with this email already exists." });
+      }
+      const sessionToken = setSessionCookie(req, res, savedUser);
+      return res.status(201).json({ user: storeRepo.sanitizeUser(savedUser), sessionToken });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message = err instanceof Error && err.message ? err.message : "Unable to create your account right now. Please try again shortly.";
+      return res.status(statusCode).json({ error: message });
     }
-    const passwordHash = await hashPasswordAsync(password);
-    const newUser = {
-      id: `usr-${crypto6.randomUUID().slice(0, 8)}`,
-      name: name.trim(),
-      email: normalizedEmail,
-      phone: phone.replace(/\D/g, ""),
-      role: "customer",
-      passwordHash,
-      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-      wishlistProductIds: []
-    };
-    state.users.push(newUser);
-    storeRepo.commit();
-    const sessionToken = setSessionCookie(req, res, newUser);
-    res.status(201).json({ user: storeRepo.sanitizeUser(newUser), sessionToken });
   });
   app2.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ error: "Email and password are required." });
     }
-    const normalizedEmail = email.trim().toLowerCase();
-    const user = storeRepo.getState().users.find((u) => u.email.toLowerCase() === normalizedEmail);
-    if (!user || !await verifyPasswordAsync(password, user.passwordHash)) {
-      return res.status(401).json({ error: "Invalid email or password." });
+    try {
+      const normalizedEmail = email.trim().toLowerCase();
+      let user = await storeRepo.findUserByEmail(normalizedEmail);
+      if (!user && normalizedEmail === getAdminOwnerEmail()) {
+        await storeRepo.ensureLoaded({ forceRefresh: true });
+        user = await storeRepo.findUserByEmail(normalizedEmail);
+      }
+      if (!user || !await verifyPasswordAsync(password, user.passwordHash)) {
+        return res.status(401).json({ error: "Invalid email or password." });
+      }
+      const sessionToken = setSessionCookie(req, res, user);
+      return res.json({ user: storeRepo.sanitizeUser(user), sessionToken });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message = err instanceof Error && err.message ? err.message : "Unable to sign in right now. Please try again shortly.";
+      return res.status(statusCode).json({ error: message });
     }
-    const sessionToken = setSessionCookie(req, res, user);
-    res.json({ user: storeRepo.sanitizeUser(user), sessionToken });
   });
   app2.post("/api/auth/google", async (req, res) => {
     const { idToken } = req.body;
@@ -3853,48 +4035,35 @@ function createApiApp() {
           error: "Google account did not provide a verified email address."
         });
       }
-      const state = storeRepo.getState();
-      let user = state.users.find((u) => u.email.toLowerCase() === normalizedEmail);
+      const existing = await storeRepo.findUserByEmail(normalizedEmail);
       const isOwner = normalizedEmail === getAdminOwnerEmail();
-      let isNewAccount = false;
-      if (!user) {
-        isNewAccount = true;
-        const fallbackName = fbUser.displayName?.trim() || normalizedEmail.split("@")[0].replace(/[._-]+/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
-        user = {
-          id: `usr-${crypto6.randomUUID().slice(0, 8)}`,
-          name: fallbackName,
-          email: normalizedEmail,
-          phone: "",
-          role: isOwner ? "admin" : "customer",
-          passwordHash: await hashPasswordAsync(crypto6.randomBytes(24).toString("hex")),
-          createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-          wishlistProductIds: []
-        };
-        state.users.push(user);
-        storeRepo.commit();
-      } else if (isOwner && user.role !== "admin") {
-        user.role = "admin";
-        storeRepo.commit();
-      }
-      if (storeRepo.isPostgresEnabled()) {
-        await getOrCreateUser({
-          uid: fbUser.localId,
-          email: normalizedEmail,
-          name: user.name,
-          role: user.role,
-          passwordHash: user.passwordHash
-        });
-      }
-      const sessionToken = setSessionCookie(req, res, user);
+      const isNewAccount = !existing;
+      const fallbackName = fbUser.displayName?.trim() || normalizedEmail.split("@")[0].replace(/[._-]+/g, " ").replace(/\b\w/g, (ch) => ch.toUpperCase());
+      const userToSave = existing ? {
+        ...existing,
+        role: isOwner ? "admin" : existing.role
+      } : {
+        id: `usr-${crypto5.randomUUID().slice(0, 8)}`,
+        name: fallbackName,
+        email: normalizedEmail,
+        phone: "",
+        role: isOwner ? "admin" : "customer",
+        passwordHash: await hashPasswordAsync(crypto5.randomBytes(24).toString("hex")),
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        wishlistProductIds: []
+      };
+      const savedUser = await storeRepo.upsertUser(userToSave, fbUser.localId);
+      const sessionToken = setSessionCookie(req, res, savedUser);
       return res.json({
-        user: storeRepo.sanitizeUser(user),
+        user: storeRepo.sanitizeUser(savedUser),
         isNewAccount,
         sessionToken
       });
     } catch (err) {
       console.error("Google sign-in verification error:", err);
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 401;
       const message = err instanceof Error && err.message ? err.message : "Unable to complete Google sign-in right now. Please try again.";
-      return res.status(401).json({ error: message });
+      return res.status(statusCode).json({ error: message });
     }
   });
   app2.post("/api/auth/logout", (req, res) => {
@@ -3907,7 +4076,7 @@ function createApiApp() {
     });
     res.json({ ok: true });
   });
-  app2.put("/api/auth/profile", requireAuth, (req, res) => {
+  app2.put("/api/auth/profile", requireAuth, async (req, res) => {
     const user = req.currentUser;
     const { name, phone, defaultAddress } = req.body;
     if (name && name.trim().length >= 2) user.name = name.trim();
@@ -3917,10 +4086,16 @@ function createApiApp() {
     if (defaultAddress) {
       user.defaultAddress = defaultAddress;
     }
-    storeRepo.commit();
-    res.json({ user: storeRepo.sanitizeUser(user) });
+    try {
+      const savedUser = await storeRepo.upsertUser(user);
+      return res.json({ user: storeRepo.sanitizeUser(savedUser) });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message = err instanceof Error && err.message ? err.message : "Unable to update your profile right now. Please try again.";
+      return res.status(statusCode).json({ error: message });
+    }
   });
-  app2.post("/api/auth/wishlist", requireAuth, (req, res) => {
+  app2.post("/api/auth/wishlist", requireAuth, async (req, res) => {
     const user = req.currentUser;
     const { productId } = req.body;
     if (!productId) {
@@ -3932,8 +4107,14 @@ function createApiApp() {
     } else {
       user.wishlistProductIds.push(productId);
     }
-    storeRepo.commit();
-    res.json({ wishlistProductIds: user.wishlistProductIds });
+    try {
+      const savedUser = await storeRepo.upsertUser(user);
+      return res.json({ wishlistProductIds: savedUser.wishlistProductIds });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message = err instanceof Error && err.message ? err.message : "Unable to update wishlist right now. Please try again.";
+      return res.status(statusCode).json({ error: message });
+    }
   });
   app2.post("/api/payments/create-order", async (req, res) => {
     const { items, shippingSpeed, paymentMethod, couponCode } = req.body;
@@ -3963,7 +4144,7 @@ function createApiApp() {
     const amountPaise = Math.round(calc.grandTotal * 100);
     const keyId = process.env.RAZORPAY_KEY_ID?.trim();
     const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
-    let razorpayOrderId = `order_HR${crypto6.randomBytes(6).toString("hex")}`;
+    let razorpayOrderId = `order_HR${crypto5.randomBytes(6).toString("hex")}`;
     if (keyId && keySecret) {
       try {
         const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
@@ -4035,10 +4216,10 @@ function createApiApp() {
       if (!razorpaySignature) {
         return res.status(400).json({ error: "Payment signature missing." });
       }
-      const expected = crypto6.createHmac("sha256", secret).update(`${razorpayOrderId}|${razorpayPaymentId}`).digest("hex");
+      const expected = crypto5.createHmac("sha256", secret).update(`${razorpayOrderId}|${razorpayPaymentId}`).digest("hex");
       const sigBuf = Buffer.from(razorpaySignature);
       const expBuf = Buffer.from(expected);
-      if (sigBuf.length !== expBuf.length || !crypto6.timingSafeEqual(sigBuf, expBuf)) {
+      if (sigBuf.length !== expBuf.length || !crypto5.timingSafeEqual(sigBuf, expBuf)) {
         logStructured("warn", "payments", "signature_mismatch", {
           requestId: req.requestId,
           razorpayOrderId
@@ -4064,10 +4245,10 @@ function createApiApp() {
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET?.trim();
     if (webhookSecret) {
       const payloadToVerify = req.rawBody ?? JSON.stringify(req.body);
-      const expected = crypto6.createHmac("sha256", webhookSecret).update(payloadToVerify).digest("hex");
+      const expected = crypto5.createHmac("sha256", webhookSecret).update(payloadToVerify).digest("hex");
       const sigBuf = Buffer.from(signature);
       const expBuf = Buffer.from(expected);
-      if (!signature || sigBuf.length !== expBuf.length || !crypto6.timingSafeEqual(sigBuf, expBuf)) {
+      if (!signature || sigBuf.length !== expBuf.length || !crypto5.timingSafeEqual(sigBuf, expBuf)) {
         logStructured("warn", "payments", "webhook_signature_invalid", {
           requestId: req.requestId
         });
@@ -4103,7 +4284,7 @@ function createApiApp() {
       });
       if (!state.adminNotifications.some((n) => n.orderId === order.id && n.type === "new_paid_order")) {
         state.adminNotifications.unshift({
-          id: `notif-${crypto6.randomUUID().slice(0, 8)}`,
+          id: `notif-${crypto5.randomUUID().slice(0, 8)}`,
           type: "new_paid_order",
           title: "New Paid Order Received!",
           message: `${order.orderNumber} from ${order.customerName} (\u20B9${order.totalAmount})`,
@@ -4252,7 +4433,7 @@ function createApiApp() {
     const gatewayFeeAmount = isOnline ? Math.round(calc.grandTotal * (gatewayFeePct / 100) * 100) / 100 : 0;
     const actualShippingCost = state.settings.defaultShippingCostPerOrder ?? 65;
     const newOrder = {
-      id: `ord-${crypto6.randomUUID().slice(0, 8)}`,
+      id: `ord-${crypto5.randomUUID().slice(0, 8)}`,
       orderNumber,
       userId: req.currentUser?.id,
       customerName: shippingAddress.fullName.trim(),
@@ -4295,7 +4476,7 @@ function createApiApp() {
     state.orders.unshift(newOrder);
     let addedNotifId = null;
     if (isOnline) {
-      addedNotifId = `notif-${crypto6.randomUUID().slice(0, 8)}`;
+      addedNotifId = `notif-${crypto5.randomUUID().slice(0, 8)}`;
       const notif = {
         id: addedNotifId,
         type: "new_paid_order",
@@ -4483,7 +4664,7 @@ function createApiApp() {
       return res.status(400).json({ error: "Please enter a brief message (at least 8 characters)." });
     }
     const inquiry = {
-      id: `inq-${crypto6.randomUUID().slice(0, 8)}`,
+      id: `inq-${crypto5.randomUUID().slice(0, 8)}`,
       name: name.trim(),
       email: email.trim().toLowerCase(),
       phone: phone?.trim(),
@@ -4636,7 +4817,7 @@ Concierge:` : message.trim();
     const batchNumber = body.batchNumber?.trim() || `HR-BATCH-${(/* @__PURE__ */ new Date()).getFullYear()}`;
     const gstRatePercent = Math.max(0, Math.min(28, Number(body.gstRatePercent ?? 12)));
     const slugBase = body.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    const uniqueSuffix = crypto6.randomUUID().slice(0, 6);
+    const uniqueSuffix = crypto5.randomUUID().slice(0, 6);
     const id = `${slugBase || "himrudra-product"}-${uniqueSuffix}`;
     const sku = body.sku?.trim().toUpperCase() || `HR-${slugBase.replace(/-/g, "").slice(0, 6).toUpperCase() || "PRD"}-${uniqueSuffix.slice(0, 4).toUpperCase()}`;
     const customImages = Array.isArray(body.customImages) ? body.customImages.filter((u) => typeof u === "string" && u.trim().length > 0) : [];
@@ -4879,7 +5060,7 @@ Concierge:` : message.trim();
       if (paymentStatus === "Refund Requested") {
         order.refundRequestedAt = nowIso;
         state.adminNotifications.unshift({
-          id: `notif-${crypto6.randomUUID().slice(0, 8)}`,
+          id: `notif-${crypto5.randomUUID().slice(0, 8)}`,
           type: "refund_request",
           title: "Refund Request Logged",
           message: `${order.orderNumber} (${order.customerName}) marked for refund review`,
@@ -4945,7 +5126,7 @@ Concierge:` : message.trim();
     }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const promo = {
-      id: `promo-${crypto6.randomUUID().slice(0, 8)}`,
+      id: `promo-${crypto5.randomUUID().slice(0, 8)}`,
       title: title.trim(),
       description: (description || "").trim(),
       bannerHeadline: (bannerHeadline || title).trim(),
@@ -5026,7 +5207,7 @@ Concierge:` : message.trim();
       });
     }
     const newReport = {
-      id: `lab-${crypto6.randomUUID().slice(0, 8)}`,
+      id: `lab-${crypto5.randomUUID().slice(0, 8)}`,
       laboratoryName: body.laboratoryName.trim(),
       reportNumber: body.reportNumber.trim(),
       testedBatchNumber: body.testedBatchNumber.trim(),
@@ -5165,7 +5346,7 @@ Concierge:` : message.trim();
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const newSection = {
-      id: `cms-${crypto6.randomUUID().slice(0, 8)}`,
+      id: `cms-${crypto5.randomUUID().slice(0, 8)}`,
       key: title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_"),
       title: title.trim(),
       category: category === "faq" ? "faq" : "product",
@@ -5200,7 +5381,7 @@ Concierge:` : message.trim();
       return res.status(400).json({ error: "Valid description and positive amount required." });
     }
     const expense = {
-      id: `exp-${crypto6.randomUUID().slice(0, 8)}`,
+      id: `exp-${crypto5.randomUUID().slice(0, 8)}`,
       date: date || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
       category: category || "Operations",
       description: description.trim(),

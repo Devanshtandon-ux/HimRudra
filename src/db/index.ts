@@ -23,14 +23,20 @@ export function isCloudSqlConfigured(
 
 export const createPool = () => {
   if (!global._postgresPool) {
+    const sslMode = (process.env.SQL_SSL || '').trim().toLowerCase();
+    const useSsl = sslMode === 'true' || sslMode === 'require' || sslMode === '1';
+    const parsedPort = process.env.SQL_PORT ? Number(process.env.SQL_PORT) : undefined;
+
     global._postgresPool = new Pool({
       host: process.env.SQL_HOST,
       user: process.env.SQL_USER,
       password: process.env.SQL_PASSWORD,
       database: process.env.SQL_DB_NAME,
+      ...(Number.isFinite(parsedPort) ? { port: parsedPort } : {}),
+      ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
       max: 15,
       idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: process.env.VERCEL ? 6000 : 20000,
+      connectionTimeoutMillis: process.env.VERCEL ? 15000 : 20000,
     });
 
     global._postgresPool.on('error', (err) => {

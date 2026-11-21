@@ -42,6 +42,155 @@ function isTableEmpty(state: {
 }
 
 export class PostgresStateAdapter {
+  private mapUserRow(row: typeof users.$inferSelect): StoredUser {
+    return {
+      id: row.id,
+      name: row.name,
+      email: row.email,
+      phone: row.phone,
+      role: row.role === 'admin' ? 'admin' : 'customer',
+      passwordHash: row.passwordHash,
+      defaultAddress: row.defaultAddress ?? undefined,
+      wishlistProductIds: Array.isArray(row.wishlistProductIds) ? row.wishlistProductIds : [],
+      createdAt: row.createdAt,
+    };
+  }
+
+  async findUserByEmail(email: string): Promise<StoredUser | null> {
+    try {
+      const normalized = email.trim().toLowerCase();
+      const rows = await db
+        .select()
+        .from(users)
+        .where(eq(users.email, normalized))
+        .limit(1);
+      return rows[0] ? this.mapUserRow(rows[0]) : null;
+    } catch (error) {
+      logStructured('error', 'cloud-sql', 'find_user_by_email_failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new StorePersistenceError('Database read failed. Please try again shortly.', {
+        code: 'POSTGRES_READ_FAILED',
+        statusCode: 503,
+        retryable: true,
+      });
+    }
+  }
+
+  async findUserById(id: string): Promise<StoredUser | null> {
+    try {
+      const rows = await db.select().from(users).where(eq(users.id, id)).limit(1);
+      return rows[0] ? this.mapUserRow(rows[0]) : null;
+    } catch (error) {
+      logStructured('error', 'cloud-sql', 'find_user_by_id_failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new StorePersistenceError('Database read failed. Please try again shortly.', {
+        code: 'POSTGRES_READ_FAILED',
+        statusCode: 503,
+        retryable: true,
+      });
+    }
+  }
+
+  /**
+   * Fast, atomic single-row user save (~20ms) that avoids full 12-table rewrites and
+   * eliminates unique email/uid constraint race conditions during Google & Email sign-in.
+   */
+  async upsertUser(user: StoredUser, uid?: string): Promise<StoredUser> {
+    const startedAt = Date.now();
+    const normalizedEmail = user.email.trim().toLowerCase();
+    try {
+      const rows = await db
+        .insert(users)
+        .values({
+          id: user.id,
+          ...(uid ? { uid } : {}),
+          name: user.name,
+          email: normalizedEmail,
+          phone: user.phone ?? '',
+          role: user.role,
+          passwordHash: user.passwordHash,
+          defaultAddress: user.defaultAddress ?? null,
+          wishlistProductIds: user.wishlistProductIds ?? [],
+          createdAt: user.createdAt,
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: users.email,
+          set: {
+            ...(uid ? { uid } : {}),
+            name: user.name,
+            phone: user.phone ?? '',
+            role: user.role,
+            defaultAddress: user.defaultAddress ?? null,
+            wishlistProductIds: user.wishlistProductIds ?? [],
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+
+      logStructured('info', 'cloud-sql', 'upsert_user_success', {
+        durationMs: Date.now() - startedAt,
+      });
+
+      return rows[0] ? this.mapUserRow(rows[0]) : { ...user, email: normalizedEmail };
+    } catch (error) {
+      logStructured('error', 'cloud-sql', 'upsert_user_failed', {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new StorePersistenceError('Database save failed. Please try again shortly.', {
+        code: 'POSTGRES_USER_WRITE_FAILED',
+        statusCode: 503,
+        retryable: true,
+      });
+    }
+  }
+
+  /**
+   * Atomically inserts a new email/password customer; returns null if the email already exists.
+   */
+  async createUserIfNotExists(user: StoredUser): Promise<StoredUser | null> {
+    const startedAt = Date.now();
+    const normalizedEmail = user.email.trim().toLowerCase();
+    try {
+      const rows = await db
+        .insert(users)
+        .values({
+          id: user.id,
+          name: user.name,
+          email: normalizedEmail,
+          phone: user.phone ?? '',
+          role: user.role,
+          passwordHash: user.passwordHash,
+          defaultAddress: user.defaultAddress ?? null,
+          wishlistProductIds: user.wishlistProductIds ?? [],
+          createdAt: user.createdAt,
+          updatedAt: new Date(),
+        })
+        .onConflictDoNothing({ target: users.email })
+        .returning();
+
+      logStructured('info', 'cloud-sql', 'create_user_attempt', {
+        durationMs: Date.now() - startedAt,
+        created: rows.length > 0,
+      });
+
+      return rows[0] ? this.mapUserRow(rows[0]) : null;
+    } catch (error) {
+      logStructured('error', 'cloud-sql', 'create_user_failed', {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new StorePersistenceError('Database save failed. Please try again shortly.', {
+        code: 'POSTGRES_USER_WRITE_FAILED',
+        statusCode: 503,
+        retryable: true,
+      });
+    }
+  }
+
   async loadState(fallbackSeed: DatabaseState): Promise<{
     empty: boolean;
     state: DatabaseState;
@@ -438,16 +587,16 @@ export class PostgresStateAdapter {
             },
           });
 
-        // 2. Users (upsert before orders so foreign keys always resolve)
+        // 2. Users (upsert safely by email before orders so foreign keys always resolve and concurrent sign-ups are never deleted)
         const userIds: string[] = [];
         for (const u of state.users) {
-          userIds.push(u.id);
-          await tx
+          const normalizedEmail = u.email.trim().toLowerCase();
+          const savedRows = await tx
             .insert(users)
             .values({
               id: u.id,
               name: u.name,
-              email: u.email,
+              email: normalizedEmail,
               phone: u.phone,
               role: u.role,
               passwordHash: u.passwordHash,
@@ -457,21 +606,18 @@ export class PostgresStateAdapter {
               updatedAt: new Date(),
             })
             .onConflictDoUpdate({
-              target: users.id,
+              target: users.email,
               set: {
                 name: u.name,
-                email: u.email,
                 phone: u.phone,
                 role: u.role,
-                passwordHash: u.passwordHash,
                 defaultAddress: u.defaultAddress ?? null,
                 wishlistProductIds: u.wishlistProductIds ?? [],
                 updatedAt: new Date(),
               },
-            });
-        }
-        if (userIds.length > 0) {
-          await tx.delete(users).where(notInArray(users.id, userIds));
+            })
+            .returning({ id: users.id });
+          userIds.push(savedRows[0]?.id ?? u.id);
         }
 
         // 3. Products
