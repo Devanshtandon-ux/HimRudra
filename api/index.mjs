@@ -4018,6 +4018,7 @@ function createTrafficGuardMiddleware(options) {
 }
 
 // server.ts
+dotenv.config({ path: ".env.local" });
 dotenv.config();
 var PORT = Number(process.env.PORT) || 3e3;
 var IS_SERVERLESS2 = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);

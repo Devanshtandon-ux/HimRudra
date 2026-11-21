@@ -49,6 +49,7 @@ import type {
   ShippingAddress,
 } from './src/types.ts';
 
+dotenv.config({ path: '.env.local' });
 dotenv.config();
 
 const PORT = Number(process.env.PORT) || 3000;
