@@ -2,16 +2,22 @@ import React, { useState } from 'react';
 import { CheckCircle2, Mail, MapPin, Phone } from 'lucide-react';
 import { BrandLogo } from './BrandLogo';
 
+import { PRIVACY_POLICY_PATH, TERMS_AND_CONDITIONS_PATH } from '../lib/legalRoutes';
+
 interface ContactAndFooterProps {
   onOpenTrackOrder: () => void;
   onNavigateSection: (id: string) => void;
+  onNavigateLegal: (path: string) => void;
   labDownloadUrl?: string;
+  hideContactSection?: boolean;
 }
 
 export const ContactAndFooter: React.FC<ContactAndFooterProps> = ({
   onOpenTrackOrder,
   onNavigateSection,
+  onNavigateLegal,
   labDownloadUrl,
+  hideContactSection = false,
 }) => {
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
@@ -52,9 +58,16 @@ export const ContactAndFooter: React.FC<ContactAndFooterProps> = ({
     }
   };
 
+  const handleLegalLinkClick = (e: React.MouseEvent<HTMLAnchorElement>, path: string) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    e.preventDefault();
+    onNavigateLegal(path);
+  };
+
   return (
     <>
       {/* Contact Section */}
+      {!hideContactSection && (
       <section id="contact" className="scroll-mt-16 py-16 lg:py-24 bg-[#FAF8F4] border-t border-[#281A15]/8">
         <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-14 items-start">
@@ -195,6 +208,7 @@ export const ContactAndFooter: React.FC<ContactAndFooterProps> = ({
           </div>
         </div>
       </section>
+      )}
 
       {/* Editorial Footer */}
       <footer className="bg-[#281A15] text-[#FAF8F4] border-t border-[#C69B51]/25">
@@ -259,12 +273,44 @@ export const ContactAndFooter: React.FC<ContactAndFooterProps> = ({
               >
                 Shipping & Return Eligibility
               </button>
+              <a
+                href={PRIVACY_POLICY_PATH}
+                onClick={(e) => handleLegalLinkClick(e, PRIVACY_POLICY_PATH)}
+                className="block text-[#FAF8F4]/75 hover:text-[#C69B51] transition-colors"
+              >
+                Privacy Policy
+              </a>
+              <a
+                href={TERMS_AND_CONDITIONS_PATH}
+                onClick={(e) => handleLegalLinkClick(e, TERMS_AND_CONDITIONS_PATH)}
+                className="block text-[#FAF8F4]/75 hover:text-[#C69B51] transition-colors"
+              >
+                Terms &amp; Conditions
+              </a>
             </div>
           </div>
 
           <div className="pt-6 flex flex-col sm:flex-row items-center justify-between gap-4 text-[11px] text-[#FAF8F4]/60">
             <p>© {new Date().getFullYear()} HimRudra — Pure by Himalayas. Marketed by KP Enterprise, Ahmedabad.</p>
-            <p>Born in the Himalayas. Crafted for Your Ritual.</p>
+            <div className="flex flex-wrap items-center justify-center gap-x-4 gap-y-1">
+              <a
+                href={PRIVACY_POLICY_PATH}
+                onClick={(e) => handleLegalLinkClick(e, PRIVACY_POLICY_PATH)}
+                className="hover:text-[#C69B51] transition-colors"
+              >
+                Privacy Policy
+              </a>
+              <span aria-hidden="true" className="text-[#C69B51]/40">·</span>
+              <a
+                href={TERMS_AND_CONDITIONS_PATH}
+                onClick={(e) => handleLegalLinkClick(e, TERMS_AND_CONDITIONS_PATH)}
+                className="hover:text-[#C69B51] transition-colors"
+              >
+                Terms &amp; Conditions
+              </a>
+              <span aria-hidden="true" className="hidden md:inline text-[#C69B51]/40">·</span>
+              <span className="hidden md:inline">Born in the Himalayas. Crafted for Your Ritual.</span>
+            </div>
           </div>
         </div>
       </footer>

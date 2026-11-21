@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   CheckCircle2,
   Eye,
@@ -54,6 +54,7 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
   const [authError, setAuthError] = useState('');
   const [authBusy, setAuthBusy] = useState(false);
   const [googleBusy, setGoogleBusy] = useState(false);
+  const googleInFlightRef = useRef(false);
 
   const [myOrders, setMyOrders] = useState<Order[]>([]);
   const [loadingOrders, setLoadingOrders] = useState(false);
@@ -190,48 +191,59 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
     }
   };
 
-  const handleGoogleSignIn = async () => {
+  const handleGoogleSignIn = () => {
+    if (googleInFlightRef.current) return;
+    googleInFlightRef.current = true;
+
+    // Trigger Firebase popup synchronously inside the direct user click gesture
+    // before any React state transitions or asynchronous operations.
+    const popupPromise = signInWithGooglePopup();
+
     setAuthError('');
     setGoogleBusy(true);
-    try {
-      const { idToken } = await signInWithGooglePopup();
-      const res = await fetch('/api/auth/google', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ idToken }),
-      });
-      let data: { user?: User; error?: string; sessionToken?: string } = {};
-      try {
-        data = (await res.json()) as { user?: User; error?: string; sessionToken?: string };
-      } catch {
-        // Non-JSON response
-      }
-      if (!res.ok || !data.user) {
-        setAuthError(data.error || `Google sign-in failed on server (HTTP ${res.status}).`);
-        return;
-      }
-      if (data.sessionToken) {
+
+    void popupPromise
+      .then(async ({ idToken }) => {
+        const res = await fetch('/api/auth/google', {
+          method: 'POST',
+          credentials: 'include',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ idToken }),
+        });
+        let data: { user?: User; error?: string; sessionToken?: string } = {};
         try {
-          window.sessionStorage.setItem('himrudra_session_token', data.sessionToken);
+          data = (await res.json()) as { user?: User; error?: string; sessionToken?: string };
         } catch {
-          // ignore storage errors
+          // Non-JSON response
         }
-      }
-      onAuthChange(data.user);
-      if (data.user.role === 'admin') {
-        setTab('account');
-        onClose();
-        onOpenAdminDashboard();
-      } else {
-        setTab('orders');
-      }
-    } catch (err: unknown) {
-      console.error('Google Sign-In error:', err);
-      setAuthError(getFirebaseAuthErrorMessage(err));
-    } finally {
-      setGoogleBusy(false);
-    }
+        if (!res.ok || !data.user) {
+          setAuthError(data.error || `Google sign-in failed on server (HTTP ${res.status}).`);
+          return;
+        }
+        if (data.sessionToken) {
+          try {
+            window.sessionStorage.setItem('himrudra_session_token', data.sessionToken);
+          } catch {
+            // ignore storage errors
+          }
+        }
+        onAuthChange(data.user);
+        if (data.user.role === 'admin') {
+          setTab('account');
+          onClose();
+          onOpenAdminDashboard();
+        } else {
+          setTab('orders');
+        }
+      })
+      .catch((err: unknown) => {
+        console.error('Google Sign-In error:', err);
+        setAuthError(getFirebaseAuthErrorMessage(err));
+      })
+      .finally(() => {
+        googleInFlightRef.current = false;
+        setGoogleBusy(false);
+      });
   };
 
   const handleLogout = async () => {

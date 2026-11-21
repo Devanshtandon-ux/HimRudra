@@ -9,6 +9,7 @@ import { ContactAndFooter } from './components/ContactAndFooter';
 import { Header } from './components/Header';
 import { HeroSection } from './components/HeroSection';
 import { LabCertifiedBar } from './components/LabCertifiedBar';
+import { LegalPage } from './components/LegalPage';
 import { ProductDescriptionSection } from './components/ProductDescriptionSection';
 import { ProductShowcase } from './components/ProductShowcase';
 import { SearchModal } from './components/SearchModal';
@@ -17,6 +18,7 @@ import { WhatsAppButton } from './components/WhatsAppButton';
 import { WhyHimRudra } from './components/WhyHimRudra';
 import { getActivePromotions } from './lib/commerce';
 import { signOutFirebase } from './lib/firebaseAuth';
+import { getRouteMeta, resolveAppRoute, type AppRoute } from './lib/legalRoutes';
 import type {
   CartItem,
   Order,
@@ -28,6 +30,9 @@ import type {
 const CART_STORAGE_KEY = 'himrudra_cart_v1';
 
 export default function App() {
+  const [activeRoute, setActiveRoute] = useState<AppRoute>(() =>
+    resolveAppRoute(typeof window !== 'undefined' ? window.location.pathname : '/')
+  );
   const [bootstrap, setBootstrap] = useState<PublicStoreBootstrap | null>(null);
   const [loadError, setLoadError] = useState('');
   const [user, setUser] = useState<User | null>(null);
@@ -129,17 +134,55 @@ export default function App() {
   }, [cartItems]);
 
   useEffect(() => {
-    if (!bootstrap?.settings) return;
-    if (bootstrap.settings.seoTitle) {
-      document.title = bootstrap.settings.seoTitle;
-    }
+    const handlePopState = () => {
+      setActiveRoute(resolveAppRoute(window.location.pathname));
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
+
+  useEffect(() => {
+    const defaultTitle =
+      bootstrap?.settings?.seoTitle ||
+      'HimRudra — Pure by Himalayas | Himalayan Shilajit Resin (20 g)';
+    const defaultDesc =
+      bootstrap?.settings?.seoDescription ||
+      'Born in the Himalayas. Crafted for Your Ritual. Shop HimRudra Himalayan Shilajit Resin (20 g) with batch-level laboratory documentation.';
+    const meta = getRouteMeta(activeRoute, defaultTitle, defaultDesc);
+    document.title = meta.title;
     const metaDesc = document.querySelector('meta[name="description"]');
-    if (metaDesc && bootstrap.settings.seoDescription) {
-      metaDesc.setAttribute('content', bootstrap.settings.seoDescription);
+    if (metaDesc && meta.description) {
+      metaDesc.setAttribute('content', meta.description);
     }
-  }, [bootstrap?.settings]);
+  }, [activeRoute, bootstrap?.settings]);
+
+  const navigateToPath = (path: string, sectionId?: string) => {
+    const nextRoute = resolveAppRoute(path);
+    if (window.location.pathname !== path) {
+      window.history.pushState({}, '', path);
+    }
+    setActiveRoute(nextRoute);
+    if (nextRoute === 'home' && sectionId) {
+      window.requestAnimationFrame(() => {
+        window.setTimeout(() => {
+          const el = document.getElementById(sectionId);
+          if (el) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+          } else {
+            window.scrollTo({ top: 0, behavior: 'smooth' });
+          }
+        }, 40);
+      });
+    } else {
+      window.scrollTo({ top: 0, behavior: 'auto' });
+    }
+  };
 
   const scrollToSection = (sectionId: string) => {
+    if (activeRoute !== 'home') {
+      navigateToPath('/', sectionId);
+      return;
+    }
     const el = document.getElementById(sectionId);
     if (el) {
       el.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -203,7 +246,10 @@ export default function App() {
     setBootstrap((prev) => (prev ? { ...prev, products: updatedProducts } : prev));
   };
 
-  if (loadError) {
+  const isLegalRoute =
+    activeRoute === 'privacy-policy' || activeRoute === 'terms-and-conditions';
+
+  if (loadError && !isLegalRoute) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#FAF8F4] p-6">
         <div className="max-w-md rounded-2xl border border-[#79543D]/20 bg-[#F3EDE5] p-6 text-center space-y-4">
@@ -224,7 +270,7 @@ export default function App() {
     );
   }
 
-  if (!bootstrap) {
+  if (!bootstrap && !isLegalRoute) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-[#FAF8F4]">
         <div className="text-center space-y-2">
@@ -237,17 +283,17 @@ export default function App() {
     );
   }
 
-  const products = bootstrap.products;
+  const products = bootstrap?.products ?? [];
   const primaryProduct = products[0];
   const selectedProduct =
     products.find((p) => p.id === selectedProductId) ?? primaryProduct;
   const totalCartCount = cartItems.reduce((sum, i) => sum + i.quantity, 0);
 
-  const serverOffsetMs = bootstrap.serverNow
+  const serverOffsetMs = bootstrap?.serverNow
     ? Date.parse(bootstrap.serverNow) - Date.now()
     : 0;
   const activePromos = getActivePromotions(
-    bootstrap.promotions ?? [],
+    bootstrap?.promotions ?? [],
     Date.now() + serverOffsetMs
   );
   const heroPromo =
@@ -260,9 +306,10 @@ export default function App() {
       ? 'bg-[#F3EDE5] text-[#281A15] border-b border-[#79543D]/25'
       : 'bg-[#79543D] text-[#FAF8F4] border-b border-[#C69B51]/55';
 
+  const labReports = bootstrap?.labReports ?? [];
   const activeLabReport =
-    bootstrap.labReports.find((r) => r.id === selectedLabReportId) ??
-    bootstrap.labReports[0] ??
+    labReports.find((r) => r.id === selectedLabReportId) ??
+    labReports[0] ??
     null;
   const activeLabDownloadUrl = activeLabReport
     ? `/api/lab-reports/${encodeURIComponent(activeLabReport.id)}/download`
@@ -271,23 +318,25 @@ export default function App() {
   const openLabReportPreview = (reportId?: string) => {
     if (reportId) {
       setSelectedLabReportId(reportId);
-    } else if (!selectedLabReportId && bootstrap.labReports[0]) {
-      setSelectedLabReportId(bootstrap.labReports[0].id);
+    } else if (!selectedLabReportId && labReports[0]) {
+      setSelectedLabReportId(labReports[0].id);
     }
     setLabPreviewOpen(true);
   };
 
   return (
     <div className="min-h-screen bg-[#FAF8F4] text-[#241B17]">
-      <LabCertifiedBar
-        labReports={bootstrap.labReports}
-        previewOpen={labPreviewOpen}
-        onOpenPreview={openLabReportPreview}
-        onClosePreview={() => setLabPreviewOpen(false)}
-        selectedReportId={activeLabReport?.id ?? ''}
-        onSelectReportId={setSelectedLabReportId}
-      />
-      {!bannerDismissed && (heroPromo || bootstrap.settings.announcementText) && (
+      {bootstrap && (
+        <LabCertifiedBar
+          labReports={labReports}
+          previewOpen={labPreviewOpen}
+          onOpenPreview={openLabReportPreview}
+          onClosePreview={() => setLabPreviewOpen(false)}
+          selectedReportId={activeLabReport?.id ?? ''}
+          onSelectReportId={setSelectedLabReportId}
+        />
+      )}
+      {!isLegalRoute && !bannerDismissed && (heroPromo || bootstrap?.settings.announcementText) && (
         <motion.div
           initial={{ opacity: 0, y: -8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -301,7 +350,7 @@ export default function App() {
               <span>
                 {heroPromo
                   ? heroPromo.bannerHeadline
-                  : bootstrap.settings.announcementText}
+                  : bootstrap?.settings.announcementText}
               </span>
             </span>
             {heroPromo?.bannerSubtext && (
@@ -336,108 +385,144 @@ export default function App() {
       />
 
       <main>
-        {primaryProduct && (
-          <HeroSection
-            primaryProduct={primaryProduct}
-            activePromotion={heroPromo}
-            serverOffsetMs={serverOffsetMs}
-            onShopNow={() => {
-              setSelectedProductId(primaryProduct.id);
-              scrollToSection('shop');
-            }}
-            onExplore={() => scrollToSection('why-himrudra')}
-          />
+        {isLegalRoute ? (
+          <>
+            <LegalPage
+              type={activeRoute}
+              settings={bootstrap?.settings ?? null}
+              onNavigateHome={(sectionId) => navigateToPath('/', sectionId)}
+              onNavigateLegal={(path) => navigateToPath(path)}
+            />
+            <ContactAndFooter
+              hideContactSection
+              onOpenTrackOrder={() => {
+                setTrackOrderNumber('');
+                setAccountTab('track');
+                setAccountOpen(true);
+              }}
+              onNavigateSection={scrollToSection}
+              onNavigateLegal={(path) => navigateToPath(path)}
+              labDownloadUrl={activeLabDownloadUrl}
+            />
+          </>
+        ) : (
+          bootstrap && (
+            <>
+              {primaryProduct && (
+                <HeroSection
+                  primaryProduct={primaryProduct}
+                  activePromotion={heroPromo}
+                  serverOffsetMs={serverOffsetMs}
+                  onShopNow={() => {
+                    setSelectedProductId(primaryProduct.id);
+                    scrollToSection('shop');
+                  }}
+                  onExplore={() => scrollToSection('why-himrudra')}
+                />
+              )}
+
+              {selectedProduct && (
+                <ProductShowcase
+                  products={products}
+                  selectedProduct={selectedProduct}
+                  onSelectProduct={(p) => setSelectedProductId(p.id)}
+                  settings={bootstrap.settings}
+                  promotions={bootstrap.promotions}
+                  serverOffsetMs={serverOffsetMs}
+                  wishlistIds={user?.wishlistProductIds ?? []}
+                  onToggleWishlist={(pid) => void toggleWishlist(pid)}
+                  onAddToCart={addToCart}
+                  onBuyNow={buyNow}
+                  activeLabReport={activeLabReport}
+                  onOpenLabReport={() => openLabReportPreview(activeLabReport?.id)}
+                />
+              )}
+
+              <WhyHimRudra
+                labDownloadUrl={activeLabDownloadUrl}
+                onOpenLabReport={() => openLabReportPreview(activeLabReport?.id)}
+              />
+
+              <ProductDescriptionSection cmsSections={bootstrap.cmsSections} />
+
+              <ContactAndFooter
+                onOpenTrackOrder={() => {
+                  setTrackOrderNumber('');
+                  setAccountTab('track');
+                  setAccountOpen(true);
+                }}
+                onNavigateSection={scrollToSection}
+                onNavigateLegal={(path) => navigateToPath(path)}
+                labDownloadUrl={activeLabDownloadUrl}
+              />
+            </>
+          )
         )}
-
-        {selectedProduct && (
-          <ProductShowcase
-            products={products}
-            selectedProduct={selectedProduct}
-            onSelectProduct={(p) => setSelectedProductId(p.id)}
-            settings={bootstrap.settings}
-            promotions={bootstrap.promotions}
-            serverOffsetMs={serverOffsetMs}
-            wishlistIds={user?.wishlistProductIds ?? []}
-            onToggleWishlist={(pid) => void toggleWishlist(pid)}
-            onAddToCart={addToCart}
-            onBuyNow={buyNow}
-            activeLabReport={activeLabReport}
-            onOpenLabReport={() => openLabReportPreview(activeLabReport?.id)}
-          />
-        )}
-
-        <WhyHimRudra
-          labDownloadUrl={activeLabDownloadUrl}
-          onOpenLabReport={() => openLabReportPreview(activeLabReport?.id)}
-        />
-
-        <ProductDescriptionSection cmsSections={bootstrap.cmsSections} />
-
-        <ContactAndFooter
-          onOpenTrackOrder={() => {
-            setTrackOrderNumber('');
-            setAccountTab('track');
-            setAccountOpen(true);
-          }}
-          onNavigateSection={scrollToSection}
-          labDownloadUrl={activeLabDownloadUrl}
-        />
       </main>
 
-      <SearchModal
-        open={searchOpen}
-        onClose={() => setSearchOpen(false)}
-        products={products}
-        cmsSections={bootstrap.cmsSections}
-        labReports={bootstrap.labReports}
-        onSelectProduct={(p) => setSelectedProductId(p.id)}
-        onJumpToSection={scrollToSection}
-        onSelectLabReport={(report) => openLabReportPreview(report.id)}
-      />
+      {bootstrap && (
+        <>
+          <SearchModal
+            open={searchOpen}
+            onClose={() => setSearchOpen(false)}
+            products={products}
+            cmsSections={bootstrap.cmsSections}
+            labReports={bootstrap.labReports}
+            onSelectProduct={(p) => {
+              setSelectedProductId(p.id);
+              if (activeRoute !== 'home') {
+                navigateToPath('/', 'shop');
+              }
+            }}
+            onJumpToSection={scrollToSection}
+            onSelectLabReport={(report) => openLabReportPreview(report.id)}
+          />
 
-      <CartDrawer
-        open={cartOpen}
-        onClose={() => setCartOpen(false)}
-        cartItems={cartItems}
-        products={products}
-        settings={bootstrap.settings}
-        coupons={bootstrap.coupons}
-        promotions={bootstrap.promotions}
-        serverOffsetMs={serverOffsetMs}
-        couponCode={couponCode}
-        onCouponCodeChange={setCouponCode}
-        shippingSpeed={shippingSpeed}
-        onShippingSpeedChange={setShippingSpeed}
-        onUpdateQty={updateCartQty}
-        onRemoveItem={(pid) =>
-          setCartItems((prev) => prev.filter((i) => i.productId !== pid))
-        }
-        onProceedToCheckout={() => {
-          setCartOpen(false);
-          setCheckoutOpen(true);
-        }}
-      />
+          <CartDrawer
+            open={cartOpen}
+            onClose={() => setCartOpen(false)}
+            cartItems={cartItems}
+            products={products}
+            settings={bootstrap.settings}
+            coupons={bootstrap.coupons}
+            promotions={bootstrap.promotions}
+            serverOffsetMs={serverOffsetMs}
+            couponCode={couponCode}
+            onCouponCodeChange={setCouponCode}
+            shippingSpeed={shippingSpeed}
+            onShippingSpeedChange={setShippingSpeed}
+            onUpdateQty={updateCartQty}
+            onRemoveItem={(pid) =>
+              setCartItems((prev) => prev.filter((i) => i.productId !== pid))
+            }
+            onProceedToCheckout={() => {
+              setCartOpen(false);
+              setCheckoutOpen(true);
+            }}
+          />
 
-      <CheckoutModal
-        open={checkoutOpen}
-        onClose={() => setCheckoutOpen(false)}
-        cartItems={cartItems}
-        products={products}
-        settings={bootstrap.settings}
-        coupons={bootstrap.coupons}
-        promotions={bootstrap.promotions}
-        serverOffsetMs={serverOffsetMs}
-        couponCode={couponCode}
-        shippingSpeed={shippingSpeed}
-        user={user}
-        onOrderSuccess={handleOrderSuccess}
-        onTrackOrder={(orderNumber) => {
-          setCheckoutOpen(false);
-          setTrackOrderNumber(orderNumber);
-          setAccountTab('track');
-          setAccountOpen(true);
-        }}
-      />
+          <CheckoutModal
+            open={checkoutOpen}
+            onClose={() => setCheckoutOpen(false)}
+            cartItems={cartItems}
+            products={products}
+            settings={bootstrap.settings}
+            coupons={bootstrap.coupons}
+            promotions={bootstrap.promotions}
+            serverOffsetMs={serverOffsetMs}
+            couponCode={couponCode}
+            shippingSpeed={shippingSpeed}
+            user={user}
+            onOrderSuccess={handleOrderSuccess}
+            onTrackOrder={(orderNumber) => {
+              setCheckoutOpen(false);
+              setTrackOrderNumber(orderNumber);
+              setAccountTab('track');
+              setAccountOpen(true);
+            }}
+          />
+        </>
+      )}
 
       <AccountDashboardModal
         open={accountOpen}
@@ -473,8 +558,12 @@ export default function App() {
         />
       )}
 
-      <WhatsAppButton phone={bootstrap.settings.brandPhone} />
-      <SupportChatbot />
+      {!isLegalRoute && (
+        <>
+          <WhatsAppButton phone={bootstrap?.settings.brandPhone || '9549572457'} />
+          <SupportChatbot />
+        </>
+      )}
     </div>
   );
 }
