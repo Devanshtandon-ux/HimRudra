@@ -1,5 +1,5 @@
 import { and, asc, eq, gte, notInArray, sql } from 'drizzle-orm';
-import { db } from './index.ts';
+import { db, isUsingExternalPostgresUrl } from './index.ts';
 import {
   adminNotifications,
   cmsSections,
@@ -42,6 +42,238 @@ function isTableEmpty(state: {
 }
 
 export class PostgresStateAdapter {
+  private externalSchemaReady = false;
+  private externalSchemaPromise: Promise<void> | null = null;
+
+  /**
+   * When deployed externally (e.g. Vercel + Neon / Supabase via DATABASE_URL),
+   * ensures the 12 relational tables exist on a fresh database without manual CLI migration.
+   * Skipped completely on AI Studio Cloud SQL where Drizzle manages DDL.
+   */
+  private async ensureExternalSchemaIfNeeded(): Promise<void> {
+    if (this.externalSchemaReady || !isUsingExternalPostgresUrl()) return;
+    if (this.externalSchemaPromise) {
+      await this.externalSchemaPromise;
+      return;
+    }
+
+    this.externalSchemaPromise = (async () => {
+      const statements = [
+        sql`CREATE TABLE IF NOT EXISTS users (
+          id text PRIMARY KEY,
+          uid text UNIQUE,
+          name text NOT NULL,
+          email text NOT NULL UNIQUE,
+          phone text NOT NULL DEFAULT '',
+          role text NOT NULL DEFAULT 'customer',
+          password_hash text NOT NULL,
+          default_address jsonb,
+          wishlist_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+          created_at text NOT NULL,
+          updated_at timestamp DEFAULT now()
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS products (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          slug text NOT NULL UNIQUE,
+          name text NOT NULL,
+          subtitle text NOT NULL,
+          net_quantity text NOT NULL,
+          sku text NOT NULL,
+          hsn_code text NOT NULL,
+          mrp double precision NOT NULL,
+          price double precision NOT NULL,
+          cost_per_unit double precision NOT NULL,
+          stock integer NOT NULL DEFAULT 0,
+          low_stock_threshold integer NOT NULL DEFAULT 10,
+          batch_number text NOT NULL,
+          gst_rate_percent double precision NOT NULL DEFAULT 12,
+          short_description text NOT NULL,
+          usage_guidance text NOT NULL,
+          storage_instructions text NOT NULL,
+          shipping_note text NOT NULL,
+          return_policy text NOT NULL,
+          specifications jsonb NOT NULL DEFAULT '[]'::jsonb,
+          gallery_types jsonb NOT NULL DEFAULT '[]'::jsonb,
+          custom_images jsonb,
+          active boolean NOT NULL DEFAULT true,
+          updated_at timestamp DEFAULT now()
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS orders (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          order_number text NOT NULL UNIQUE,
+          user_id text REFERENCES users(id) ON DELETE SET NULL,
+          customer_name text NOT NULL,
+          customer_email text NOT NULL,
+          customer_phone text NOT NULL,
+          shipping_address jsonb NOT NULL,
+          delivery_instructions text,
+          items jsonb NOT NULL,
+          subtotal double precision NOT NULL,
+          mrp_total double precision NOT NULL,
+          instant_savings double precision NOT NULL,
+          coupon_code text,
+          coupon_discount double precision NOT NULL DEFAULT 0,
+          promotion_id text,
+          promotion_title text,
+          shipping_fee double precision NOT NULL DEFAULT 0,
+          shipping_speed text NOT NULL DEFAULT 'standard',
+          cod_fee double precision NOT NULL DEFAULT 0,
+          taxable_value double precision NOT NULL,
+          gst_amount double precision NOT NULL,
+          total_amount double precision NOT NULL,
+          gateway_fee_amount double precision,
+          actual_shipping_cost double precision,
+          payment_method text NOT NULL,
+          payment_status text NOT NULL,
+          razorpay_order_id text,
+          razorpay_payment_id text,
+          payment_verified_at text,
+          status text NOT NULL,
+          tracking_number text,
+          courier_name text,
+          tracking_url text,
+          estimated_delivery text,
+          dispatched_at text,
+          delivered_at text,
+          refund_amount double precision,
+          refund_reason text,
+          refund_requested_at text,
+          timeline jsonb NOT NULL DEFAULT '[]'::jsonb,
+          created_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS coupons (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          code text NOT NULL UNIQUE,
+          type text NOT NULL,
+          value double precision NOT NULL,
+          min_order_value double precision NOT NULL DEFAULT 0,
+          max_discount double precision,
+          active boolean NOT NULL DEFAULT true,
+          description text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS promotions (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          title text NOT NULL,
+          description text NOT NULL,
+          banner_headline text NOT NULL,
+          banner_subtext text NOT NULL,
+          banner_theme text NOT NULL,
+          starts_at text NOT NULL,
+          ends_at text NOT NULL,
+          free_shipping boolean NOT NULL DEFAULT false,
+          free_shipping_speed text NOT NULL DEFAULT 'standard',
+          discount_percent double precision NOT NULL DEFAULT 0,
+          promo_code text,
+          enabled boolean NOT NULL DEFAULT true,
+          usage_count integer NOT NULL DEFAULT 0,
+          revenue_generated double precision NOT NULL DEFAULT 0,
+          created_at text NOT NULL,
+          updated_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS lab_reports (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          batch_number text NOT NULL DEFAULT '',
+          tested_batch_number text NOT NULL,
+          report_number text NOT NULL,
+          laboratory_name text NOT NULL,
+          accreditation text NOT NULL DEFAULT '',
+          test_date text NOT NULL,
+          expiry_date text NOT NULL DEFAULT '',
+          sample_description text NOT NULL DEFAULT '',
+          fulvic_acid_percent text NOT NULL DEFAULT '',
+          heavy_metals jsonb NOT NULL DEFAULT '[]'::jsonb,
+          microbiological jsonb NOT NULL DEFAULT '[]'::jsonb,
+          verdict text NOT NULL DEFAULT 'Reference Sample',
+          summary_note text NOT NULL DEFAULT '',
+          mapped_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+          testing_methodology text NOT NULL DEFAULT '',
+          verified_status text NOT NULL DEFAULT 'Reference Sample',
+          notes text NOT NULL DEFAULT '',
+          updated_at text NOT NULL DEFAULT '',
+          custom_document_url text,
+          original_file_name text,
+          original_mime_type text
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS cms_sections (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          key text NOT NULL,
+          title text NOT NULL,
+          category text NOT NULL,
+          content text NOT NULL,
+          approved_by_admin boolean NOT NULL DEFAULT false,
+          approved_at text,
+          updated_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS expenses (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          date text NOT NULL,
+          category text NOT NULL,
+          description text NOT NULL,
+          amount double precision NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS inquiries (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          name text NOT NULL,
+          email text NOT NULL,
+          phone text NOT NULL DEFAULT '',
+          subject text NOT NULL,
+          message text NOT NULL,
+          status text NOT NULL DEFAULT 'New',
+          reply_message text,
+          replied_at text,
+          replied_via jsonb,
+          email_delivery_status text,
+          created_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS admin_notifications (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          type text NOT NULL,
+          title text NOT NULL,
+          message text NOT NULL,
+          order_id text,
+          order_number text,
+          customer_name text,
+          amount double precision,
+          read boolean NOT NULL DEFAULT false,
+          email_notified_to text,
+          created_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS payment_intents (
+          razorpay_order_id text PRIMARY KEY,
+          amount_paise integer NOT NULL,
+          verified boolean NOT NULL DEFAULT false,
+          payment_id text,
+          signature_verified boolean NOT NULL DEFAULT false,
+          method text NOT NULL,
+          created_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS store_settings (
+          id text PRIMARY KEY,
+          payload jsonb NOT NULL,
+          updated_at timestamp DEFAULT now()
+        )`,
+      ];
+
+      for (const stmt of statements) {
+        await db.execute(stmt);
+      }
+      this.externalSchemaReady = true;
+    })().finally(() => {
+      this.externalSchemaPromise = null;
+    });
+
+    await this.externalSchemaPromise;
+  }
+
   private mapUserRow(row: typeof users.$inferSelect): StoredUser {
     return {
       id: row.id,
@@ -58,6 +290,7 @@ export class PostgresStateAdapter {
 
   async findUserByEmail(email: string): Promise<StoredUser | null> {
     try {
+      await this.ensureExternalSchemaIfNeeded();
       const normalized = email.trim().toLowerCase();
       const rows = await db
         .select()
@@ -79,6 +312,7 @@ export class PostgresStateAdapter {
 
   async findUserById(id: string): Promise<StoredUser | null> {
     try {
+      await this.ensureExternalSchemaIfNeeded();
       const rows = await db.select().from(users).where(eq(users.id, id)).limit(1);
       return rows[0] ? this.mapUserRow(rows[0]) : null;
     } catch (error) {
@@ -101,6 +335,7 @@ export class PostgresStateAdapter {
     const startedAt = Date.now();
     const normalizedEmail = user.email.trim().toLowerCase();
     try {
+      await this.ensureExternalSchemaIfNeeded();
       const rows = await db
         .insert(users)
         .values({
@@ -155,6 +390,7 @@ export class PostgresStateAdapter {
     const startedAt = Date.now();
     const normalizedEmail = user.email.trim().toLowerCase();
     try {
+      await this.ensureExternalSchemaIfNeeded();
       const rows = await db
         .insert(users)
         .values({
@@ -196,6 +432,7 @@ export class PostgresStateAdapter {
     state: DatabaseState;
   }> {
     try {
+      await this.ensureExternalSchemaIfNeeded();
       const [
         userRows,
         productRows,
@@ -469,6 +706,7 @@ export class PostgresStateAdapter {
   }): Promise<void> {
     const startedAt = Date.now();
     try {
+      await this.ensureExternalSchemaIfNeeded();
       await db.transaction(async (tx) => {
         for (const dec of params.stockDecrements) {
           const updated = await tx
@@ -570,6 +808,7 @@ export class PostgresStateAdapter {
   async persistState(state: DatabaseState): Promise<void> {
     const startedAt = Date.now();
     try {
+      await this.ensureExternalSchemaIfNeeded();
       await db.transaction(async (tx) => {
         // 1. Settings
         await tx

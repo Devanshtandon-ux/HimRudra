@@ -6,6 +6,30 @@ declare global {
   var _postgresPool: Pool | undefined;
 }
 
+function getExternalPostgresUrl(
+  env: Record<string, string | undefined> = process.env
+): string | null {
+  const raw =
+    env.DATABASE_URL?.trim() ||
+    env.POSTGRES_URL?.trim() ||
+    env.POSTGRES_PRISMA_URL?.trim() ||
+    '';
+  return raw.startsWith('postgres://') || raw.startsWith('postgresql://') ? raw : null;
+}
+
+export function isUsingExternalPostgresUrl(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  const hasCloudSqlObjectVars = Boolean(
+    env.SQL_HOST?.trim() &&
+      env.SQL_USER?.trim() &&
+      env.SQL_PASSWORD?.trim() &&
+      env.SQL_DB_NAME?.trim()
+  );
+  if (hasCloudSqlObjectVars) return false;
+  return Boolean(getExternalPostgresUrl(env));
+}
+
 export function isCloudSqlConfigured(
   env: Record<string, string | undefined> = process.env
 ): boolean {
@@ -13,31 +37,59 @@ export function isCloudSqlConfigured(
   if (override === 'local-json' || override === 'aws-dynamodb') {
     return false;
   }
-  return Boolean(
+  const hasObjectVars = Boolean(
     env.SQL_HOST?.trim() &&
       env.SQL_USER?.trim() &&
       env.SQL_PASSWORD?.trim() &&
       env.SQL_DB_NAME?.trim()
   );
+  return hasObjectVars || Boolean(getExternalPostgresUrl(env));
 }
 
 export const createPool = () => {
   if (!global._postgresPool) {
-    const sslMode = (process.env.SQL_SSL || '').trim().toLowerCase();
-    const useSsl = sslMode === 'true' || sslMode === 'require' || sslMode === '1';
-    const parsedPort = process.env.SQL_PORT ? Number(process.env.SQL_PORT) : undefined;
+    const hasObjectVars = Boolean(
+      process.env.SQL_HOST?.trim() &&
+        process.env.SQL_USER?.trim() &&
+        process.env.SQL_PASSWORD?.trim() &&
+        process.env.SQL_DB_NAME?.trim()
+    );
+    const externalUrl = hasObjectVars ? null : getExternalPostgresUrl(process.env);
 
-    global._postgresPool = new Pool({
-      host: process.env.SQL_HOST,
-      user: process.env.SQL_USER,
-      password: process.env.SQL_PASSWORD,
-      database: process.env.SQL_DB_NAME,
-      ...(Number.isFinite(parsedPort) ? { port: parsedPort } : {}),
-      ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
-      max: 15,
-      idleTimeoutMillis: 30000,
-      connectionTimeoutMillis: process.env.VERCEL ? 15000 : 20000,
-    });
+    if (externalUrl) {
+      const parsed = new URL(externalUrl);
+      const sslDisabled =
+        parsed.searchParams.get('sslmode') === 'disable' ||
+        (process.env.SQL_SSL || '').trim().toLowerCase() === 'false';
+
+      global._postgresPool = new Pool({
+        host: parsed.hostname,
+        port: parsed.port ? Number(parsed.port) : 5432,
+        user: decodeURIComponent(parsed.username),
+        password: decodeURIComponent(parsed.password),
+        database: parsed.pathname.replace(/^\//, ''),
+        ...(sslDisabled ? {} : { ssl: { rejectUnauthorized: false } }),
+        max: process.env.VERCEL ? 5 : 15,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: 15000,
+      });
+    } else {
+      const sslMode = (process.env.SQL_SSL || '').trim().toLowerCase();
+      const useSsl = sslMode === 'true' || sslMode === 'require' || sslMode === '1';
+      const parsedPort = process.env.SQL_PORT ? Number(process.env.SQL_PORT) : undefined;
+
+      global._postgresPool = new Pool({
+        host: process.env.SQL_HOST,
+        user: process.env.SQL_USER,
+        password: process.env.SQL_PASSWORD,
+        database: process.env.SQL_DB_NAME,
+        ...(Number.isFinite(parsedPort) ? { port: parsedPort } : {}),
+        ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+        max: 15,
+        idleTimeoutMillis: 30000,
+        connectionTimeoutMillis: process.env.VERCEL ? 15000 : 20000,
+      });
+    }
 
     global._postgresPool.on('error', (err) => {
       console.error('Unexpected error on idle SQL pool client:', err);

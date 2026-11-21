@@ -1241,31 +1241,63 @@ var ordersRelations = relations(orders, ({ one }) => ({
 }));
 
 // src/db/index.ts
+function getExternalPostgresUrl(env = process.env) {
+  const raw = env.DATABASE_URL?.trim() || env.POSTGRES_URL?.trim() || env.POSTGRES_PRISMA_URL?.trim() || "";
+  return raw.startsWith("postgres://") || raw.startsWith("postgresql://") ? raw : null;
+}
+function isUsingExternalPostgresUrl(env = process.env) {
+  const hasCloudSqlObjectVars = Boolean(
+    env.SQL_HOST?.trim() && env.SQL_USER?.trim() && env.SQL_PASSWORD?.trim() && env.SQL_DB_NAME?.trim()
+  );
+  if (hasCloudSqlObjectVars) return false;
+  return Boolean(getExternalPostgresUrl(env));
+}
 function isCloudSqlConfigured(env = process.env) {
   const override = (env.STORAGE_ENGINE || "").trim().toLowerCase();
   if (override === "local-json" || override === "aws-dynamodb") {
     return false;
   }
-  return Boolean(
+  const hasObjectVars = Boolean(
     env.SQL_HOST?.trim() && env.SQL_USER?.trim() && env.SQL_PASSWORD?.trim() && env.SQL_DB_NAME?.trim()
   );
+  return hasObjectVars || Boolean(getExternalPostgresUrl(env));
 }
 var createPool = () => {
   if (!global._postgresPool) {
-    const sslMode = (process.env.SQL_SSL || "").trim().toLowerCase();
-    const useSsl = sslMode === "true" || sslMode === "require" || sslMode === "1";
-    const parsedPort = process.env.SQL_PORT ? Number(process.env.SQL_PORT) : void 0;
-    global._postgresPool = new Pool({
-      host: process.env.SQL_HOST,
-      user: process.env.SQL_USER,
-      password: process.env.SQL_PASSWORD,
-      database: process.env.SQL_DB_NAME,
-      ...Number.isFinite(parsedPort) ? { port: parsedPort } : {},
-      ...useSsl ? { ssl: { rejectUnauthorized: false } } : {},
-      max: 15,
-      idleTimeoutMillis: 3e4,
-      connectionTimeoutMillis: process.env.VERCEL ? 15e3 : 2e4
-    });
+    const hasObjectVars = Boolean(
+      process.env.SQL_HOST?.trim() && process.env.SQL_USER?.trim() && process.env.SQL_PASSWORD?.trim() && process.env.SQL_DB_NAME?.trim()
+    );
+    const externalUrl = hasObjectVars ? null : getExternalPostgresUrl(process.env);
+    if (externalUrl) {
+      const parsed = new URL(externalUrl);
+      const sslDisabled = parsed.searchParams.get("sslmode") === "disable" || (process.env.SQL_SSL || "").trim().toLowerCase() === "false";
+      global._postgresPool = new Pool({
+        host: parsed.hostname,
+        port: parsed.port ? Number(parsed.port) : 5432,
+        user: decodeURIComponent(parsed.username),
+        password: decodeURIComponent(parsed.password),
+        database: parsed.pathname.replace(/^\//, ""),
+        ...sslDisabled ? {} : { ssl: { rejectUnauthorized: false } },
+        max: process.env.VERCEL ? 5 : 15,
+        idleTimeoutMillis: 3e4,
+        connectionTimeoutMillis: 15e3
+      });
+    } else {
+      const sslMode = (process.env.SQL_SSL || "").trim().toLowerCase();
+      const useSsl = sslMode === "true" || sslMode === "require" || sslMode === "1";
+      const parsedPort = process.env.SQL_PORT ? Number(process.env.SQL_PORT) : void 0;
+      global._postgresPool = new Pool({
+        host: process.env.SQL_HOST,
+        user: process.env.SQL_USER,
+        password: process.env.SQL_PASSWORD,
+        database: process.env.SQL_DB_NAME,
+        ...Number.isFinite(parsedPort) ? { port: parsedPort } : {},
+        ...useSsl ? { ssl: { rejectUnauthorized: false } } : {},
+        max: 15,
+        idleTimeoutMillis: 3e4,
+        connectionTimeoutMillis: process.env.VERCEL ? 15e3 : 2e4
+      });
+    }
     global._postgresPool.on("error", (err) => {
       console.error("Unexpected error on idle SQL pool client:", err);
     });
@@ -1281,6 +1313,235 @@ function isTableEmpty(state) {
   return state.userCount === 0 && state.productCount === 0 && state.settingsCount === 0;
 }
 var PostgresStateAdapter = class {
+  constructor() {
+    this.externalSchemaReady = false;
+    this.externalSchemaPromise = null;
+  }
+  /**
+   * When deployed externally (e.g. Vercel + Neon / Supabase via DATABASE_URL),
+   * ensures the 12 relational tables exist on a fresh database without manual CLI migration.
+   * Skipped completely on AI Studio Cloud SQL where Drizzle manages DDL.
+   */
+  async ensureExternalSchemaIfNeeded() {
+    if (this.externalSchemaReady || !isUsingExternalPostgresUrl()) return;
+    if (this.externalSchemaPromise) {
+      await this.externalSchemaPromise;
+      return;
+    }
+    this.externalSchemaPromise = (async () => {
+      const statements = [
+        sql`CREATE TABLE IF NOT EXISTS users (
+          id text PRIMARY KEY,
+          uid text UNIQUE,
+          name text NOT NULL,
+          email text NOT NULL UNIQUE,
+          phone text NOT NULL DEFAULT '',
+          role text NOT NULL DEFAULT 'customer',
+          password_hash text NOT NULL,
+          default_address jsonb,
+          wishlist_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+          created_at text NOT NULL,
+          updated_at timestamp DEFAULT now()
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS products (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          slug text NOT NULL UNIQUE,
+          name text NOT NULL,
+          subtitle text NOT NULL,
+          net_quantity text NOT NULL,
+          sku text NOT NULL,
+          hsn_code text NOT NULL,
+          mrp double precision NOT NULL,
+          price double precision NOT NULL,
+          cost_per_unit double precision NOT NULL,
+          stock integer NOT NULL DEFAULT 0,
+          low_stock_threshold integer NOT NULL DEFAULT 10,
+          batch_number text NOT NULL,
+          gst_rate_percent double precision NOT NULL DEFAULT 12,
+          short_description text NOT NULL,
+          usage_guidance text NOT NULL,
+          storage_instructions text NOT NULL,
+          shipping_note text NOT NULL,
+          return_policy text NOT NULL,
+          specifications jsonb NOT NULL DEFAULT '[]'::jsonb,
+          gallery_types jsonb NOT NULL DEFAULT '[]'::jsonb,
+          custom_images jsonb,
+          active boolean NOT NULL DEFAULT true,
+          updated_at timestamp DEFAULT now()
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS orders (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          order_number text NOT NULL UNIQUE,
+          user_id text REFERENCES users(id) ON DELETE SET NULL,
+          customer_name text NOT NULL,
+          customer_email text NOT NULL,
+          customer_phone text NOT NULL,
+          shipping_address jsonb NOT NULL,
+          delivery_instructions text,
+          items jsonb NOT NULL,
+          subtotal double precision NOT NULL,
+          mrp_total double precision NOT NULL,
+          instant_savings double precision NOT NULL,
+          coupon_code text,
+          coupon_discount double precision NOT NULL DEFAULT 0,
+          promotion_id text,
+          promotion_title text,
+          shipping_fee double precision NOT NULL DEFAULT 0,
+          shipping_speed text NOT NULL DEFAULT 'standard',
+          cod_fee double precision NOT NULL DEFAULT 0,
+          taxable_value double precision NOT NULL,
+          gst_amount double precision NOT NULL,
+          total_amount double precision NOT NULL,
+          gateway_fee_amount double precision,
+          actual_shipping_cost double precision,
+          payment_method text NOT NULL,
+          payment_status text NOT NULL,
+          razorpay_order_id text,
+          razorpay_payment_id text,
+          payment_verified_at text,
+          status text NOT NULL,
+          tracking_number text,
+          courier_name text,
+          tracking_url text,
+          estimated_delivery text,
+          dispatched_at text,
+          delivered_at text,
+          refund_amount double precision,
+          refund_reason text,
+          refund_requested_at text,
+          timeline jsonb NOT NULL DEFAULT '[]'::jsonb,
+          created_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS coupons (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          code text NOT NULL UNIQUE,
+          type text NOT NULL,
+          value double precision NOT NULL,
+          min_order_value double precision NOT NULL DEFAULT 0,
+          max_discount double precision,
+          active boolean NOT NULL DEFAULT true,
+          description text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS promotions (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          title text NOT NULL,
+          description text NOT NULL,
+          banner_headline text NOT NULL,
+          banner_subtext text NOT NULL,
+          banner_theme text NOT NULL,
+          starts_at text NOT NULL,
+          ends_at text NOT NULL,
+          free_shipping boolean NOT NULL DEFAULT false,
+          free_shipping_speed text NOT NULL DEFAULT 'standard',
+          discount_percent double precision NOT NULL DEFAULT 0,
+          promo_code text,
+          enabled boolean NOT NULL DEFAULT true,
+          usage_count integer NOT NULL DEFAULT 0,
+          revenue_generated double precision NOT NULL DEFAULT 0,
+          created_at text NOT NULL,
+          updated_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS lab_reports (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          batch_number text NOT NULL DEFAULT '',
+          tested_batch_number text NOT NULL,
+          report_number text NOT NULL,
+          laboratory_name text NOT NULL,
+          accreditation text NOT NULL DEFAULT '',
+          test_date text NOT NULL,
+          expiry_date text NOT NULL DEFAULT '',
+          sample_description text NOT NULL DEFAULT '',
+          fulvic_acid_percent text NOT NULL DEFAULT '',
+          heavy_metals jsonb NOT NULL DEFAULT '[]'::jsonb,
+          microbiological jsonb NOT NULL DEFAULT '[]'::jsonb,
+          verdict text NOT NULL DEFAULT 'Reference Sample',
+          summary_note text NOT NULL DEFAULT '',
+          mapped_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+          testing_methodology text NOT NULL DEFAULT '',
+          verified_status text NOT NULL DEFAULT 'Reference Sample',
+          notes text NOT NULL DEFAULT '',
+          updated_at text NOT NULL DEFAULT '',
+          custom_document_url text,
+          original_file_name text,
+          original_mime_type text
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS cms_sections (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          key text NOT NULL,
+          title text NOT NULL,
+          category text NOT NULL,
+          content text NOT NULL,
+          approved_by_admin boolean NOT NULL DEFAULT false,
+          approved_at text,
+          updated_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS expenses (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          date text NOT NULL,
+          category text NOT NULL,
+          description text NOT NULL,
+          amount double precision NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS inquiries (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          name text NOT NULL,
+          email text NOT NULL,
+          phone text NOT NULL DEFAULT '',
+          subject text NOT NULL,
+          message text NOT NULL,
+          status text NOT NULL DEFAULT 'New',
+          reply_message text,
+          replied_at text,
+          replied_via jsonb,
+          email_delivery_status text,
+          created_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS admin_notifications (
+          id text PRIMARY KEY,
+          sort_order integer NOT NULL DEFAULT 0,
+          type text NOT NULL,
+          title text NOT NULL,
+          message text NOT NULL,
+          order_id text,
+          order_number text,
+          customer_name text,
+          amount double precision,
+          read boolean NOT NULL DEFAULT false,
+          email_notified_to text,
+          created_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS payment_intents (
+          razorpay_order_id text PRIMARY KEY,
+          amount_paise integer NOT NULL,
+          verified boolean NOT NULL DEFAULT false,
+          payment_id text,
+          signature_verified boolean NOT NULL DEFAULT false,
+          method text NOT NULL,
+          created_at text NOT NULL
+        )`,
+        sql`CREATE TABLE IF NOT EXISTS store_settings (
+          id text PRIMARY KEY,
+          payload jsonb NOT NULL,
+          updated_at timestamp DEFAULT now()
+        )`
+      ];
+      for (const stmt of statements) {
+        await db.execute(stmt);
+      }
+      this.externalSchemaReady = true;
+    })().finally(() => {
+      this.externalSchemaPromise = null;
+    });
+    await this.externalSchemaPromise;
+  }
   mapUserRow(row) {
     return {
       id: row.id,
@@ -1296,6 +1557,7 @@ var PostgresStateAdapter = class {
   }
   async findUserByEmail(email) {
     try {
+      await this.ensureExternalSchemaIfNeeded();
       const normalized = email.trim().toLowerCase();
       const rows = await db.select().from(users).where(eq(users.email, normalized)).limit(1);
       return rows[0] ? this.mapUserRow(rows[0]) : null;
@@ -1312,6 +1574,7 @@ var PostgresStateAdapter = class {
   }
   async findUserById(id) {
     try {
+      await this.ensureExternalSchemaIfNeeded();
       const rows = await db.select().from(users).where(eq(users.id, id)).limit(1);
       return rows[0] ? this.mapUserRow(rows[0]) : null;
     } catch (error) {
@@ -1333,6 +1596,7 @@ var PostgresStateAdapter = class {
     const startedAt = Date.now();
     const normalizedEmail = user.email.trim().toLowerCase();
     try {
+      await this.ensureExternalSchemaIfNeeded();
       const rows = await db.insert(users).values({
         id: user.id,
         ...uid ? { uid } : {},
@@ -1380,6 +1644,7 @@ var PostgresStateAdapter = class {
     const startedAt = Date.now();
     const normalizedEmail = user.email.trim().toLowerCase();
     try {
+      await this.ensureExternalSchemaIfNeeded();
       const rows = await db.insert(users).values({
         id: user.id,
         name: user.name,
@@ -1411,6 +1676,7 @@ var PostgresStateAdapter = class {
   }
   async loadState(fallbackSeed) {
     try {
+      await this.ensureExternalSchemaIfNeeded();
       const [
         userRows,
         productRows,
@@ -1659,6 +1925,7 @@ var PostgresStateAdapter = class {
   async transactCreateOrderAndDecrementStock(params) {
     const startedAt = Date.now();
     try {
+      await this.ensureExternalSchemaIfNeeded();
       await db.transaction(async (tx) => {
         for (const dec of params.stockDecrements) {
           const updated = await tx.update(products).set({
@@ -1749,6 +2016,7 @@ var PostgresStateAdapter = class {
   async persistState(state) {
     const startedAt = Date.now();
     try {
+      await this.ensureExternalSchemaIfNeeded();
       await db.transaction(async (tx) => {
         await tx.insert(storeSettings).values({
           id: "default",
