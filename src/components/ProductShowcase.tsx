@@ -1,11 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Check,
   Download,
-  Heart,
   Minus,
   Plus,
-  Share2,
   ShieldCheck,
   ShoppingBag,
   Truck,
@@ -23,10 +20,10 @@ interface ProductShowcaseProps {
   settings: StoreSettings;
   promotions?: Promotion[];
   serverOffsetMs?: number;
-  wishlistIds: string[];
-  onToggleWishlist: (productId: string) => void;
+  wishlistIds?: string[];
+  onToggleWishlist?: (productId: string) => void;
   onAddToCart: (productId: string, quantity: number, openDrawer?: boolean) => void;
-  onBuyNow: (productId: string, quantity: number) => void;
+  onBuyNow?: (productId: string, quantity: number) => void;
   activeLabReport?: LabReport | null;
   onOpenLabReport: () => void;
 }
@@ -47,17 +44,13 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
   settings,
   promotions = [],
   serverOffsetMs = 0,
-  wishlistIds,
-  onToggleWishlist,
   onAddToCart,
-  onBuyNow,
   activeLabReport,
   onOpenLabReport,
 }) => {
   const [quantity, setQuantity] = useState(1);
   const [zoomOpen, setZoomOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<InfoTab>('description');
-  const [shareNote, setShareNote] = useState('');
   const [pincodeCheck, setPincodeCheck] = useState('');
   const [pincodeStatus, setPincodeStatus] = useState<string | null>(null);
   const [showMobileStickyBar, setShowMobileStickyBar] = useState(false);
@@ -65,7 +58,6 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
 
   const currentKind: ProductVisualKind = selectedProduct.galleryTypes[0] ?? 'hero';
   const primaryImageUrl = selectedProduct.customImages?.[0];
-  const isWishlisted = wishlistIds.includes(selectedProduct.id);
   const savings = Math.max(0, selectedProduct.mrp - selectedProduct.price);
   const discountPct =
     selectedProduct.mrp > 0 ? Math.round((savings / selectedProduct.mrp) * 100) : 0;
@@ -76,13 +68,6 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
   );
   const lineSubtotal = selectedProduct.price * quantity;
   const isFreeByNA = settings.standardShippingFee <= 0;
-  const estShipping =
-    isFreeByNA || activeFreeShipPromo
-      ? 0
-      : settings.freeShippingThreshold > 0 && lineSubtotal >= settings.freeShippingThreshold
-      ? 0
-      : settings.standardShippingFee;
-  const estTotal = lineSubtotal + estShipping;
 
   useEffect(() => {
     setQuantity((q) => Math.min(Math.max(1, q), Math.max(1, selectedProduct.stock)));
@@ -106,26 +91,6 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [zoomOpen]);
-
-  const handleShare = async () => {
-    const shareUrl = window.location.href;
-    try {
-      if (navigator.share) {
-        await navigator.share({
-          title: selectedProduct.name,
-          text: 'HimRudra Himalayan Shilajit Resin — Pure by Himalayas',
-          url: shareUrl,
-        });
-      } else if (navigator.clipboard) {
-        await navigator.clipboard.writeText(shareUrl);
-        setShareNote('Link copied');
-        setTimeout(() => setShareNote(''), 2500);
-      }
-    } catch {
-      setShareNote('Ready to share');
-      setTimeout(() => setShareNote(''), 2500);
-    }
-  };
 
   const handlePincodeCheck = (e: React.FormEvent) => {
     e.preventDefault();
@@ -335,45 +300,6 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
                   >
                     <ShoppingBag className="h-4 w-4 text-[#C69B51]" />
                     <span>Add to Cart — {formatINR(lineSubtotal)}</span>
-                  </button>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    disabled={selectedProduct.stock === 0}
-                    onClick={() => onBuyNow(selectedProduct.id, quantity)}
-                    className="flex-1 min-w-[160px] inline-flex items-center justify-center rounded-lg border border-[#281A15] bg-[#FAF8F4] px-6 py-3 text-sm font-semibold text-[#281A15] hover:bg-[#EAE1D4] disabled:opacity-50 transition-colors whitespace-nowrap"
-                  >
-                    Buy Now (Est. {formatINR(estTotal)} incl. shipping)
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => onToggleWishlist(selectedProduct.id)}
-                    aria-label={isWishlisted ? 'Remove from wishlist' : 'Add to wishlist'}
-                    className={`inline-flex h-11 items-center gap-1.5 rounded-lg border px-4 text-xs font-medium transition-colors ${
-                      isWishlisted
-                        ? 'border-[#C69B51] bg-[#C69B51]/15 text-[#281A15]'
-                        : 'border-[#79543D]/30 bg-[#FAF8F4] text-[#281A15] hover:bg-[#FAF8F4]/90'
-                    }`}
-                  >
-                    <Heart
-                      className="h-4 w-4"
-                      fill={isWishlisted ? '#C69B51' : 'none'}
-                      stroke="#79543D"
-                    />
-                    <span>{isWishlisted ? 'Saved' : 'Wishlist'}</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={handleShare}
-                    aria-label="Share product"
-                    className="inline-flex h-11 items-center gap-1.5 rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-4 text-xs font-medium text-[#281A15] hover:bg-[#FAF8F4]/90 transition-colors"
-                  >
-                    {shareNote ? <Check className="h-4 w-4 text-[#79543D]" /> : <Share2 className="h-4 w-4 text-[#79543D]" />}
-                    <span>{shareNote || 'Share'}</span>
                   </button>
                 </div>
               </div>

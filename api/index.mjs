@@ -3824,8 +3824,8 @@ function createApiApp() {
     };
     state.users.push(newUser);
     storeRepo.commit();
-    setSessionCookie(req, res, newUser);
-    res.status(201).json({ user: storeRepo.sanitizeUser(newUser) });
+    const sessionToken = setSessionCookie(req, res, newUser);
+    res.status(201).json({ user: storeRepo.sanitizeUser(newUser), sessionToken });
   });
   app2.post("/api/auth/login", async (req, res) => {
     const { email, password } = req.body;
@@ -3837,8 +3837,8 @@ function createApiApp() {
     if (!user || !await verifyPasswordAsync(password, user.passwordHash)) {
       return res.status(401).json({ error: "Invalid email or password." });
     }
-    setSessionCookie(req, res, user);
-    res.json({ user: storeRepo.sanitizeUser(user) });
+    const sessionToken = setSessionCookie(req, res, user);
+    res.json({ user: storeRepo.sanitizeUser(user), sessionToken });
   });
   app2.post("/api/auth/google", async (req, res) => {
     const { idToken } = req.body;

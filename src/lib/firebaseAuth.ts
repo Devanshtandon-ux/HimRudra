@@ -72,8 +72,7 @@ export function getFirebaseAuthErrorMessage(err: unknown): string {
     return 'Popup was blocked by your browser. Please allow popups for this site and click Continue with Google again.';
   }
   if (code === 'auth/unauthorized-domain') {
-    const host = typeof window !== 'undefined' ? window.location.hostname : 'this domain';
-    return `Google Sign-In is not yet authorized for "${host}". Add "${host}" in Firebase Console → Authentication → Settings → Authorized domains, or sign in with Email & Password below.`;
+    return 'Google Sign-In is currently being activated for this domain. Please sign in or create an account using Email & Password below.';
   }
   if (code === 'auth/operation-not-allowed') {
     return 'Google Sign-In is currently disabled in Firebase Console → Authentication → Sign-in method.';

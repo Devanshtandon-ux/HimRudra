@@ -106,7 +106,16 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
   async function fetchMyOrders() {
     setLoadingOrders(true);
     try {
-      const res = await fetch('/api/orders/mine');
+      let token: string | null = null;
+      try {
+        token = window.sessionStorage.getItem('himrudra_session_token');
+      } catch {
+        // ignore storage errors
+      }
+      const res = await fetch('/api/orders/mine', {
+        credentials: 'include',
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
       if (res.ok) {
         const data = await res.json();
         setMyOrders(data.orders || []);
@@ -150,6 +159,7 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
           : { name, email, phone, password };
       const res = await fetch(endpoint, {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       });
@@ -157,6 +167,13 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
       if (!res.ok) {
         setAuthError(data.error || 'Authentication failed.');
         return;
+      }
+      if (data.sessionToken) {
+        try {
+          window.sessionStorage.setItem('himrudra_session_token', data.sessionToken);
+        } catch {
+          // ignore storage errors
+        }
       }
       onAuthChange(data.user);
       if (data.user.role === 'admin') {

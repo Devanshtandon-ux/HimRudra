@@ -352,8 +352,8 @@ export function createApiApp(): express.Express {
 
     state.users.push(newUser);
     storeRepo.commit();
-    setSessionCookie(req, res, newUser);
-    res.status(201).json({ user: storeRepo.sanitizeUser(newUser) });
+    const sessionToken = setSessionCookie(req, res, newUser);
+    res.status(201).json({ user: storeRepo.sanitizeUser(newUser), sessionToken });
   });
 
   app.post('/api/auth/login', async (req: AuthRequest, res) => {
@@ -369,8 +369,8 @@ export function createApiApp(): express.Express {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
 
-    setSessionCookie(req, res, user);
-    res.json({ user: storeRepo.sanitizeUser(user) });
+    const sessionToken = setSessionCookie(req, res, user);
+    res.json({ user: storeRepo.sanitizeUser(user), sessionToken });
   });
 
   app.post('/api/auth/google', async (req: AuthRequest, res) => {
