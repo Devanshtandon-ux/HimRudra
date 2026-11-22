@@ -69,9 +69,11 @@ export const createPool = () => {
         password: decodeURIComponent(parsed.password),
         database: parsed.pathname.replace(/^\//, ''),
         ...(sslDisabled ? {} : { ssl: { rejectUnauthorized: false } }),
-        max: process.env.VERCEL ? 5 : 15,
-        idleTimeoutMillis: 30000,
-        connectionTimeoutMillis: 15000,
+        max: process.env.VERCEL ? 3 : 10,
+        idleTimeoutMillis: process.env.VERCEL ? 10_000 : 30_000,
+        connectionTimeoutMillis: process.env.VERCEL ? 8_000 : 15_000,
+        keepAlive: true,
+        allowExitOnIdle: Boolean(process.env.VERCEL),
       });
     } else {
       const sslMode = (process.env.SQL_SSL || '').trim().toLowerCase();
