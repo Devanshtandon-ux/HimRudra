@@ -16,6 +16,12 @@ import { SearchModal } from './components/SearchModal';
 import { SupportChatbot } from './components/SupportChatbot';
 import { WhatsAppButton } from './components/WhatsAppButton';
 import { WhyHimRudra } from './components/WhyHimRudra';
+import {
+  fetchWithTimeout,
+  loadBootstrapWithRetry,
+  readCachedBootstrap,
+  writeCachedBootstrap,
+} from './lib/bootstrapCache';
 import { getActivePromotions } from './lib/commerce';
 import { signOutFirebase } from './lib/firebaseAuth';
 import { getRouteMeta, resolveAppRoute, type AppRoute } from './lib/legalRoutes';
@@ -33,8 +39,11 @@ export default function App() {
   const [activeRoute, setActiveRoute] = useState<AppRoute>(() =>
     resolveAppRoute(typeof window !== 'undefined' ? window.location.pathname : '/')
   );
-  const [bootstrap, setBootstrap] = useState<PublicStoreBootstrap | null>(null);
+  const [bootstrap, setBootstrap] = useState<PublicStoreBootstrap | null>(() =>
+    readCachedBootstrap()
+  );
   const [loadError, setLoadError] = useState('');
+  const [slowLoading, setSlowLoading] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const [selectedProductId, setSelectedProductId] = useState<string>('himrudra-shilajit-20g');
 
@@ -64,22 +73,30 @@ export default function App() {
 
   const loadStoreBootstrap = async () => {
     setLoadError('');
-    const retryDelaysMs = [1200, 2500];
-    for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
-      try {
-        const res = await fetch('/api/store/bootstrap');
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = (await res.json()) as PublicStoreBootstrap;
-        setBootstrap(data);
-        setLoadError('');
-        return;
-      } catch {
-        if (attempt < retryDelaysMs.length) {
-          await new Promise((resolve) => window.setTimeout(resolve, retryDelaysMs[attempt]));
-        } else {
-          setLoadError('Unable to load HimRudra store catalog. Please refresh.');
+    const slowTimer = window.setTimeout(() => setSlowLoading(true), 2500);
+    try {
+      const data = await loadBootstrapWithRetry({
+        timeoutMs: 8_000,
+        retryDelaysMs: [600],
+      });
+      setBootstrap(data);
+      writeCachedBootstrap(data);
+      setLoadError('');
+    } catch (err) {
+      // Only show full-page error screen if we have no cached catalog to render
+      setBootstrap((current) => {
+        if (!current) {
+          setLoadError(
+            err instanceof Error && err.message
+              ? err.message
+              : 'Unable to load HimRudra store catalog. Please try again.'
+          );
         }
-      }
+        return current;
+      });
+    } finally {
+      window.clearTimeout(slowTimer);
+      setSlowLoading(false);
     }
   };
 
@@ -91,16 +108,20 @@ export default function App() {
       } catch {
         // ignore storage errors
       }
-      const res = await fetch('/api/auth/me', {
-        credentials: 'include',
-        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
-      });
+      const res = await fetchWithTimeout(
+        '/api/auth/me',
+        {
+          credentials: 'include',
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        },
+        6_000
+      );
       if (res.ok) {
         const data = await res.json();
         setUser(data.user ?? null);
       }
     } catch {
-      // Non-blocking session probe
+      // Strictly non-blocking session probe
     }
   };
 
@@ -272,12 +293,17 @@ export default function App() {
 
   if (!bootstrap && !isLegalRoute) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#FAF8F4]">
+      <div className="min-h-screen flex items-center justify-center bg-[#FAF8F4] px-6">
         <div className="text-center space-y-2">
           <p className="font-serif text-3xl font-semibold text-[#281A15]">HimRudra</p>
           <p className="text-xs uppercase tracking-[0.22em] text-[#79543D]">
             Pure by Himalayas
           </p>
+          {slowLoading && (
+            <p className="pt-2 text-xs text-[#241B17]/65">
+              Waking store catalog — this takes just a moment...
+            </p>
+          )}
         </div>
       </div>
     );
