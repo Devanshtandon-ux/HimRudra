@@ -198,26 +198,29 @@ export function createApiApp(): express.Express {
   );
 
   const trafficGuard = createTrafficGuardMiddleware({ maxInFlight: 800 });
-  const bootstrapCache = new BootstrapResponseCache(10_000);
+  const bootstrapCache = new BootstrapResponseCache(IS_SERVERLESS ? 60_000 : 30_000);
   let lastBootstrapStateVersion = -1;
 
   // High-concurrency protection: request ID, 800 in-flight shedding, bounded sliding-window rate limiter
   app.use('/api', trafficGuard.middleware);
 
-  // Ensure AWS DynamoDB state is hydrated before auth/routes run, and fail-loud if durable write fails
+  // Ensure cloud DB state is hydrated before routes that need full state, skipping lightweight direct-SQL routes
   app.use('/api', async (req: AuthRequest, res, next) => {
     try {
       const isMutation = req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS';
-      const isDirectPostgresAuthRoute =
+      const isDirectPostgresRoute =
         storeRepo.isPostgresEnabled() &&
-        (req.path === '/auth/login' ||
+        (req.path === '/store/bootstrap' ||
+          req.path === '/health' ||
+          req.path === '/auth/me' ||
+          req.path === '/auth/login' ||
           req.path === '/auth/register' ||
           req.path === '/auth/google' ||
           req.path === '/auth/logout' ||
           req.path === '/auth/profile' ||
           req.path === '/auth/wishlist');
 
-      if (!isDirectPostgresAuthRoute) {
+      if (!isDirectPostgresRoute) {
         await storeRepo.ensureLoaded({ forceRefresh: isMutation });
       }
 
@@ -276,8 +279,9 @@ export function createApiApp(): express.Express {
     });
   });
 
-  // Storefront bootstrap — pre-serialized cache + ETag (304) + Edge CDN caching for 500+ concurrent users
-  app.get('/api/store/bootstrap', (req, res) => {
+  // Storefront bootstrap — single-query Postgres fast path + pre-serialized cache + ETag (304) + Edge CDN caching
+  app.get('/api/store/bootstrap', async (req: AuthRequest, res) => {
+    const startedAt = Date.now();
     const stateVersion = storeRepo.getStateVersion();
     if (stateVersion !== lastBootstrapStateVersion) {
       bootstrapCache.invalidate();
@@ -285,28 +289,47 @@ export function createApiApp(): express.Express {
     }
 
     let entry = bootstrapCache.get();
+    let cacheHit = Boolean(entry);
+    let coldStart = false;
+    let dbMs = 0;
+    let serializeMs = 0;
+    let productCount = 0;
+
     if (!entry) {
-      const state = storeRepo.getState();
-      const nowMs = Date.now();
-      entry = bootstrapCache.set(
-        {
-          products: state.products.filter((p) => p.active),
-          settings: state.settings,
-          coupons: state.coupons.filter((c) => c.active),
-          promotions: getActivePromotions(state.promotions, nowMs),
-          labReports: state.labReports,
-          cmsSections: state.cmsSections.filter((s) => s.approvedByAdmin),
-          serverNow: new Date(nowMs).toISOString(),
-        },
-        nowMs
-      );
+      const result = await storeRepo.getPublicBootstrap();
+      cacheHit = result.cacheHit;
+      coldStart = result.coldStart;
+      dbMs = result.dbMs;
+      productCount = result.payload.products.length;
+
+      const serializeStart = Date.now();
+      entry = bootstrapCache.set(result.payload, serializeStart);
+      serializeMs = Date.now() - serializeStart;
     }
+
+    const totalMs = Date.now() - startedAt;
 
     res.setHeader(
       'Cache-Control',
-      'public, max-age=15, s-maxage=30, stale-while-revalidate=60'
+      'public, max-age=30, s-maxage=60, stale-while-revalidate=300'
     );
     res.setHeader('ETag', entry.etag);
+    res.setHeader(
+      'Server-Timing',
+      `db;dur=${dbMs}, serialize;dur=${serializeMs}, total;dur=${totalMs};desc="${
+        cacheHit ? 'cache-hit' : coldStart ? 'cold-db' : 'warm-db'
+      }"`
+    );
+
+    logStructured('info', 'bootstrap', 'served', {
+      requestId: req.requestId,
+      coldStart,
+      cacheHit,
+      dbMs,
+      serializeMs,
+      totalMs,
+      ...(productCount > 0 ? { productCount } : {}),
+    });
 
     if (req.headers['if-none-match'] === entry.etag) {
       return res.status(304).end();
@@ -317,6 +340,7 @@ export function createApiApp(): express.Express {
 
   // Auth routes
   app.get('/api/auth/me', (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store');
     if (!req.currentUser) {
       return res.json({ user: null });
     }

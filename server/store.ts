@@ -12,11 +12,13 @@ import type {
   Order,
   Product,
   Promotion,
+  PublicStoreBootstrap,
   StoreSettings,
   User,
 } from '../src/types.ts';
 import {
   FREE_SHIPPING_PROMO_END_ISO,
+  getActivePromotions,
   normalizeLegacyOrderStatus,
 } from '../src/lib/commerce.ts';
 import {
@@ -516,6 +518,16 @@ class StoreRepository {
   private hydratedFromCloud = false;
   private lastHydratedAtMs = 0;
   private hydrationPromise: Promise<Error | null> | null = null;
+  private publicBootstrapCache: {
+    data: Omit<PublicStoreBootstrap, 'serverNow'>;
+    loadedAtMs: number;
+    stateVersion: number;
+  } | null = null;
+  private publicBootstrapPromise: Promise<{
+    data: Omit<PublicStoreBootstrap, 'serverNow'>;
+    dbMs: number;
+  }> | null = null;
+  private hasServedPublicBootstrap = false;
   private syncChain: Promise<void> = Promise.resolve();
   private pendingSyncCount = 0;
   private lastCommitError: Error | null = null;
@@ -883,8 +895,9 @@ class StoreRepository {
     }
 
     const nowMs = Date.now();
-    // 10s cache on serverless (30s local) keeps 500 concurrent reads off the database
-    const cacheTtlMs = IS_SERVERLESS ? 10_000 : 30_000;
+    // 60s cache on serverless (30s local) avoids re-hydrating all 12 tables on bursty reads;
+    // mutations forceRefresh and immediately bump stateVersion.
+    const cacheTtlMs = IS_SERVERLESS ? 60_000 : 30_000;
     const isFresh = this.hydratedFromCloud && nowMs - this.lastHydratedAtMs < cacheTtlMs;
 
     if (isFresh && !options?.forceRefresh) {
@@ -902,16 +915,16 @@ class StoreRepository {
     this.hydrationPromise = (async (): Promise<Error | null> => {
       try {
         if (pg) {
-          const fallbackSeed = createSeedState();
-          const loaded = await pg.loadState(fallbackSeed);
+          const loaded = await pg.loadState(() => createSeedState());
           if (loaded.empty) {
-            // First-time Cloud SQL PostgreSQL bootstrap: seed empty tables with current store state
+            // First-time Cloud SQL / Neon PostgreSQL bootstrap: seed empty tables with current store state
             await pg.persistState(this.state);
             this.hydratedFromCloud = true;
             this.lastHydratedAtMs = Date.now();
             this.lastSyncedAt = new Date().toISOString();
             this.lastCloudError = null;
             this.stateVersion += 1;
+            this.publicBootstrapCache = null;
             return null;
           }
 
@@ -922,8 +935,9 @@ class StoreRepository {
           this.lastSyncedAt = new Date().toISOString();
           this.lastCloudError = null;
           this.stateVersion += 1;
+          this.publicBootstrapCache = null;
 
-          if (mutated) {
+          if (mutated && options?.forceRefresh) {
             await pg.persistState(this.state);
           }
           return null;
@@ -986,6 +1000,174 @@ class StoreRepository {
 
   getState(): DatabaseState {
     return this.state;
+  }
+
+  private buildPublicBootstrapFromState(
+    source: {
+      products: Product[];
+      settings: StoreSettings;
+      coupons: Coupon[];
+      promotions: Promotion[];
+      labReports: LabReport[];
+      cmsSections: CmsSection[];
+    },
+    nowMs: number
+  ): PublicStoreBootstrap {
+    return {
+      products: source.products.filter((p) => p.active),
+      settings: source.settings,
+      coupons: source.coupons.filter((c) => c.active),
+      promotions: getActivePromotions(source.promotions, nowMs),
+      labReports: source.labReports,
+      cmsSections: source.cmsSections.filter((s) => s.approvedByAdmin),
+      serverNow: new Date(nowMs).toISOString(),
+    };
+  }
+
+  /**
+   * Fast-path public catalog bootstrap for GET /api/store/bootstrap.
+   * On Postgres (Neon / Cloud SQL), runs ONE single SQL round-trip touching ONLY the
+   * 6 public tables instead of full 12-table hydration, with in-memory TTL caching and
+   * concurrent request coalescing.
+   */
+  async getPublicBootstrap(): Promise<{
+    payload: PublicStoreBootstrap;
+    cacheHit: boolean;
+    coldStart: boolean;
+    dbMs: number;
+  }> {
+    const coldStart = !this.hasServedPublicBootstrap;
+    this.hasServedPublicBootstrap = true;
+
+    const nowMs = Date.now();
+    const cacheTtlMs = IS_SERVERLESS ? 60_000 : 30_000;
+
+    // 1. Serve immediately from in-memory public cache if fresh & stateVersion unchanged
+    if (
+      this.publicBootstrapCache &&
+      this.publicBootstrapCache.stateVersion === this.stateVersion &&
+      nowMs - this.publicBootstrapCache.loadedAtMs < cacheTtlMs
+    ) {
+      return {
+        payload: {
+          ...this.publicBootstrapCache.data,
+          promotions: getActivePromotions(this.publicBootstrapCache.data.promotions, nowMs),
+          serverNow: new Date(nowMs).toISOString(),
+        },
+        cacheHit: true,
+        coldStart,
+        dbMs: 0,
+      };
+    }
+
+    // 2. If full state was already freshly hydrated (or we are in local-json mode), build from memory
+    const pg = this.getPostgres();
+    if (!pg) {
+      await this.ensureLoaded();
+      const payload = this.buildPublicBootstrapFromState(this.state, nowMs);
+      this.publicBootstrapCache = {
+        data: {
+          products: payload.products,
+          settings: payload.settings,
+          coupons: payload.coupons,
+          promotions: this.state.promotions,
+          labReports: payload.labReports,
+          cmsSections: payload.cmsSections,
+        },
+        loadedAtMs: nowMs,
+        stateVersion: this.stateVersion,
+      };
+      return { payload, cacheHit: false, coldStart, dbMs: 0 };
+    }
+
+    if (
+      this.hydratedFromCloud &&
+      nowMs - this.lastHydratedAtMs < cacheTtlMs &&
+      this.pendingSyncCount === 0
+    ) {
+      const payload = this.buildPublicBootstrapFromState(this.state, nowMs);
+      this.publicBootstrapCache = {
+        data: {
+          products: payload.products,
+          settings: payload.settings,
+          coupons: payload.coupons,
+          promotions: this.state.promotions,
+          labReports: payload.labReports,
+          cmsSections: payload.cmsSections,
+        },
+        loadedAtMs: nowMs,
+        stateVersion: this.stateVersion,
+      };
+      return { payload, cacheHit: true, coldStart, dbMs: 0 };
+    }
+
+    // 3. Coalesce concurrent cold-start bootstrap requests into ONE single SQL query
+    if (!this.publicBootstrapPromise) {
+      this.publicBootstrapPromise = (async () => {
+        const res = await pg.loadPublicBootstrap();
+        if (res.empty) {
+          // Brand-new database: run full ensureLoaded() once to seed initial store catalog
+          await this.ensureLoaded();
+          const seeded: Omit<PublicStoreBootstrap, 'serverNow'> = {
+            products: this.state.products.filter((p) => p.active),
+            settings: this.state.settings,
+            coupons: this.state.coupons.filter((c) => c.active),
+            promotions: this.state.promotions,
+            labReports: this.state.labReports,
+            cmsSections: this.state.cmsSections.filter((s) => s.approvedByAdmin),
+          };
+          return { data: seeded, dbMs: res.dbMs };
+        }
+
+        const effectiveSettings = res.data.settings ?? this.state.settings;
+        const effectivePromotions =
+          res.data.promotions.length > 0 ? res.data.promotions : this.state.promotions;
+
+        const data: Omit<PublicStoreBootstrap, 'serverNow'> = {
+          products: res.data.products,
+          settings: effectiveSettings,
+          coupons: res.data.coupons,
+          promotions: effectivePromotions,
+          labReports: res.data.labReports,
+          cmsSections: res.data.cmsSections,
+        };
+        return { data, dbMs: res.dbMs };
+      })().finally(() => {
+        this.publicBootstrapPromise = null;
+      });
+    }
+
+    try {
+      const { data, dbMs } = await this.publicBootstrapPromise;
+      const doneMs = Date.now();
+      this.publicBootstrapCache = {
+        data,
+        loadedAtMs: doneMs,
+        stateVersion: this.stateVersion,
+      };
+      this.lastSyncedAt = new Date(doneMs).toISOString();
+      this.lastCloudError = null;
+      return {
+        payload: {
+          ...data,
+          promotions: getActivePromotions(data.promotions, doneMs),
+          serverNow: new Date(doneMs).toISOString(),
+        },
+        cacheHit: false,
+        coldStart,
+        dbMs,
+      };
+    } catch (err) {
+      this.lastCloudError = err instanceof Error ? err.message : String(err);
+      // Graceful fallback to last cached / bundled catalog if transient DB outage occurs
+      const fallback = this.buildPublicBootstrapFromState(this.state, Date.now());
+      return {
+        payload: fallback,
+        cacheHit: false,
+        coldStart,
+        dbMs: Date.now() - nowMs,
+      };
+    }
   }
 
   private mergeUserIntoMemory(saved: StoredUser): StoredUser {
@@ -1112,6 +1294,7 @@ class StoreRepository {
 
   commit() {
     this.stateVersion += 1;
+    this.publicBootstrapCache = null;
     this.saveLocal(this.state);
 
     const pg = this.getPostgres();
