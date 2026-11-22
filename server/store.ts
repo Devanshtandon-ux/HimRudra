@@ -13,6 +13,7 @@ import type {
   Product,
   Promotion,
   PublicStoreBootstrap,
+  ShippingAddress,
   StoreSettings,
   User,
 } from '../src/types.ts';
@@ -30,7 +31,7 @@ import {
   serializeStateToDynamoItems,
 } from './dynamodb.ts';
 import { isCloudSqlConfigured } from '../src/db/index.ts';
-import { PostgresStateAdapter } from '../src/db/postgresAdapter.ts';
+import { PostgresStateAdapter, type PostgresCheckoutContext } from '../src/db/postgresAdapter.ts';
 
 export interface StoredUser extends User {
   passwordHash: string;
@@ -1253,25 +1254,155 @@ class StoreRepository {
    * (or DynamoDB TransactWrite when DynamoDB is configured).
    * Ensures 500 concurrent buyers cannot oversell stock or create duplicate orders.
    */
-  async commitOrderAtomic(
-    order: Order,
-    stockDecrements: Array<{ productId: string; quantity: number }>
-  ): Promise<void> {
+  async upsertPaymentIntent(intent: PaymentIntentRecord): Promise<void> {
     const pg = this.getPostgres();
     if (pg) {
-      await pg.transactCreateOrderAndDecrementStock({
+      await pg.upsertPaymentIntent(intent);
+      this.state.paymentIntents[intent.razorpayOrderId] = intent;
+      this.lastSyncedAt = new Date().toISOString();
+      this.lastCloudError = null;
+      return;
+    }
+
+    this.state.paymentIntents[intent.razorpayOrderId] = intent;
+    this.commit();
+  }
+
+  async findPaymentIntent(razorpayOrderId: string): Promise<PaymentIntentRecord | null> {
+    const pg = this.getPostgres();
+    if (pg) {
+      const found = await pg.findPaymentIntent(razorpayOrderId);
+      if (found) {
+        this.state.paymentIntents[found.razorpayOrderId] = found;
+      }
+      return found;
+    }
+
+    return this.state.paymentIntents[razorpayOrderId] ?? null;
+  }
+
+  async loadCheckoutContext(params?: {
+    razorpayOrderId?: string;
+    razorpayPaymentId?: string;
+    includeOrderSequence?: boolean;
+  }): Promise<Omit<PostgresCheckoutContext, 'empty' | 'settings'> & { settings: StoreSettings }> {
+    const pg = this.getPostgres();
+    if (pg) {
+      const loaded = await pg.loadCheckoutContext(params);
+      if (!loaded.empty) {
+        const effectiveSettings = loaded.settings ?? this.state.settings;
+        // Keep in-memory catalog mirrors fresh for public bootstrap without marking full 12-table hydration complete
+        this.state.products = loaded.products;
+        this.state.coupons = loaded.coupons;
+        this.state.promotions = loaded.promotions;
+        this.state.settings = effectiveSettings;
+        if (loaded.paymentIntent) {
+          this.state.paymentIntents[loaded.paymentIntent.razorpayOrderId] = loaded.paymentIntent;
+        }
+        return {
+          products: loaded.products,
+          coupons: loaded.coupons,
+          promotions: loaded.promotions,
+          settings: effectiveSettings,
+          paymentIntent: loaded.paymentIntent,
+          existingOrderByPayment: loaded.existingOrderByPayment,
+          maxOrderSeq: loaded.maxOrderSeq,
+        };
+      }
+      // Brand-new empty Postgres DB: perform initial one-time seed hydration
+      await this.ensureLoaded({ forceRefresh: true });
+    }
+
+    const existingOrderByPayment =
+      params?.razorpayPaymentId || params?.razorpayOrderId
+        ? this.state.orders.find(
+            (o) =>
+              (params.razorpayPaymentId && o.razorpayPaymentId === params.razorpayPaymentId) ||
+              (params.razorpayOrderId && o.razorpayOrderId === params.razorpayOrderId)
+          ) ?? null
+        : null;
+
+    let maxOrderSeq = this.state.orders.length;
+    if (params?.includeOrderSequence) {
+      for (const existing of this.state.orders) {
+        const match = /^HIM-2026-(\d+)$/.exec(existing.orderNumber);
+        if (match) {
+          const seq = Number(match[1]);
+          if (seq > maxOrderSeq) maxOrderSeq = seq;
+        }
+      }
+    }
+
+    return {
+      products: this.state.products,
+      coupons: this.state.coupons,
+      promotions: this.state.promotions,
+      settings: this.state.settings,
+      paymentIntent: params?.razorpayOrderId
+        ? this.state.paymentIntents[params.razorpayOrderId] ?? null
+        : null,
+      existingOrderByPayment,
+      maxOrderSeq,
+    };
+  }
+
+  async commitOrderAtomic(
+    order: Order,
+    stockDecrements: Array<{ productId: string; quantity: number }>,
+    extras?: {
+      promotionUpdate?: { promotionId: string; revenueDelta: number };
+      adminNotification?: AdminNotification;
+      userDefaultAddressUpdate?: { userId: string; address: ShippingAddress };
+    }
+  ): Promise<{ existingOrder?: Order; updatedProducts?: Array<{ id: string; stock: number }> }> {
+    const pg = this.getPostgres();
+    if (pg) {
+      const txResult = await pg.transactCreateOrderAndDecrementStock({
         order,
         stockDecrements,
+        promotionUpdate: extras?.promotionUpdate,
+        adminNotification: extras?.adminNotification,
+        userDefaultAddressUpdate: extras?.userDefaultAddressUpdate,
       });
-      this.commit();
-      await this.flushPendingSync();
-      return;
+
+      if (txResult.existingOrder) {
+        return { existingOrder: txResult.existingOrder };
+      }
+
+      // Sync authoritative decremented stock & order metadata into memory without running a full 12-table persistState()
+      for (const upd of txResult.updatedProducts) {
+        const prod = this.state.products.find((p) => p.id === upd.id);
+        if (prod) {
+          prod.stock = upd.stock;
+        }
+      }
+      if (!this.state.orders.some((o) => o.id === order.id)) {
+        this.state.orders.unshift(order);
+      }
+      if (
+        extras?.adminNotification &&
+        !this.state.adminNotifications.some((n) => n.id === extras.adminNotification!.id)
+      ) {
+        this.state.adminNotifications.unshift(extras.adminNotification);
+      }
+      if (extras?.userDefaultAddressUpdate) {
+        const u = this.state.users.find((usr) => usr.id === extras.userDefaultAddressUpdate!.userId);
+        if (u && !u.defaultAddress) {
+          u.defaultAddress = extras.userDefaultAddressUpdate.address;
+        }
+      }
+
+      this.stateVersion += 1;
+      this.lastSyncedAt = new Date().toISOString();
+      this.lastCloudError = null;
+      this.lastCommitError = null;
+      return { updatedProducts: txResult.updatedProducts };
     }
 
     const adapter = this.getDynamo();
     if (!adapter) {
       this.commit();
-      return;
+      return {};
     }
 
     const orderItem = {
@@ -1290,6 +1421,7 @@ class StoreRepository {
     this.lastPersistedFingerprints.set(orderItem.pk, buildItemFingerprint(orderItem));
     this.commit();
     await this.flushPendingSync();
+    return {};
   }
 
   commit() {
