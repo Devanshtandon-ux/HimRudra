@@ -1,5 +1,5 @@
 import { and, asc, eq, gte, notInArray, sql } from 'drizzle-orm';
-import { db, isUsingExternalPostgresUrl } from './index.ts';
+import { createPool, db, isUsingExternalPostgresUrl } from './index.ts';
 import {
   adminNotifications,
   cmsSections,
@@ -29,9 +29,257 @@ import type {
   PaymentMethod,
   Product,
   Promotion,
+  StoreSettings,
 } from '../types.ts';
 import { StorePersistenceError } from '../../server/validation.ts';
 import { logStructured } from '../../server/logger.ts';
+
+export interface PublicBootstrapDbData {
+  products: Product[];
+  settings: StoreSettings | null;
+  coupons: Coupon[];
+  promotions: Promotion[];
+  labReports: LabReport[];
+  cmsSections: CmsSection[];
+}
+
+function getPgErrorCode(error: unknown): string {
+  if (!error || typeof error !== 'object') return '';
+  const direct = (error as { code?: unknown }).code;
+  if (typeof direct === 'string' && direct) return direct;
+  const cause = (error as { cause?: { code?: unknown } }).cause;
+  if (cause && typeof cause.code === 'string') return cause.code;
+  return '';
+}
+
+function isUndefinedTableError(error: unknown): boolean {
+  if (getPgErrorCode(error) === '42P01') return true;
+  const msg = error instanceof Error ? error.message : String(error);
+  return /relation ["']?[a-z_]+["']? does not exist/i.test(msg);
+}
+
+function isTransientConnectionError(error: unknown): boolean {
+  const code = getPgErrorCode(error);
+  if (
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    code === 'EPIPE' ||
+    code === '57P01' ||
+    code === '08006' ||
+    code === '08003'
+  ) {
+    return true;
+  }
+  const msg = error instanceof Error ? error.message : String(error);
+  return /ECONNRESET|Connection terminated unexpectedly|terminating connection|socket hang up/i.test(
+    msg
+  );
+}
+
+const EXTERNAL_SCHEMA_DDL = `
+CREATE TABLE IF NOT EXISTS users (
+  id text PRIMARY KEY,
+  uid text UNIQUE,
+  name text NOT NULL,
+  email text NOT NULL UNIQUE,
+  phone text NOT NULL DEFAULT '',
+  role text NOT NULL DEFAULT 'customer',
+  password_hash text NOT NULL,
+  default_address jsonb,
+  wishlist_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_at text NOT NULL,
+  updated_at timestamp DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS products (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  slug text NOT NULL UNIQUE,
+  name text NOT NULL,
+  subtitle text NOT NULL,
+  net_quantity text NOT NULL,
+  sku text NOT NULL,
+  hsn_code text NOT NULL,
+  mrp double precision NOT NULL,
+  price double precision NOT NULL,
+  cost_per_unit double precision NOT NULL,
+  stock integer NOT NULL DEFAULT 0,
+  low_stock_threshold integer NOT NULL DEFAULT 10,
+  batch_number text NOT NULL,
+  gst_rate_percent double precision NOT NULL DEFAULT 12,
+  short_description text NOT NULL,
+  usage_guidance text NOT NULL,
+  storage_instructions text NOT NULL,
+  shipping_note text NOT NULL,
+  return_policy text NOT NULL,
+  specifications jsonb NOT NULL DEFAULT '[]'::jsonb,
+  gallery_types jsonb NOT NULL DEFAULT '[]'::jsonb,
+  custom_images jsonb,
+  active boolean NOT NULL DEFAULT true,
+  updated_at timestamp DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS orders (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  order_number text NOT NULL UNIQUE,
+  user_id text REFERENCES users(id) ON DELETE SET NULL,
+  customer_name text NOT NULL,
+  customer_email text NOT NULL,
+  customer_phone text NOT NULL,
+  shipping_address jsonb NOT NULL,
+  delivery_instructions text,
+  items jsonb NOT NULL,
+  subtotal double precision NOT NULL,
+  mrp_total double precision NOT NULL,
+  instant_savings double precision NOT NULL,
+  coupon_code text,
+  coupon_discount double precision NOT NULL DEFAULT 0,
+  promotion_id text,
+  promotion_title text,
+  shipping_fee double precision NOT NULL DEFAULT 0,
+  shipping_speed text NOT NULL DEFAULT 'standard',
+  cod_fee double precision NOT NULL DEFAULT 0,
+  taxable_value double precision NOT NULL,
+  gst_amount double precision NOT NULL,
+  total_amount double precision NOT NULL,
+  gateway_fee_amount double precision,
+  actual_shipping_cost double precision,
+  payment_method text NOT NULL,
+  payment_status text NOT NULL,
+  razorpay_order_id text,
+  razorpay_payment_id text,
+  payment_verified_at text,
+  status text NOT NULL,
+  tracking_number text,
+  courier_name text,
+  tracking_url text,
+  estimated_delivery text,
+  dispatched_at text,
+  delivered_at text,
+  refund_amount double precision,
+  refund_reason text,
+  refund_requested_at text,
+  timeline jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS coupons (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  code text NOT NULL UNIQUE,
+  type text NOT NULL,
+  value double precision NOT NULL,
+  min_order_value double precision NOT NULL DEFAULT 0,
+  max_discount double precision,
+  active boolean NOT NULL DEFAULT true,
+  description text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS promotions (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  title text NOT NULL,
+  description text NOT NULL,
+  banner_headline text NOT NULL,
+  banner_subtext text NOT NULL,
+  banner_theme text NOT NULL,
+  starts_at text NOT NULL,
+  ends_at text NOT NULL,
+  free_shipping boolean NOT NULL DEFAULT false,
+  free_shipping_speed text NOT NULL DEFAULT 'standard',
+  discount_percent double precision NOT NULL DEFAULT 0,
+  promo_code text,
+  enabled boolean NOT NULL DEFAULT true,
+  usage_count integer NOT NULL DEFAULT 0,
+  revenue_generated double precision NOT NULL DEFAULT 0,
+  created_at text NOT NULL,
+  updated_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS lab_reports (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  batch_number text NOT NULL DEFAULT '',
+  tested_batch_number text NOT NULL,
+  report_number text NOT NULL,
+  laboratory_name text NOT NULL,
+  accreditation text NOT NULL DEFAULT '',
+  test_date text NOT NULL,
+  expiry_date text NOT NULL DEFAULT '',
+  sample_description text NOT NULL DEFAULT '',
+  fulvic_acid_percent text NOT NULL DEFAULT '',
+  heavy_metals jsonb NOT NULL DEFAULT '[]'::jsonb,
+  microbiological jsonb NOT NULL DEFAULT '[]'::jsonb,
+  verdict text NOT NULL DEFAULT 'Reference Sample',
+  summary_note text NOT NULL DEFAULT '',
+  mapped_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  testing_methodology text NOT NULL DEFAULT '',
+  verified_status text NOT NULL DEFAULT 'Reference Sample',
+  notes text NOT NULL DEFAULT '',
+  updated_at text NOT NULL DEFAULT '',
+  custom_document_url text,
+  original_file_name text,
+  original_mime_type text
+);
+CREATE TABLE IF NOT EXISTS cms_sections (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  key text NOT NULL,
+  title text NOT NULL,
+  category text NOT NULL,
+  content text NOT NULL,
+  approved_by_admin boolean NOT NULL DEFAULT false,
+  approved_at text,
+  updated_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS expenses (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  date text NOT NULL,
+  category text NOT NULL,
+  description text NOT NULL,
+  amount double precision NOT NULL
+);
+CREATE TABLE IF NOT EXISTS inquiries (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  name text NOT NULL,
+  email text NOT NULL,
+  phone text NOT NULL DEFAULT '',
+  subject text NOT NULL,
+  message text NOT NULL,
+  status text NOT NULL DEFAULT 'New',
+  reply_message text,
+  replied_at text,
+  replied_via jsonb,
+  email_delivery_status text,
+  created_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_notifications (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  type text NOT NULL,
+  title text NOT NULL,
+  message text NOT NULL,
+  order_id text,
+  order_number text,
+  customer_name text,
+  amount double precision,
+  read boolean NOT NULL DEFAULT false,
+  email_notified_to text,
+  created_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS payment_intents (
+  razorpay_order_id text PRIMARY KEY,
+  amount_paise integer NOT NULL,
+  verified boolean NOT NULL DEFAULT false,
+  payment_id text,
+  signature_verified boolean NOT NULL DEFAULT false,
+  method text NOT NULL,
+  created_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS store_settings (
+  id text PRIMARY KEY,
+  payload jsonb NOT NULL,
+  updated_at timestamp DEFAULT now()
+);
+`;
 
 function isTableEmpty(state: {
   userCount: number;
@@ -46,9 +294,9 @@ export class PostgresStateAdapter {
   private externalSchemaPromise: Promise<void> | null = null;
 
   /**
-   * When deployed externally (e.g. Vercel + Neon / Supabase via DATABASE_URL),
-   * ensures the 12 relational tables exist on a fresh database without manual CLI migration.
-   * Skipped completely on AI Studio Cloud SQL where Drizzle manages DDL.
+   * Lazily provisions the 12 relational tables in a single SQL batch ONLY if an external
+   * Postgres database (e.g., fresh Neon DB via DATABASE_URL) reports undefined_table (42P01).
+   * Eliminates 12 sequential DDL round-trips from every Vercel cold start.
    */
   private async ensureExternalSchemaIfNeeded(): Promise<void> {
     if (this.externalSchemaReady || !isUsingExternalPostgresUrl()) return;
@@ -57,221 +305,225 @@ export class PostgresStateAdapter {
       return;
     }
 
+    const startedAt = Date.now();
     this.externalSchemaPromise = (async () => {
-      const statements = [
-        sql`CREATE TABLE IF NOT EXISTS users (
-          id text PRIMARY KEY,
-          uid text UNIQUE,
-          name text NOT NULL,
-          email text NOT NULL UNIQUE,
-          phone text NOT NULL DEFAULT '',
-          role text NOT NULL DEFAULT 'customer',
-          password_hash text NOT NULL,
-          default_address jsonb,
-          wishlist_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
-          created_at text NOT NULL,
-          updated_at timestamp DEFAULT now()
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS products (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          slug text NOT NULL UNIQUE,
-          name text NOT NULL,
-          subtitle text NOT NULL,
-          net_quantity text NOT NULL,
-          sku text NOT NULL,
-          hsn_code text NOT NULL,
-          mrp double precision NOT NULL,
-          price double precision NOT NULL,
-          cost_per_unit double precision NOT NULL,
-          stock integer NOT NULL DEFAULT 0,
-          low_stock_threshold integer NOT NULL DEFAULT 10,
-          batch_number text NOT NULL,
-          gst_rate_percent double precision NOT NULL DEFAULT 12,
-          short_description text NOT NULL,
-          usage_guidance text NOT NULL,
-          storage_instructions text NOT NULL,
-          shipping_note text NOT NULL,
-          return_policy text NOT NULL,
-          specifications jsonb NOT NULL DEFAULT '[]'::jsonb,
-          gallery_types jsonb NOT NULL DEFAULT '[]'::jsonb,
-          custom_images jsonb,
-          active boolean NOT NULL DEFAULT true,
-          updated_at timestamp DEFAULT now()
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS orders (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          order_number text NOT NULL UNIQUE,
-          user_id text REFERENCES users(id) ON DELETE SET NULL,
-          customer_name text NOT NULL,
-          customer_email text NOT NULL,
-          customer_phone text NOT NULL,
-          shipping_address jsonb NOT NULL,
-          delivery_instructions text,
-          items jsonb NOT NULL,
-          subtotal double precision NOT NULL,
-          mrp_total double precision NOT NULL,
-          instant_savings double precision NOT NULL,
-          coupon_code text,
-          coupon_discount double precision NOT NULL DEFAULT 0,
-          promotion_id text,
-          promotion_title text,
-          shipping_fee double precision NOT NULL DEFAULT 0,
-          shipping_speed text NOT NULL DEFAULT 'standard',
-          cod_fee double precision NOT NULL DEFAULT 0,
-          taxable_value double precision NOT NULL,
-          gst_amount double precision NOT NULL,
-          total_amount double precision NOT NULL,
-          gateway_fee_amount double precision,
-          actual_shipping_cost double precision,
-          payment_method text NOT NULL,
-          payment_status text NOT NULL,
-          razorpay_order_id text,
-          razorpay_payment_id text,
-          payment_verified_at text,
-          status text NOT NULL,
-          tracking_number text,
-          courier_name text,
-          tracking_url text,
-          estimated_delivery text,
-          dispatched_at text,
-          delivered_at text,
-          refund_amount double precision,
-          refund_reason text,
-          refund_requested_at text,
-          timeline jsonb NOT NULL DEFAULT '[]'::jsonb,
-          created_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS coupons (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          code text NOT NULL UNIQUE,
-          type text NOT NULL,
-          value double precision NOT NULL,
-          min_order_value double precision NOT NULL DEFAULT 0,
-          max_discount double precision,
-          active boolean NOT NULL DEFAULT true,
-          description text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS promotions (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          title text NOT NULL,
-          description text NOT NULL,
-          banner_headline text NOT NULL,
-          banner_subtext text NOT NULL,
-          banner_theme text NOT NULL,
-          starts_at text NOT NULL,
-          ends_at text NOT NULL,
-          free_shipping boolean NOT NULL DEFAULT false,
-          free_shipping_speed text NOT NULL DEFAULT 'standard',
-          discount_percent double precision NOT NULL DEFAULT 0,
-          promo_code text,
-          enabled boolean NOT NULL DEFAULT true,
-          usage_count integer NOT NULL DEFAULT 0,
-          revenue_generated double precision NOT NULL DEFAULT 0,
-          created_at text NOT NULL,
-          updated_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS lab_reports (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          batch_number text NOT NULL DEFAULT '',
-          tested_batch_number text NOT NULL,
-          report_number text NOT NULL,
-          laboratory_name text NOT NULL,
-          accreditation text NOT NULL DEFAULT '',
-          test_date text NOT NULL,
-          expiry_date text NOT NULL DEFAULT '',
-          sample_description text NOT NULL DEFAULT '',
-          fulvic_acid_percent text NOT NULL DEFAULT '',
-          heavy_metals jsonb NOT NULL DEFAULT '[]'::jsonb,
-          microbiological jsonb NOT NULL DEFAULT '[]'::jsonb,
-          verdict text NOT NULL DEFAULT 'Reference Sample',
-          summary_note text NOT NULL DEFAULT '',
-          mapped_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
-          testing_methodology text NOT NULL DEFAULT '',
-          verified_status text NOT NULL DEFAULT 'Reference Sample',
-          notes text NOT NULL DEFAULT '',
-          updated_at text NOT NULL DEFAULT '',
-          custom_document_url text,
-          original_file_name text,
-          original_mime_type text
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS cms_sections (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          key text NOT NULL,
-          title text NOT NULL,
-          category text NOT NULL,
-          content text NOT NULL,
-          approved_by_admin boolean NOT NULL DEFAULT false,
-          approved_at text,
-          updated_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS expenses (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          date text NOT NULL,
-          category text NOT NULL,
-          description text NOT NULL,
-          amount double precision NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS inquiries (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          name text NOT NULL,
-          email text NOT NULL,
-          phone text NOT NULL DEFAULT '',
-          subject text NOT NULL,
-          message text NOT NULL,
-          status text NOT NULL DEFAULT 'New',
-          reply_message text,
-          replied_at text,
-          replied_via jsonb,
-          email_delivery_status text,
-          created_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS admin_notifications (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          type text NOT NULL,
-          title text NOT NULL,
-          message text NOT NULL,
-          order_id text,
-          order_number text,
-          customer_name text,
-          amount double precision,
-          read boolean NOT NULL DEFAULT false,
-          email_notified_to text,
-          created_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS payment_intents (
-          razorpay_order_id text PRIMARY KEY,
-          amount_paise integer NOT NULL,
-          verified boolean NOT NULL DEFAULT false,
-          payment_id text,
-          signature_verified boolean NOT NULL DEFAULT false,
-          method text NOT NULL,
-          created_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS store_settings (
-          id text PRIMARY KEY,
-          payload jsonb NOT NULL,
-          updated_at timestamp DEFAULT now()
-        )`,
-      ];
-
-      for (const stmt of statements) {
-        await db.execute(stmt);
-      }
+      const pool = createPool();
+      await pool.query(EXTERNAL_SCHEMA_DDL);
       this.externalSchemaReady = true;
+      logStructured('info', 'cloud-sql', 'external_schema_bootstrapped', {
+        durationMs: Date.now() - startedAt,
+      });
     })().finally(() => {
       this.externalSchemaPromise = null;
     });
 
     await this.externalSchemaPromise;
+  }
+
+  /**
+   * Executes a Postgres operation without upfront DDL round-trips.
+   * Automatically bootstraps external schema once on 42P01 and retries once on transient
+   * idle-socket resets (common when Neon compute wakes from scale-to-zero).
+   */
+  private async runWithRecovery<T>(operation: () => Promise<T>): Promise<T> {
+    try {
+      return await operation();
+    } catch (error) {
+      if (isUsingExternalPostgresUrl() && isUndefinedTableError(error)) {
+        await this.ensureExternalSchemaIfNeeded();
+        return await operation();
+      }
+      if (isTransientConnectionError(error)) {
+        logStructured('warn', 'cloud-sql', 'transient_connection_retry', {
+          code: getPgErrorCode(error) || 'connection_reset',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return await operation();
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Single-round-trip public storefront bootstrap query.
+   * Fetches ONLY the 6 public tables (products, store_settings, coupons, promotions,
+   * lab_reports, cms_sections) using one SQL query over one pooled connection — avoiding
+   * full 12-table hydration and private tables (users, orders, expenses, inquiries, etc.).
+   */
+  async loadPublicBootstrap(): Promise<{
+    empty: boolean;
+    data: PublicBootstrapDbData;
+    dbMs: number;
+  }> {
+    const startedAt = Date.now();
+    try {
+      const result = await this.runWithRecovery(async () => {
+        const pool = createPool();
+        return pool.query<{
+          products: Record<string, unknown>[];
+          coupons: Record<string, unknown>[];
+          promotions: Record<string, unknown>[];
+          lab_reports: Record<string, unknown>[];
+          cms_sections: Record<string, unknown>[];
+          settings: StoreSettings | null;
+        }>(`
+          SELECT
+            (SELECT COALESCE(json_agg(t ORDER BY t.sort_order ASC), '[]'::json)
+             FROM products t WHERE t.active = true) AS products,
+            (SELECT COALESCE(json_agg(t ORDER BY t.sort_order ASC), '[]'::json)
+             FROM coupons t WHERE t.active = true) AS coupons,
+            (SELECT COALESCE(json_agg(t ORDER BY t.sort_order ASC), '[]'::json)
+             FROM promotions t) AS promotions,
+            (SELECT COALESCE(json_agg(t ORDER BY t.sort_order ASC), '[]'::json)
+             FROM lab_reports t) AS lab_reports,
+            (SELECT COALESCE(json_agg(t ORDER BY t.sort_order ASC), '[]'::json)
+             FROM cms_sections t WHERE t.approved_by_admin = true) AS cms_sections,
+            (SELECT payload FROM store_settings WHERE id = 'default' LIMIT 1) AS settings
+        `);
+      });
+
+      const dbMs = Date.now() - startedAt;
+      const row = result.rows[0];
+      const rawProducts = Array.isArray(row?.products) ? row.products : [];
+      const rawCoupons = Array.isArray(row?.coupons) ? row.coupons : [];
+      const rawPromotions = Array.isArray(row?.promotions) ? row.promotions : [];
+      const rawLabReports = Array.isArray(row?.lab_reports) ? row.lab_reports : [];
+      const rawCms = Array.isArray(row?.cms_sections) ? row.cms_sections : [];
+      const rawSettings = (row?.settings ?? null) as StoreSettings | null;
+
+      if (rawProducts.length === 0 && !rawSettings) {
+        return {
+          empty: true,
+          data: {
+            products: [],
+            settings: null,
+            coupons: [],
+            promotions: [],
+            labReports: [],
+            cmsSections: [],
+          },
+          dbMs,
+        };
+      }
+
+      const mappedProducts: Product[] = rawProducts.map((r) => ({
+        id: String(r.id),
+        slug: String(r.slug),
+        name: String(r.name),
+        subtitle: String(r.subtitle),
+        netQuantity: String(r.net_quantity),
+        sku: String(r.sku),
+        hsnCode: String(r.hsn_code),
+        mrp: Number(r.mrp),
+        price: Number(r.price),
+        costPerUnit: Number(r.cost_per_unit),
+        stock: Number(r.stock),
+        lowStockThreshold: Number(r.low_stock_threshold),
+        batchNumber: String(r.batch_number),
+        gstRatePercent: Number(r.gst_rate_percent),
+        shortDescription: String(r.short_description),
+        usageGuidance: String(r.usage_guidance),
+        storageInstructions: String(r.storage_instructions),
+        shippingNote: String(r.shipping_note),
+        returnPolicy: String(r.return_policy),
+        specifications: Array.isArray(r.specifications)
+          ? (r.specifications as Product['specifications'])
+          : [],
+        galleryTypes: Array.isArray(r.gallery_types)
+          ? (r.gallery_types as Product['galleryTypes'])
+          : [],
+        customImages: Array.isArray(r.custom_images)
+          ? (r.custom_images as string[])
+          : undefined,
+        active: Boolean(r.active),
+      }));
+
+      const mappedCoupons: Coupon[] = rawCoupons.map((r) => ({
+        code: String(r.code),
+        discountType: r.type === 'flat' ? 'flat' : 'percent',
+        value: Number(r.value),
+        minOrderAmount: Number(r.min_order_value),
+        active: Boolean(r.active),
+        description: String(r.description),
+      }));
+
+      const mappedPromotions: Promotion[] = rawPromotions.map((r) => ({
+        id: String(r.id),
+        title: String(r.title),
+        description: String(r.description),
+        bannerHeadline: String(r.banner_headline),
+        bannerSubtext: String(r.banner_subtext),
+        bannerTheme: String(r.banner_theme) as BannerTheme,
+        startsAt: String(r.starts_at),
+        endsAt: String(r.ends_at),
+        freeShipping: Boolean(r.free_shipping),
+        freeShippingSpeed: r.free_shipping_speed === 'all' ? 'all' : 'standard',
+        discountPercent: Number(r.discount_percent),
+        promoCode: r.promo_code ? String(r.promo_code) : undefined,
+        enabled: Boolean(r.enabled),
+        usageCount: Number(r.usage_count),
+        revenueGenerated: Number(r.revenue_generated),
+        createdAt: String(r.created_at),
+        updatedAt: String(r.updated_at),
+      }));
+
+      const mappedLabReports: LabReport[] = rawLabReports.map((r) => ({
+        id: String(r.id),
+        laboratoryName: String(r.laboratory_name),
+        reportNumber: String(r.report_number),
+        testedBatchNumber: String(r.tested_batch_number),
+        testDate: String(r.test_date),
+        mappedProductIds: Array.isArray(r.mapped_product_ids)
+          ? (r.mapped_product_ids as string[])
+          : [],
+        testingMethodology: String(r.testing_methodology || r.accreditation || ''),
+        verifiedStatus:
+          r.verified_status === 'Verified' || r.verified_status === 'Pending Verification'
+            ? r.verified_status
+            : 'Reference Sample',
+        notes: String(r.notes || r.summary_note || ''),
+        customDocumentUrl: r.custom_document_url ? String(r.custom_document_url) : undefined,
+        originalFileName: r.original_file_name ? String(r.original_file_name) : undefined,
+        originalMimeType: r.original_mime_type ? String(r.original_mime_type) : undefined,
+        heavyMetals: Array.isArray(r.heavy_metals)
+          ? (r.heavy_metals as LabReport['heavyMetals'])
+          : [],
+        microbiological: Array.isArray(r.microbiological)
+          ? (r.microbiological as LabReport['microbiological'])
+          : [],
+        updatedAt: String(r.updated_at || r.test_date),
+      }));
+
+      const mappedCms: CmsSection[] = rawCms.map((r) => ({
+        id: String(r.id),
+        key: String(r.key),
+        title: String(r.title),
+        category: r.category === 'faq' ? 'faq' : 'product',
+        content: String(r.content),
+        approvedByAdmin: Boolean(r.approved_by_admin),
+        approvedAt: r.approved_at ? String(r.approved_at) : undefined,
+        updatedAt: String(r.updated_at),
+      }));
+
+      return {
+        empty: false,
+        data: {
+          products: mappedProducts,
+          settings: rawSettings,
+          coupons: mappedCoupons,
+          promotions: mappedPromotions,
+          labReports: mappedLabReports,
+          cmsSections: mappedCms,
+        },
+        dbMs,
+      };
+    } catch (error) {
+      logStructured('error', 'cloud-sql', 'load_public_bootstrap_failed', {
+        durationMs: Date.now() - startedAt,
+        code: getPgErrorCode(error) || 'unknown',
+      });
+      throw error;
+    }
   }
 
   private mapUserRow(row: typeof users.$inferSelect): StoredUser {
@@ -290,13 +542,10 @@ export class PostgresStateAdapter {
 
   async findUserByEmail(email: string): Promise<StoredUser | null> {
     try {
-      await this.ensureExternalSchemaIfNeeded();
       const normalized = email.trim().toLowerCase();
-      const rows = await db
-        .select()
-        .from(users)
-        .where(eq(users.email, normalized))
-        .limit(1);
+      const rows = await this.runWithRecovery(() =>
+        db.select().from(users).where(eq(users.email, normalized)).limit(1)
+      );
       return rows[0] ? this.mapUserRow(rows[0]) : null;
     } catch (error) {
       logStructured('error', 'cloud-sql', 'find_user_by_email_failed', {
@@ -312,8 +561,9 @@ export class PostgresStateAdapter {
 
   async findUserById(id: string): Promise<StoredUser | null> {
     try {
-      await this.ensureExternalSchemaIfNeeded();
-      const rows = await db.select().from(users).where(eq(users.id, id)).limit(1);
+      const rows = await this.runWithRecovery(() =>
+        db.select().from(users).where(eq(users.id, id)).limit(1)
+      );
       return rows[0] ? this.mapUserRow(rows[0]) : null;
     } catch (error) {
       logStructured('error', 'cloud-sql', 'find_user_by_id_failed', {
@@ -335,35 +585,36 @@ export class PostgresStateAdapter {
     const startedAt = Date.now();
     const normalizedEmail = user.email.trim().toLowerCase();
     try {
-      await this.ensureExternalSchemaIfNeeded();
-      const rows = await db
-        .insert(users)
-        .values({
-          id: user.id,
-          ...(uid ? { uid } : {}),
-          name: user.name,
-          email: normalizedEmail,
-          phone: user.phone ?? '',
-          role: user.role,
-          passwordHash: user.passwordHash,
-          defaultAddress: user.defaultAddress ?? null,
-          wishlistProductIds: user.wishlistProductIds ?? [],
-          createdAt: user.createdAt,
-          updatedAt: new Date(),
-        })
-        .onConflictDoUpdate({
-          target: users.email,
-          set: {
+      const rows = await this.runWithRecovery(() =>
+        db
+          .insert(users)
+          .values({
+            id: user.id,
             ...(uid ? { uid } : {}),
             name: user.name,
+            email: normalizedEmail,
             phone: user.phone ?? '',
             role: user.role,
+            passwordHash: user.passwordHash,
             defaultAddress: user.defaultAddress ?? null,
             wishlistProductIds: user.wishlistProductIds ?? [],
+            createdAt: user.createdAt,
             updatedAt: new Date(),
-          },
-        })
-        .returning();
+          })
+          .onConflictDoUpdate({
+            target: users.email,
+            set: {
+              ...(uid ? { uid } : {}),
+              name: user.name,
+              phone: user.phone ?? '',
+              role: user.role,
+              defaultAddress: user.defaultAddress ?? null,
+              wishlistProductIds: user.wishlistProductIds ?? [],
+              updatedAt: new Date(),
+            },
+          })
+          .returning()
+      );
 
       logStructured('info', 'cloud-sql', 'upsert_user_success', {
         durationMs: Date.now() - startedAt,
@@ -390,23 +641,24 @@ export class PostgresStateAdapter {
     const startedAt = Date.now();
     const normalizedEmail = user.email.trim().toLowerCase();
     try {
-      await this.ensureExternalSchemaIfNeeded();
-      const rows = await db
-        .insert(users)
-        .values({
-          id: user.id,
-          name: user.name,
-          email: normalizedEmail,
-          phone: user.phone ?? '',
-          role: user.role,
-          passwordHash: user.passwordHash,
-          defaultAddress: user.defaultAddress ?? null,
-          wishlistProductIds: user.wishlistProductIds ?? [],
-          createdAt: user.createdAt,
-          updatedAt: new Date(),
-        })
-        .onConflictDoNothing({ target: users.email })
-        .returning();
+      const rows = await this.runWithRecovery(() =>
+        db
+          .insert(users)
+          .values({
+            id: user.id,
+            name: user.name,
+            email: normalizedEmail,
+            phone: user.phone ?? '',
+            role: user.role,
+            passwordHash: user.passwordHash,
+            defaultAddress: user.defaultAddress ?? null,
+            wishlistProductIds: user.wishlistProductIds ?? [],
+            createdAt: user.createdAt,
+            updatedAt: new Date(),
+          })
+          .onConflictDoNothing({ target: users.email })
+          .returning()
+      );
 
       logStructured('info', 'cloud-sql', 'create_user_attempt', {
         durationMs: Date.now() - startedAt,
@@ -427,12 +679,13 @@ export class PostgresStateAdapter {
     }
   }
 
-  async loadState(fallbackSeed: DatabaseState): Promise<{
+  async loadState(getFallbackSeed: () => DatabaseState): Promise<{
     empty: boolean;
     state: DatabaseState;
+    dbMs: number;
   }> {
+    const startedAt = Date.now();
     try {
-      await this.ensureExternalSchemaIfNeeded();
       const [
         userRows,
         productRows,
@@ -446,20 +699,22 @@ export class PostgresStateAdapter {
         notifRows,
         intentRows,
         settingsRows,
-      ] = await Promise.all([
-        db.select().from(users).orderBy(asc(users.createdAt)),
-        db.select().from(products).orderBy(asc(products.sortOrder)),
-        db.select().from(orders).orderBy(asc(orders.sortOrder)),
-        db.select().from(coupons).orderBy(asc(coupons.sortOrder)),
-        db.select().from(promotions).orderBy(asc(promotions.sortOrder)),
-        db.select().from(labReports).orderBy(asc(labReports.sortOrder)),
-        db.select().from(cmsSections).orderBy(asc(cmsSections.sortOrder)),
-        db.select().from(expenses).orderBy(asc(expenses.sortOrder)),
-        db.select().from(inquiries).orderBy(asc(inquiries.sortOrder)),
-        db.select().from(adminNotifications).orderBy(asc(adminNotifications.sortOrder)),
-        db.select().from(paymentIntents),
-        db.select().from(storeSettings).where(eq(storeSettings.id, 'default')).limit(1),
-      ]);
+      ] = await this.runWithRecovery(() =>
+        Promise.all([
+          db.select().from(users).orderBy(asc(users.createdAt)),
+          db.select().from(products).orderBy(asc(products.sortOrder)),
+          db.select().from(orders).orderBy(asc(orders.sortOrder)),
+          db.select().from(coupons).orderBy(asc(coupons.sortOrder)),
+          db.select().from(promotions).orderBy(asc(promotions.sortOrder)),
+          db.select().from(labReports).orderBy(asc(labReports.sortOrder)),
+          db.select().from(cmsSections).orderBy(asc(cmsSections.sortOrder)),
+          db.select().from(expenses).orderBy(asc(expenses.sortOrder)),
+          db.select().from(inquiries).orderBy(asc(inquiries.sortOrder)),
+          db.select().from(adminNotifications).orderBy(asc(adminNotifications.sortOrder)),
+          db.select().from(paymentIntents),
+          db.select().from(storeSettings).where(eq(storeSettings.id, 'default')).limit(1),
+        ])
+      );
 
       if (
         isTableEmpty({
@@ -468,7 +723,7 @@ export class PostgresStateAdapter {
           settingsCount: settingsRows.length,
         })
       ) {
-        return { empty: true, state: fallbackSeed };
+        return { empty: true, state: getFallbackSeed(), dbMs: Date.now() - startedAt };
       }
 
       const mappedUsers: StoredUser[] = userRows.map((row) => ({
@@ -669,10 +924,11 @@ export class PostgresStateAdapter {
 
       return {
         empty: false,
+        dbMs: Date.now() - startedAt,
         state: {
           users: mappedUsers,
           products: mappedProducts,
-          settings: settingsRows[0]?.payload ?? fallbackSeed.settings,
+          settings: settingsRows[0]?.payload ?? getFallbackSeed().settings,
           coupons: mappedCoupons,
           promotions: mappedPromotions,
           orders: mappedOrders,
@@ -706,79 +962,80 @@ export class PostgresStateAdapter {
   }): Promise<void> {
     const startedAt = Date.now();
     try {
-      await this.ensureExternalSchemaIfNeeded();
-      await db.transaction(async (tx) => {
-        for (const dec of params.stockDecrements) {
-          const updated = await tx
-            .update(products)
-            .set({
-              stock: sql`${products.stock} - ${dec.quantity}`,
-              updatedAt: new Date(),
-            })
-            .where(and(eq(products.id, dec.productId), gte(products.stock, dec.quantity)))
-            .returning({ id: products.id, stock: products.stock });
+      await this.runWithRecovery(() =>
+        db.transaction(async (tx) => {
+          for (const dec of params.stockDecrements) {
+            const updated = await tx
+              .update(products)
+              .set({
+                stock: sql`${products.stock} - ${dec.quantity}`,
+                updatedAt: new Date(),
+              })
+              .where(and(eq(products.id, dec.productId), gte(products.stock, dec.quantity)))
+              .returning({ id: products.id, stock: products.stock });
 
-          if (updated.length === 0) {
-            throw new StorePersistenceError(
-              'Order could not be completed because one or more items just went out of stock. Please review your cart and try again.',
-              {
-                code: 'ORDER_STOCK_CONFLICT',
-                statusCode: 409,
-                retryable: false,
-              }
-            );
+            if (updated.length === 0) {
+              throw new StorePersistenceError(
+                'Order could not be completed because one or more items just went out of stock. Please review your cart and try again.',
+                {
+                  code: 'ORDER_STOCK_CONFLICT',
+                  statusCode: 409,
+                  retryable: false,
+                }
+              );
+            }
           }
-        }
 
-        const o = params.order;
-        await tx
-          .insert(orders)
-          .values({
-            id: o.id,
-            sortOrder: 0,
-            orderNumber: o.orderNumber,
-            userId: o.userId ?? null,
-            customerName: o.customerName,
-            customerEmail: o.customerEmail,
-            customerPhone: o.customerPhone,
-            shippingAddress: o.shippingAddress,
-            deliveryInstructions: o.deliveryInstructions ?? null,
-            items: o.items,
-            subtotal: o.subtotal,
-            mrpTotal: o.mrpTotal,
-            instantSavings: o.instantSavings,
-            couponCode: o.couponCode ?? null,
-            couponDiscount: o.couponDiscount,
-            promotionId: o.promotionId ?? null,
-            promotionTitle: o.promotionTitle ?? null,
-            shippingFee: o.shippingFee,
-            shippingSpeed: o.shippingSpeed,
-            codFee: o.codFee,
-            taxableValue: o.taxableValue,
-            gstAmount: o.gstAmount,
-            totalAmount: o.totalAmount,
-            gatewayFeeAmount: o.gatewayFeeAmount ?? null,
-            actualShippingCost: o.actualShippingCost ?? null,
-            paymentMethod: o.paymentMethod,
-            paymentStatus: o.paymentStatus,
-            razorpayOrderId: o.razorpayOrderId ?? null,
-            razorpayPaymentId: o.razorpayPaymentId ?? null,
-            paymentVerifiedAt: o.paymentVerifiedAt ?? null,
-            status: o.status,
-            courierName: o.courierPartner ?? null,
-            trackingNumber: o.trackingNumber ?? null,
-            trackingUrl: o.trackingUrl ?? null,
-            estimatedDelivery: o.estimatedDelivery ?? null,
-            dispatchedAt: o.dispatchedAt ?? null,
-            deliveredAt: o.deliveredAt ?? null,
-            refundAmount: o.refundAmount ?? null,
-            refundReason: o.refundReason ?? null,
-            refundRequestedAt: o.refundRequestedAt ?? null,
-            timeline: o.timeline,
-            createdAt: o.createdAt,
-          })
-          .onConflictDoNothing({ target: orders.id });
-      });
+          const o = params.order;
+          await tx
+            .insert(orders)
+            .values({
+              id: o.id,
+              sortOrder: 0,
+              orderNumber: o.orderNumber,
+              userId: o.userId ?? null,
+              customerName: o.customerName,
+              customerEmail: o.customerEmail,
+              customerPhone: o.customerPhone,
+              shippingAddress: o.shippingAddress,
+              deliveryInstructions: o.deliveryInstructions ?? null,
+              items: o.items,
+              subtotal: o.subtotal,
+              mrpTotal: o.mrpTotal,
+              instantSavings: o.instantSavings,
+              couponCode: o.couponCode ?? null,
+              couponDiscount: o.couponDiscount,
+              promotionId: o.promotionId ?? null,
+              promotionTitle: o.promotionTitle ?? null,
+              shippingFee: o.shippingFee,
+              shippingSpeed: o.shippingSpeed,
+              codFee: o.codFee,
+              taxableValue: o.taxableValue,
+              gstAmount: o.gstAmount,
+              totalAmount: o.totalAmount,
+              gatewayFeeAmount: o.gatewayFeeAmount ?? null,
+              actualShippingCost: o.actualShippingCost ?? null,
+              paymentMethod: o.paymentMethod,
+              paymentStatus: o.paymentStatus,
+              razorpayOrderId: o.razorpayOrderId ?? null,
+              razorpayPaymentId: o.razorpayPaymentId ?? null,
+              paymentVerifiedAt: o.paymentVerifiedAt ?? null,
+              status: o.status,
+              courierName: o.courierPartner ?? null,
+              trackingNumber: o.trackingNumber ?? null,
+              trackingUrl: o.trackingUrl ?? null,
+              estimatedDelivery: o.estimatedDelivery ?? null,
+              dispatchedAt: o.dispatchedAt ?? null,
+              deliveredAt: o.deliveredAt ?? null,
+              refundAmount: o.refundAmount ?? null,
+              refundReason: o.refundReason ?? null,
+              refundRequestedAt: o.refundRequestedAt ?? null,
+              timeline: o.timeline,
+              createdAt: o.createdAt,
+            })
+            .onConflictDoNothing({ target: orders.id });
+        })
+      );
 
       logStructured('info', 'cloud-sql', 'transact_order_success', {
         orderId: params.order.id,
@@ -808,8 +1065,8 @@ export class PostgresStateAdapter {
   async persistState(state: DatabaseState): Promise<void> {
     const startedAt = Date.now();
     try {
-      await this.ensureExternalSchemaIfNeeded();
-      await db.transaction(async (tx) => {
+      await this.runWithRecovery(() =>
+        db.transaction(async (tx) => {
         // 1. Settings
         await tx
           .insert(storeSettings)
@@ -1374,7 +1631,8 @@ export class PostgresStateAdapter {
         } else {
           await tx.delete(paymentIntents);
         }
-      });
+        })
+      );
 
       logStructured('info', 'cloud-sql', 'persist_state_success', {
         durationMs: Date.now() - startedAt,
