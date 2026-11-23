@@ -103,9 +103,11 @@ export function getAdminOwnerEmail(): string {
 }
 
 function getInitialAdminPassword(): string {
-  return process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim()
-    ? process.env.ADMIN_PASSWORD.trim()
-    : 'Rahulmewara@himrudra123';
+  const password = process.env.ADMIN_PASSWORD?.trim();
+  if (!password) {
+    throw new Error('ADMIN_PASSWORD environment variable is required.');
+  }
+  return password;
 }
 
 const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);

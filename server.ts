@@ -449,7 +449,7 @@ export function createApiApp(): express.Express {
       const fbUser = await verifyFirebaseIdToken(idToken);
       const normalizedEmail = fbUser.email.trim().toLowerCase();
 
-      if (!normalizedEmail) {
+      if (!normalizedEmail || !fbUser.emailVerified) {
         return res.status(401).json({
           error: 'Google account did not provide a verified email address.',
         });
