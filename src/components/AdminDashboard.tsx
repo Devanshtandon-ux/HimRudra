@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   BarChart3,
   Bell,
@@ -23,6 +23,7 @@ import {
   X,
 } from 'lucide-react';
 import { formatINR, type ProfitSummary } from '../lib/commerce';
+import { resolveProductImageUrl } from '../lib/productImages';
 import { AdminAnalyticsSection } from './admin/AdminAnalyticsSection';
 import { AdminInquiriesPanel, type InquiryReplyResult } from './admin/AdminInquiriesPanel';
 import { AdminOrdersSection } from './admin/AdminOrdersSection';
@@ -76,6 +77,27 @@ type AdminSection =
   | 'cms'
   | 'expenses'
   | 'marketing';
+
+function getAdminSessionToken(): string | null {
+  try {
+    return window.sessionStorage.getItem('himrudra_session_token');
+  } catch {
+    return null;
+  }
+}
+
+function adminFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
+  const token = getAdminSessionToken();
+  const headers = new Headers(init.headers);
+  if (token && !headers.has('Authorization')) {
+    headers.set('Authorization', `Bearer ${token}`);
+  }
+  return fetch(input, {
+    ...init,
+    credentials: 'include',
+    headers,
+  });
+}
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onClose,
@@ -154,22 +176,55 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [couponType, setCouponType] = useState<'percent' | 'flat'>('percent');
 
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const authBlockedRef = useRef(false);
+  const pollTimerRef = useRef<number | null>(null);
 
   const showToast = (msg: string) => {
     setToast(msg);
     setTimeout(() => setToast(''), 3000);
   };
 
-  const fetchOverview = async (silent = false) => {
+  const stopPolling = () => {
+    if (pollTimerRef.current !== null) {
+      window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+  };
+
+  const fetchOverview = async (silent = false, manualRetry = false) => {
+    if (manualRetry) {
+      authBlockedRef.current = false;
+    } else if (authBlockedRef.current) {
+      return;
+    }
     if (!silent) setLoading(true);
-    setError('');
+    if (!silent || manualRetry) setError('');
     try {
-      const res = await fetch('/api/admin/overview', { cache: 'no-store' });
-      const json = await res.json();
+      const res = await adminFetch('/api/admin/overview', { cache: 'no-store' });
+      const json = (await res.json().catch(() => null)) as
+        | (AdminOverviewData & { error?: string })
+        | { error?: string }
+        | null;
       if (!res.ok) {
-        setError(json.error || 'Failed to load admin console.');
+        if (res.status === 401 || res.status === 403) {
+          authBlockedRef.current = true;
+          stopPolling();
+        }
+        const fallbackMsg =
+          res.status === 401
+            ? 'Your admin session expired or is missing. Please sign in again as the store owner.'
+            : res.status === 403
+            ? 'Private store owner access required.'
+            : `Failed to load admin console (HTTP ${res.status}).`;
+        setError(json?.error || fallbackMsg);
         return;
       }
+      if (!json || !('orders' in json)) {
+        if (!silent) setError('Unexpected response while loading admin console.');
+        return;
+      }
+      authBlockedRef.current = false;
+      setError('');
       setData(json);
     } catch {
       if (!silent) setError('Network error loading admin console.');
@@ -180,21 +235,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   useEffect(() => {
     void fetchOverview();
-    const poll = window.setInterval(() => {
-      void fetchOverview(true);
+    pollTimerRef.current = window.setInterval(() => {
+      if (!authBlockedRef.current) {
+        void fetchOverview(true);
+      }
     }, 5000);
     const handleFocus = () => {
-      void fetchOverview(true);
+      if (!authBlockedRef.current) {
+        void fetchOverview(true);
+      }
     };
     const handleVisibility = () => {
-      if (document.visibilityState === 'visible') {
+      if (document.visibilityState === 'visible' && !authBlockedRef.current) {
         void fetchOverview(true);
       }
     };
     window.addEventListener('focus', handleFocus);
     document.addEventListener('visibilitychange', handleVisibility);
     return () => {
-      window.clearInterval(poll);
+      stopPolling();
       window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
@@ -207,7 +266,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       reader.onerror = () => reject(new Error('Failed to read file'));
       reader.readAsDataURL(file);
     });
-    const res = await fetch('/api/admin/upload-report', {
+    const res = await adminFetch('/api/admin/upload-report', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -242,7 +301,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const createProduct = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newProdName.trim() || !Number(newProdPrice)) return;
-    const res = await fetch('/api/admin/products', {
+    const res = await adminFetch('/api/admin/products', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -285,7 +344,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const updateProduct = async (product: Product, patch: Partial<Product>) => {
-    const res = await fetch(`/api/admin/products/${product.id}`, {
+    const res = await adminFetch(`/api/admin/products/${product.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
@@ -298,7 +357,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const deleteProduct = async (product: Product) => {
-    const res = await fetch(`/api/admin/products/${product.id}`, {
+    const res = await adminFetch(`/api/admin/products/${product.id}`, {
       method: 'DELETE',
     });
     if (res.ok) {
@@ -326,7 +385,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       note?: string;
     }
   ) => {
-    const res = await fetch(`/api/admin/orders/${orderId}`, {
+    const res = await adminFetch(`/api/admin/orders/${orderId}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -339,21 +398,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const markAllNotificationsRead = async () => {
-    const res = await fetch('/api/admin/notifications/read-all', { method: 'PUT' });
+    const res = await adminFetch('/api/admin/notifications/read-all', { method: 'PUT' });
     if (res.ok) {
       await fetchOverview(true);
     }
   };
 
   const markNotificationRead = async (notifId: string) => {
-    const res = await fetch(`/api/admin/notifications/${notifId}/read`, { method: 'PUT' });
+    const res = await adminFetch(`/api/admin/notifications/${notifId}/read`, { method: 'PUT' });
     if (res.ok) {
       await fetchOverview(true);
     }
   };
 
   const createPromotion = async (payload: Partial<Promotion>) => {
-    const res = await fetch('/api/admin/promotions', {
+    const res = await adminFetch('/api/admin/promotions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
@@ -366,7 +425,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const updatePromotion = async (id: string, patch: Partial<Promotion>) => {
-    const res = await fetch(`/api/admin/promotions/${id}`, {
+    const res = await adminFetch(`/api/admin/promotions/${id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
@@ -379,7 +438,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const deletePromotion = async (id: string) => {
-    const res = await fetch(`/api/admin/promotions/${id}`, { method: 'DELETE' });
+    const res = await adminFetch(`/api/admin/promotions/${id}`, { method: 'DELETE' });
     if (res.ok) {
       showToast('Promotion removed');
       await fetchOverview(true);
@@ -388,7 +447,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const toggleLabStatus = async (report: LabReport, verifiedStatus: LabReport['verifiedStatus']) => {
-    const res = await fetch(`/api/admin/lab-reports/${report.id}`, {
+    const res = await adminFetch(`/api/admin/lab-reports/${report.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ verifiedStatus }),
@@ -425,7 +484,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     try {
       const uploaded = await uploadFileToServer(file);
       if (!uploaded) return;
-      const res = await fetch(`/api/admin/lab-reports/${report.id}`, {
+      const res = await adminFetch(`/api/admin/lab-reports/${report.id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -473,7 +532,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         status: 'Within Limit' as const,
       },
     ];
-    const res = await fetch('/api/admin/lab-reports', {
+    const res = await adminFetch('/api/admin/lab-reports', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -522,7 +581,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const deleteLabReport = async (id: string) => {
-    const res = await fetch(`/api/admin/lab-reports/${id}`, { method: 'DELETE' });
+    const res = await adminFetch(`/api/admin/lab-reports/${id}`, { method: 'DELETE' });
     if (res.ok) {
       showToast('Laboratory report removed');
       await fetchOverview();
@@ -533,7 +592,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const createCmsSection = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCmsTitle.trim() || !newCmsContent.trim()) return;
-    const res = await fetch('/api/admin/cms', {
+    const res = await adminFetch('/api/admin/cms', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -553,7 +612,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const updateCmsSection = async (sec: CmsSection, patch: Partial<CmsSection>) => {
-    const res = await fetch(`/api/admin/cms/${sec.id}`, {
+    const res = await adminFetch(`/api/admin/cms/${sec.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
@@ -567,7 +626,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   const toggleInquiryStatus = async (inq: ContactInquiry) => {
     const nextStatus = inq.status === 'Responded' ? 'New' : 'Responded';
-    const res = await fetch(`/api/admin/inquiries/${inq.id}`, {
+    const res = await adminFetch(`/api/admin/inquiries/${inq.id}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ status: nextStatus }),
@@ -583,7 +642,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     replyMessage: string,
     channel: InquiryReplyChannel
   ): Promise<InquiryReplyResult | null> => {
-    const res = await fetch(`/api/admin/inquiries/${inquiryId}/reply`, {
+    const res = await adminFetch(`/api/admin/inquiries/${inquiryId}/reply`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ replyMessage, channel }),
@@ -606,7 +665,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     e.preventDefault();
     const amountNum = Number(expAmount);
     if (!expDesc.trim() || !amountNum) return;
-    const res = await fetch('/api/admin/expenses', {
+    const res = await adminFetch('/api/admin/expenses', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -625,7 +684,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const deleteExpense = async (id: string) => {
-    const res = await fetch(`/api/admin/expenses/${id}`, { method: 'DELETE' });
+    const res = await adminFetch(`/api/admin/expenses/${id}`, { method: 'DELETE' });
     if (res.ok) {
       showToast('Expense removed');
       await fetchOverview();
@@ -633,7 +692,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const saveSettings = async (patch: Partial<StoreSettings>) => {
-    const res = await fetch('/api/admin/settings', {
+    const res = await adminFetch('/api/admin/settings', {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
@@ -648,7 +707,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const createCoupon = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!couponCode.trim()) return;
-    const res = await fetch('/api/admin/coupons', {
+    const res = await adminFetch('/api/admin/coupons', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -671,7 +730,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   };
 
   const deleteCoupon = async (code: string) => {
-    const res = await fetch(`/api/admin/coupons/${code}`, { method: 'DELETE' });
+    const res = await adminFetch(`/api/admin/coupons/${code}`, { method: 'DELETE' });
     if (res.ok) {
       showToast(`Removed coupon ${code}`);
       await fetchOverview();
@@ -773,7 +832,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="flex items-center gap-2 relative">
             <button
               type="button"
-              onClick={() => void fetchOverview(true)}
+              onClick={() => void fetchOverview(false, true)}
               aria-label="Refresh admin data"
               title="Refresh real-time data"
               className="h-9 w-9 rounded-full flex items-center justify-center hover:bg-[#F3EDE5] text-[#79543D]"
@@ -1655,8 +1714,12 @@ const ProductEditorRow: React.FC<{
   const [stock, setStock] = useState(String(product.stock));
   const [batch, setBatch] = useState(product.batchNumber);
   const [active, setActive] = useState(product.active);
-  const [imageUrl, setImageUrl] = useState(product.customImages?.[0] ?? '');
+  const [imageUrl, setImageUrl] = useState(() => resolveProductImageUrl(product) ?? '');
   const [uploadingPhoto, setUploadingPhoto] = useState(false);
+
+  useEffect(() => {
+    setImageUrl(resolveProductImageUrl(product) ?? '');
+  }, [product.id, product.sku, product.customImages]);
 
   const handlePhotoChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -2016,12 +2079,12 @@ const OwnerPasswordCard: React.FC<{ onToast: (msg: string) => void }> = ({ onToa
     }
     setSaving(true);
     try {
-      const res = await fetch('/api/admin/password', {
+      const res = await adminFetch('/api/admin/password', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ currentPassword, newPassword }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         setErrorMsg(data.error || 'Could not update password.');
         return;

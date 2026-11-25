@@ -33,6 +33,16 @@ import {
   StorePersistenceError,
   validateAllowedUploadMime,
 } from './server/validation.ts';
+import {
+  createRazorpayServerOrder,
+  fetchAndVerifyCapturedRazorpayPayment,
+  getRazorpayConfig,
+  isValidRazorpayOrderId,
+  isValidRazorpayPaymentId,
+  normalizeRazorpayPaymentMethod,
+  verifyRazorpaySignature,
+  verifyRazorpayWebhookSignature,
+} from './server/razorpay.ts';
 import type {
   AdminNotification,
   BannerTheme,
@@ -55,10 +65,16 @@ dotenv.config();
 const PORT = Number(process.env.PORT) || 3000;
 const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const SESSION_COOKIE = 'himrudra_session';
-const SESSION_SECRET =
-  process.env.SESSION_SECRET && process.env.SESSION_SECRET !== 'change-me-in-production'
-    ? process.env.SESSION_SECRET
-    : 'himrudra-dev-session-hmac-secret-2026';
+const USING_FALLBACK_SESSION_SECRET =
+  !process.env.SESSION_SECRET || process.env.SESSION_SECRET === 'change-me-in-production';
+const SESSION_SECRET = USING_FALLBACK_SESSION_SECRET
+  ? 'himrudra-dev-session-hmac-secret-2026'
+  : process.env.SESSION_SECRET!;
+if (USING_FALLBACK_SESSION_SECRET && process.env.NODE_ENV === 'production') {
+  logStructured('warn', 'security', 'session_secret_fallback_in_production', {
+    message: 'SESSION_SECRET env var is not configured; set a strong random secret in production.',
+  });
+}
 
 interface SessionPayload {
   userId: string;
@@ -122,14 +138,16 @@ async function attachUser(req: AuthRequest, _res: Response, next: NextFunction) 
       typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
         ? authHeader.slice(7).trim()
         : undefined;
-    const rawToken = cookies[SESSION_COOKIE] || bearerToken;
-    if (rawToken) {
+    const candidateTokens = [bearerToken, cookies[SESSION_COOKIE]].filter(
+      (t): t is string => Boolean(t)
+    );
+    for (const rawToken of candidateTokens) {
       const session = verifySession(rawToken);
-      if (session) {
-        const user = await storeRepo.findUserById(session.userId).catch(() => null);
-        if (user) {
-          req.currentUser = user;
-        }
+      if (!session) continue;
+      const user = await storeRepo.findUserById(session.userId).catch(() => null);
+      if (user) {
+        req.currentUser = user;
+        break;
       }
     }
     next();
@@ -146,8 +164,17 @@ function requireAuth(req: AuthRequest, res: Response, next: NextFunction) {
 }
 
 function requireAdmin(req: AuthRequest, res: Response, next: NextFunction) {
+  if (!req.currentUser) {
+    return res.status(401).json({
+      error: 'Admin session expired or missing. Please sign in as the store owner.',
+      code: 'ADMIN_AUTH_REQUIRED',
+    });
+  }
   if (!isAuthorizedAdmin(req.currentUser, getAdminOwnerEmail())) {
-    return res.status(403).json({ error: 'Private store owner access required.' });
+    return res.status(403).json({
+      error: 'Private store owner access required.',
+      code: 'ADMIN_FORBIDDEN',
+    });
   }
   next();
 }
@@ -198,27 +225,27 @@ export function createApiApp(): express.Express {
   );
 
   const trafficGuard = createTrafficGuardMiddleware({ maxInFlight: 800 });
-  const bootstrapCache = new BootstrapResponseCache(IS_SERVERLESS ? 60_000 : 30_000);
+  const bootstrapCache = new BootstrapResponseCache(10_000);
   let lastBootstrapStateVersion = -1;
 
   // High-concurrency protection: request ID, 800 in-flight shedding, bounded sliding-window rate limiter
   app.use('/api', trafficGuard.middleware);
 
-  // Ensure cloud DB state is hydrated before routes that need full state, skipping lightweight direct-SQL routes
+  // Ensure AWS DynamoDB state is hydrated before auth/routes run, and fail-loud if durable write fails
   app.use('/api', async (req: AuthRequest, res, next) => {
     try {
       const isMutation = req.method !== 'GET' && req.method !== 'HEAD' && req.method !== 'OPTIONS';
       const isDirectPostgresRoute =
         storeRepo.isPostgresEnabled() &&
-        (req.path === '/store/bootstrap' ||
-          req.path === '/health' ||
-          req.path === '/auth/me' ||
-          req.path === '/auth/login' ||
+        (req.path === '/auth/login' ||
           req.path === '/auth/register' ||
           req.path === '/auth/google' ||
           req.path === '/auth/logout' ||
           req.path === '/auth/profile' ||
-          req.path === '/auth/wishlist');
+          req.path === '/auth/wishlist' ||
+          req.path === '/payments/create-order' ||
+          req.path === '/payments/verify' ||
+          (req.method === 'POST' && req.path === '/orders'));
 
       if (!isDirectPostgresRoute) {
         await storeRepo.ensureLoaded({ forceRefresh: isMutation });
@@ -279,9 +306,8 @@ export function createApiApp(): express.Express {
     });
   });
 
-  // Storefront bootstrap — single-query Postgres fast path + pre-serialized cache + ETag (304) + Edge CDN caching
-  app.get('/api/store/bootstrap', async (req: AuthRequest, res) => {
-    const startedAt = Date.now();
+  // Storefront bootstrap — pre-serialized cache + ETag (304) + Edge CDN caching for 500+ concurrent users
+  app.get('/api/store/bootstrap', (req, res) => {
     const stateVersion = storeRepo.getStateVersion();
     if (stateVersion !== lastBootstrapStateVersion) {
       bootstrapCache.invalidate();
@@ -289,47 +315,28 @@ export function createApiApp(): express.Express {
     }
 
     let entry = bootstrapCache.get();
-    let cacheHit = Boolean(entry);
-    let coldStart = false;
-    let dbMs = 0;
-    let serializeMs = 0;
-    let productCount = 0;
-
     if (!entry) {
-      const result = await storeRepo.getPublicBootstrap();
-      cacheHit = result.cacheHit;
-      coldStart = result.coldStart;
-      dbMs = result.dbMs;
-      productCount = result.payload.products.length;
-
-      const serializeStart = Date.now();
-      entry = bootstrapCache.set(result.payload, serializeStart);
-      serializeMs = Date.now() - serializeStart;
+      const state = storeRepo.getState();
+      const nowMs = Date.now();
+      entry = bootstrapCache.set(
+        {
+          products: state.products.filter((p) => p.active),
+          settings: state.settings,
+          coupons: state.coupons.filter((c) => c.active),
+          promotions: getActivePromotions(state.promotions, nowMs),
+          labReports: state.labReports,
+          cmsSections: state.cmsSections.filter((s) => s.approvedByAdmin),
+          serverNow: new Date(nowMs).toISOString(),
+        },
+        nowMs
+      );
     }
-
-    const totalMs = Date.now() - startedAt;
 
     res.setHeader(
       'Cache-Control',
-      'public, max-age=30, s-maxage=60, stale-while-revalidate=300'
+      'public, max-age=15, s-maxage=30, stale-while-revalidate=60'
     );
     res.setHeader('ETag', entry.etag);
-    res.setHeader(
-      'Server-Timing',
-      `db;dur=${dbMs}, serialize;dur=${serializeMs}, total;dur=${totalMs};desc="${
-        cacheHit ? 'cache-hit' : coldStart ? 'cold-db' : 'warm-db'
-      }"`
-    );
-
-    logStructured('info', 'bootstrap', 'served', {
-      requestId: req.requestId,
-      coldStart,
-      cacheHit,
-      dbMs,
-      serializeMs,
-      totalMs,
-      ...(productCount > 0 ? { productCount } : {}),
-    });
 
     if (req.headers['if-none-match'] === entry.etag) {
       return res.status(304).end();
@@ -340,7 +347,6 @@ export function createApiApp(): express.Express {
 
   // Auth routes
   app.get('/api/auth/me', (req: AuthRequest, res) => {
-    res.setHeader('Cache-Control', 'no-store');
     if (!req.currentUser) {
       return res.json({ user: null });
     }
@@ -562,8 +568,9 @@ export function createApiApp(): express.Express {
     }
   });
 
-  // Razorpay-compatible Payment Order Initiation + Server-Side Verification
+  // Razorpay Payment Order Initiation (strictly requires server-side Razorpay credentials)
   app.post('/api/payments/create-order', async (req: AuthRequest, res) => {
+    const startedAt = Date.now();
     const { items, shippingSpeed, paymentMethod, couponCode } = req.body as {
       items?: CartItem[];
       shippingSpeed?: 'standard' | 'express';
@@ -574,170 +581,317 @@ export function createApiApp(): express.Express {
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: 'Your cart is empty.' });
     }
-
-    const state = storeRepo.getState();
-    for (const item of items) {
-      const product = state.products.find((p) => p.id === item.productId && p.active);
-      if (!product) {
-        return res.status(400).json({ error: `Product ${item.productId} is unavailable.` });
-      }
-      if (item.quantity <= 0 || item.quantity > product.stock) {
-        return res.status(400).json({
-          error: `Only ${product.stock} unit(s) available for ${product.name}.`,
-        });
-      }
+    if (paymentMethod === 'COD') {
+      return res.status(400).json({ error: 'Cash on Delivery does not require an online payment order.' });
     }
 
-    const calc = calculateCartTotals(items, state.products, state.settings, {
-      shippingSpeed,
-      paymentMethod,
-      couponCode,
-      coupons: state.coupons,
-      promotions: state.promotions,
-      nowMs: Date.now(),
-    });
+    const razorpayConfig = getRazorpayConfig();
+    if (!razorpayConfig) {
+      logStructured('error', 'payments', 'razorpay_credentials_missing', {
+        requestId: req.requestId,
+      });
+      return res.status(503).json({
+        error:
+          'Online payments are temporarily unavailable because Razorpay credentials are not configured on the server. Please use Cash on Delivery or try again later.',
+        code: 'RAZORPAY_NOT_CONFIGURED',
+      });
+    }
 
-    const amountPaise = Math.round(calc.grandTotal * 100);
-    const keyId = process.env.RAZORPAY_KEY_ID?.trim();
-    const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
-    let razorpayOrderId = `order_HR${crypto.randomBytes(6).toString('hex')}`;
+    try {
+      const ctxStartedAt = Date.now();
+      const ctx = await storeRepo.loadCheckoutContext();
+      const contextMs = Date.now() - ctxStartedAt;
 
-    if (keyId && keySecret) {
-      try {
-        const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString('base64');
-        const rzpRes = await fetch('https://api.razorpay.com/v1/orders', {
-          method: 'POST',
-          headers: {
-            Authorization: `Basic ${authHeader}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({
-            amount: amountPaise,
-            currency: 'INR',
-            receipt: `hr_${Date.now()}`,
-            notes: { store: 'HimRudra', method: paymentMethod || 'UPI' },
-          }),
-        });
-        const rzpData = (await rzpRes.json().catch(() => ({}))) as {
-          id?: string;
-          error?: { description?: string };
-        };
-        if (!rzpRes.ok || !rzpData.id) {
-          logStructured('error', 'payments', 'razorpay_order_create_failed', {
-            requestId: req.requestId,
-            status: rzpRes.status,
-            error: rzpData.error?.description || 'Gateway rejected order creation',
-          });
-          return res.status(502).json({
-            error:
-              rzpData.error?.description ||
-              'Payment gateway could not initialize your order. Please try again.',
+      for (const item of items) {
+        const product = ctx.products.find((p) => p.id === item.productId && p.active);
+        if (!product) {
+          return res.status(400).json({ error: `Product ${item.productId} is unavailable.` });
+        }
+        if (item.quantity <= 0 || item.quantity > product.stock) {
+          return res.status(400).json({
+            error: `Only ${product.stock} unit(s) available for ${product.name}.`,
           });
         }
-        razorpayOrderId = rzpData.id;
-      } catch (err) {
-        logStructured('error', 'payments', 'razorpay_order_create_exception', {
+      }
+
+      const calc = calculateCartTotals(items, ctx.products, ctx.settings, {
+        shippingSpeed,
+        paymentMethod,
+        couponCode,
+        coupons: ctx.coupons,
+        promotions: ctx.promotions,
+        nowMs: Date.now(),
+      });
+
+      const amountPaise = Math.round(calc.grandTotal * 100);
+      if (!Number.isFinite(amountPaise) || amountPaise < 100) {
+        return res.status(400).json({ error: 'Invalid payable amount for online payment.' });
+      }
+
+      const rzpStartedAt = Date.now();
+      const orderCreation = await createRazorpayServerOrder({
+        config: razorpayConfig,
+        amountPaise,
+        currency: 'INR',
+        receipt: `hr_${Date.now()}`,
+        notes: { store: 'HimRudra', method: paymentMethod || 'UPI' },
+      });
+      const razorpayMs = Date.now() - rzpStartedAt;
+
+      if (!orderCreation.ok) {
+        logStructured('error', 'payments', 'razorpay_order_create_failed', {
           requestId: req.requestId,
-          error: err instanceof Error ? err.message : 'Network error',
+          status: orderCreation.gatewayStatus,
+          razorpayMs,
+          error: orderCreation.message,
         });
-        return res.status(502).json({
-          error: 'Unable to reach Razorpay payment gateway. Please retry in a moment.',
+        return res.status(orderCreation.statusCode).json({
+          error: orderCreation.message,
+          code: 'RAZORPAY_ORDER_CREATE_FAILED',
         });
       }
+
+      const razorpayOrderId = orderCreation.razorpayOrderId;
+
+      const dbWriteStartedAt = Date.now();
+      await storeRepo.upsertPaymentIntent({
+        razorpayOrderId,
+        amountPaise,
+        verified: false,
+        signatureVerified: false,
+        method: paymentMethod || 'UPI',
+        createdAt: new Date().toISOString(),
+      });
+      const dbWriteMs = Date.now() - dbWriteStartedAt;
+      const totalMs = Date.now() - startedAt;
+
+      res.setHeader(
+        'Server-Timing',
+        `context;dur=${contextMs}, razorpay;dur=${razorpayMs}, dbWrite;dur=${dbWriteMs}, total;dur=${totalMs}`
+      );
+      logStructured('info', 'payments', 'create_order_timing', {
+        requestId: req.requestId,
+        razorpayMode: razorpayConfig.mode,
+        contextMs,
+        razorpayMs,
+        dbWriteMs,
+        totalMs,
+      });
+
+      res.json({
+        razorpayOrderId,
+        amountPaise,
+        currency: 'INR',
+        keyId: razorpayConfig.keyId,
+        mode: razorpayConfig.mode,
+        liveGateway: true,
+        calculation: calc,
+      });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to initialize payment right now. Please try again.';
+      logStructured('error', 'payments', 'create_order_failed', {
+        requestId: req.requestId,
+        durationMs: Date.now() - startedAt,
+        error: message,
+      });
+      return res.status(statusCode).json({ error: message, requestId: req.requestId });
     }
-
-    state.paymentIntents[razorpayOrderId] = {
-      razorpayOrderId,
-      amountPaise,
-      verified: false,
-      signatureVerified: false,
-      method: paymentMethod || 'UPI',
-      createdAt: new Date().toISOString(),
-    };
-    storeRepo.commit();
-
-    res.json({
-      razorpayOrderId,
-      amountPaise,
-      currency: 'INR',
-      keyId: keyId || 'rzp_test_himrudra_gateway',
-      liveGateway: Boolean(keyId && keySecret),
-      calculation: calc,
-    });
   });
 
-  app.post('/api/payments/verify', (req: AuthRequest, res) => {
+  app.post('/api/payments/verify', async (req: AuthRequest, res) => {
+    const startedAt = Date.now();
     const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body as {
       razorpayOrderId?: string;
       razorpayPaymentId?: string;
       razorpaySignature?: string;
     };
-    if (!razorpayOrderId || !razorpayPaymentId) {
-      return res.status(400).json({ error: 'Missing payment order or transaction reference.' });
-    }
-    const state = storeRepo.getState();
-    const intent = state.paymentIntents[razorpayOrderId];
-    if (!intent) {
-      return res.status(404).json({ error: 'Payment session not found or expired.' });
+
+    const razorpayConfig = getRazorpayConfig();
+    if (!razorpayConfig) {
+      logStructured('error', 'payments', 'razorpay_credentials_missing_verify', {
+        requestId: req.requestId,
+      });
+      return res.status(503).json({
+        error:
+          'Online payment verification is unavailable because Razorpay credentials are not configured on the server.',
+        code: 'RAZORPAY_NOT_CONFIGURED',
+      });
     }
 
-    const secret = process.env.RAZORPAY_KEY_SECRET?.trim();
-    if (secret) {
-      if (!razorpaySignature) {
-        return res.status(400).json({ error: 'Payment signature missing.' });
+    if (!isValidRazorpayOrderId(razorpayOrderId) || !isValidRazorpayPaymentId(razorpayPaymentId)) {
+      return res.status(400).json({
+        error: 'Valid Razorpay order ID and payment ID are required.',
+        code: 'RAZORPAY_INVALID_REFERENCE',
+      });
+    }
+    if (typeof razorpaySignature !== 'string' || !razorpaySignature.trim()) {
+      return res.status(400).json({
+        error: 'Payment signature is required for verification.',
+        code: 'RAZORPAY_SIGNATURE_MISSING',
+      });
+    }
+
+    const cleanOrderId = razorpayOrderId.trim();
+    const cleanPaymentId = razorpayPaymentId.trim();
+    const cleanSignature = razorpaySignature.trim();
+
+    try {
+      const dbReadStartedAt = Date.now();
+      const intent = await storeRepo.findPaymentIntent(cleanOrderId);
+      const dbReadMs = Date.now() - dbReadStartedAt;
+
+      if (!intent) {
+        return res.status(404).json({
+          error: 'Payment session not found or expired.',
+          code: 'PAYMENT_SESSION_NOT_FOUND',
+        });
       }
-      const expected = crypto
-        .createHmac('sha256', secret)
-        .update(`${razorpayOrderId}|${razorpayPaymentId}`)
-        .digest('hex');
-      const sigBuf = Buffer.from(razorpaySignature);
-      const expBuf = Buffer.from(expected);
-      if (sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
+
+      const verifyStartedAt = Date.now();
+      const signatureValid = verifyRazorpaySignature({
+        razorpayOrderId: cleanOrderId,
+        razorpayPaymentId: cleanPaymentId,
+        razorpaySignature: cleanSignature,
+        keySecret: razorpayConfig.keySecret,
+      });
+      if (!signatureValid) {
         logStructured('warn', 'payments', 'signature_mismatch', {
           requestId: req.requestId,
-          razorpayOrderId,
+          razorpayOrderId: cleanOrderId,
         });
-        return res.status(400).json({ error: 'Payment signature verification failed.' });
+        return res.status(400).json({
+          error: 'Payment signature verification failed.',
+          code: 'RAZORPAY_SIGNATURE_INVALID',
+        });
       }
-    } else if (!razorpayPaymentId.startsWith('pay_')) {
-      return res.status(400).json({ error: 'Invalid payment transaction reference.' });
+
+      // Prevent re-binding an already-verified payment order to a different payment ID
+      if (intent.verified && intent.paymentId && intent.paymentId !== cleanPaymentId) {
+        return res.status(409).json({
+          error: 'This payment session has already been verified with a different transaction.',
+          code: 'PAYMENT_ALREADY_BOUND',
+        });
+      }
+
+      const idempotent = Boolean(
+        intent.verified && intent.signatureVerified && intent.paymentId === cleanPaymentId
+      );
+      let verifiedPaymentMethod: PaymentMethod = normalizeRazorpayPaymentMethod(intent.method);
+      let razorpayApiMs = 0;
+      let dbWriteMs = 0;
+
+      if (!idempotent) {
+        const apiStartedAt = Date.now();
+        const apiCheck = await fetchAndVerifyCapturedRazorpayPayment({
+          config: razorpayConfig,
+          razorpayOrderId: cleanOrderId,
+          razorpayPaymentId: cleanPaymentId,
+          expectedAmountPaise: intent.amountPaise,
+          expectedCurrency: 'INR',
+        });
+        razorpayApiMs = Date.now() - apiStartedAt;
+
+        if (!apiCheck.ok) {
+          logStructured('warn', 'payments', 'razorpay_api_verification_failed', {
+            requestId: req.requestId,
+            razorpayOrderId: cleanOrderId,
+            code: apiCheck.code,
+            statusCode: apiCheck.statusCode,
+            razorpayApiMs,
+          });
+          return res.status(apiCheck.statusCode).json({
+            error: apiCheck.message,
+            code: apiCheck.code,
+          });
+        }
+
+        // Capture the actual payment method reported by Razorpay's API (e.g. netbanking, card, upi, wallet)
+        verifiedPaymentMethod = normalizeRazorpayPaymentMethod(
+          apiCheck.payment.method,
+          intent.method
+        );
+
+        const dbWriteStartedAt = Date.now();
+        await storeRepo.upsertPaymentIntent({
+          ...intent,
+          method: verifiedPaymentMethod,
+          verified: true,
+          signatureVerified: true,
+          paymentId: cleanPaymentId,
+        });
+        dbWriteMs = Date.now() - dbWriteStartedAt;
+      }
+
+      const verifyMs = Date.now() - verifyStartedAt;
+      const totalMs = Date.now() - startedAt;
+      res.setHeader(
+        'Server-Timing',
+        `dbRead;dur=${dbReadMs}, verify;dur=${verifyMs}, razorpayApi;dur=${razorpayApiMs}, dbWrite;dur=${dbWriteMs}, total;dur=${totalMs}`
+      );
+      logStructured('info', 'payments', 'verify_timing', {
+        requestId: req.requestId,
+        idempotent,
+        paymentMethod: verifiedPaymentMethod,
+        dbReadMs,
+        razorpayApiMs,
+        verifyMs,
+        dbWriteMs,
+        totalMs,
+      });
+
+      res.json({
+        verified: true,
+        idempotent,
+        paymentMethod: verifiedPaymentMethod,
+        razorpayOrderId: cleanOrderId,
+        razorpayPaymentId: cleanPaymentId,
+        verifiedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to verify payment right now. Please try again.';
+      logStructured('error', 'payments', 'verify_failed', {
+        requestId: req.requestId,
+        durationMs: Date.now() - startedAt,
+        error: message,
+      });
+      return res.status(statusCode).json({ error: message, requestId: req.requestId });
     }
-
-    intent.verified = true;
-    intent.signatureVerified = Boolean(secret);
-    intent.paymentId = razorpayPaymentId;
-    storeRepo.commit();
-
-    res.json({
-      verified: true,
-      razorpayOrderId,
-      razorpayPaymentId,
-      verifiedAt: new Date().toISOString(),
-    });
   });
 
-  // Idempotent Payment Gateway Webhook Endpoint (verifies exact raw HTTP body bytes)
-  app.post('/api/payments/webhook', (req: AuthRequest, res) => {
+  // Idempotent Payment Gateway Webhook Endpoint (strictly verifies raw HTTP body HMAC signature)
+  app.post('/api/payments/webhook', async (req: AuthRequest, res) => {
     const signature = String(req.headers['x-razorpay-signature'] ?? '');
     const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET?.trim();
-    if (webhookSecret) {
-      const payloadToVerify = req.rawBody ?? JSON.stringify(req.body);
-      const expected = crypto
-        .createHmac('sha256', webhookSecret)
-        .update(payloadToVerify)
-        .digest('hex');
-      const sigBuf = Buffer.from(signature);
-      const expBuf = Buffer.from(expected);
-      if (!signature || sigBuf.length !== expBuf.length || !crypto.timingSafeEqual(sigBuf, expBuf)) {
-        logStructured('warn', 'payments', 'webhook_signature_invalid', {
-          requestId: req.requestId,
-        });
-        return res.status(400).json({ error: 'Invalid webhook signature.' });
-      }
-    } else if (process.env.NODE_ENV === 'production' && IS_SERVERLESS) {
-      return res.status(503).json({
-        error: 'RAZORPAY_WEBHOOK_SECRET must be configured in production to process webhooks.',
+    if (!webhookSecret) {
+      logStructured('error', 'payments', 'webhook_secret_missing', {
+        requestId: req.requestId,
       });
+      return res.status(503).json({
+        error: 'RAZORPAY_WEBHOOK_SECRET is not configured on the server.',
+        code: 'RAZORPAY_WEBHOOK_NOT_CONFIGURED',
+      });
+    }
+
+    const payloadToVerify = req.rawBody ?? JSON.stringify(req.body);
+    if (
+      !verifyRazorpayWebhookSignature({
+        rawBody: payloadToVerify,
+        signature,
+        webhookSecret,
+      })
+    ) {
+      logStructured('warn', 'payments', 'webhook_signature_invalid', {
+        requestId: req.requestId,
+      });
+      return res.status(400).json({ error: 'Invalid webhook signature.' });
     }
 
     const body = req.body as {
@@ -749,61 +903,187 @@ export function createApiApp(): express.Express {
           entity?: {
             id?: string;
             order_id?: string;
+            amount?: number;
+            currency?: string;
+            status?: string;
+            method?: string;
+          };
+        };
+        refund?: {
+          entity?: {
+            id?: string;
+            payment_id?: string;
+            amount?: number;
+            status?: string;
           };
         };
       };
     };
-    const event = body.event;
-    const razorpayOrderId = body.razorpayOrderId || body.payload?.payment?.entity?.order_id;
-    const razorpayPaymentId = body.razorpayPaymentId || body.payload?.payment?.entity?.id;
+
+    const event = String(body.event || '').trim();
+    const paymentEntity = body.payload?.payment?.entity;
+    const refundEntity = body.payload?.refund?.entity;
+    const razorpayOrderId = body.razorpayOrderId || paymentEntity?.order_id;
+    const razorpayPaymentId =
+      body.razorpayPaymentId || paymentEntity?.id || refundEntity?.payment_id;
+    const entityAmountPaise =
+      typeof paymentEntity?.amount === 'number' ? paymentEntity.amount : undefined;
+    const entityCurrency = paymentEntity?.currency
+      ? String(paymentEntity.currency).toUpperCase()
+      : 'INR';
 
     const state = storeRepo.getState();
+
+    // 1. Reconcile payment_intents on payment.captured / order.paid (protects UPI QR / tab-close flows)
+    let intentReconciled = false;
+    if (
+      (event === 'payment.captured' || event === 'order.paid') &&
+      razorpayOrderId &&
+      razorpayPaymentId &&
+      entityCurrency === 'INR'
+    ) {
+      const intent = await storeRepo.findPaymentIntent(razorpayOrderId).catch(() => null);
+      if (
+        intent &&
+        (entityAmountPaise === undefined || entityAmountPaise === intent.amountPaise) &&
+        (!intent.paymentId || intent.paymentId === razorpayPaymentId)
+      ) {
+        const reconciledMethod = normalizeRazorpayPaymentMethod(
+          paymentEntity?.method,
+          intent.method
+        );
+        if (!intent.verified || !intent.signatureVerified || intent.method !== reconciledMethod) {
+          await storeRepo.upsertPaymentIntent({
+            ...intent,
+            method: reconciledMethod,
+            verified: true,
+            signatureVerified: true,
+            paymentId: razorpayPaymentId,
+          });
+          intentReconciled = true;
+        }
+      }
+    }
+
+    // 2. Reconcile existing order record idempotently
     const order = state.orders.find(
       (o) =>
         (razorpayOrderId && o.razorpayOrderId === razorpayOrderId) ||
         (razorpayPaymentId && o.razorpayPaymentId === razorpayPaymentId)
     );
     if (!order) {
-      return res.json({ received: true, matched: false });
+      return res.json({ received: true, matched: false, intentReconciled });
     }
 
-    if (event === 'payment.captured' && order.paymentStatus !== 'Paid') {
-      const nowIso = new Date().toISOString();
-      order.paymentStatus = 'Paid';
-      order.paymentVerifiedAt = nowIso;
-      if (order.status === 'Pending Payment') {
-        order.status = 'Payment Confirmed';
-      }
-      order.timeline.push({
-        status: 'Payment Confirmed',
-        timestamp: nowIso,
-        note: `Webhook verified payment (${razorpayPaymentId || order.razorpayPaymentId || 'Gateway'})`,
-      });
-      if (!state.adminNotifications.some((n) => n.orderId === order.id && n.type === 'new_paid_order')) {
-        state.adminNotifications.unshift({
-          id: `notif-${crypto.randomUUID().slice(0, 8)}`,
-          type: 'new_paid_order',
-          title: 'New Paid Order Received!',
-          message: `${order.orderNumber} from ${order.customerName} (₹${order.totalAmount})`,
-          orderId: order.id,
+    const expectedOrderPaise = Math.round(order.totalAmount * 100);
+    const nowIso = new Date().toISOString();
+    let orderUpdated = false;
+
+    if (event === 'payment.captured' || event === 'order.paid') {
+      if (
+        entityCurrency !== 'INR' ||
+        (entityAmountPaise !== undefined && entityAmountPaise !== expectedOrderPaise)
+      ) {
+        logStructured('warn', 'payments', 'webhook_amount_or_currency_mismatch', {
+          requestId: req.requestId,
           orderNumber: order.orderNumber,
-          customerName: order.customerName,
-          amount: order.totalAmount,
-          read: false,
-          emailNotifiedTo: state.settings.emailNotificationsEnabled
-            ? state.settings.orderNotificationEmail
-            : undefined,
-          createdAt: nowIso,
+          entityCurrency,
         });
+        return res.status(400).json({ error: 'Webhook payment amount or currency mismatch.' });
       }
+      if (order.paymentStatus !== 'Paid') {
+        const verifiedMethod = normalizeRazorpayPaymentMethod(
+          paymentEntity?.method,
+          order.paymentMethod
+        );
+        order.paymentStatus = 'Paid';
+        order.paymentMethod = verifiedMethod;
+        if (razorpayPaymentId) order.razorpayPaymentId = razorpayPaymentId;
+        order.paymentVerifiedAt = nowIso;
+        if (order.status === 'Pending Payment') {
+          order.status = 'Payment Confirmed';
+        }
+        order.timeline.push({
+          status: 'Payment Confirmed',
+          timestamp: nowIso,
+          note: `Webhook verified ${verifiedMethod} payment (${razorpayPaymentId || order.razorpayPaymentId || 'Gateway'})`,
+        });
+        if (
+          !state.adminNotifications.some(
+            (n) => n.orderId === order.id && n.type === 'new_paid_order'
+          )
+        ) {
+          state.adminNotifications.unshift({
+            id: `notif-${crypto.randomUUID().slice(0, 8)}`,
+            type: 'new_paid_order',
+            title: 'New Paid Order Received!',
+            message: `${order.orderNumber} from ${order.customerName} (₹${order.totalAmount})`,
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            customerName: order.customerName,
+            amount: order.totalAmount,
+            read: false,
+            emailNotifiedTo: state.settings.emailNotificationsEnabled
+              ? state.settings.orderNotificationEmail
+              : undefined,
+            createdAt: nowIso,
+          });
+        }
+        orderUpdated = true;
+      }
+    } else if (event === 'payment.failed') {
+      if (order.paymentStatus === 'Pending Payment') {
+        order.paymentStatus = 'Failed';
+        order.timeline.push({
+          status: order.status,
+          timestamp: nowIso,
+          note: `Razorpay webhook reported payment failed (${razorpayPaymentId || 'Gateway'})`,
+        });
+        orderUpdated = true;
+      }
+    } else if (event === 'refund.processed') {
+      if (order.paymentStatus !== 'Refunded') {
+        const prevStatus = order.status;
+        order.paymentStatus = 'Refunded';
+        order.status = 'Refunded';
+        if (typeof refundEntity?.amount === 'number' && refundEntity.amount > 0) {
+          order.refundAmount = Math.round(refundEntity.amount) / 100;
+        } else if (order.refundAmount === undefined) {
+          order.refundAmount = order.totalAmount;
+        }
+        if (prevStatus !== 'Cancelled' && prevStatus !== 'Refunded') {
+          for (const item of order.items) {
+            const prod = state.products.find((p) => p.id === item.productId);
+            if (prod) {
+              prod.stock += item.quantity;
+            }
+          }
+        }
+        order.timeline.push({
+          status: 'Refunded',
+          timestamp: nowIso,
+          note: `Razorpay webhook confirmed refund (${refundEntity?.id || 'Gateway'})`,
+        });
+        orderUpdated = true;
+      }
+    }
+
+    if (orderUpdated) {
       storeRepo.commit();
     }
 
-    res.json({ received: true, matched: true, orderNumber: order.orderNumber });
+    res.json({
+      received: true,
+      matched: true,
+      intentReconciled,
+      orderUpdated,
+      orderNumber: order.orderNumber,
+    });
   });
 
-  // Checkout & Atomic Order Creation (idempotent on razorpayPaymentId + DynamoDB TransactWrite stock guard)
+  // Checkout & Atomic Order Creation (idempotent on razorpayPaymentId + atomic ACID stock guard)
   app.post('/api/orders', async (req: AuthRequest, res) => {
+    const startedAt = Date.now();
     const {
       items,
       shippingAddress,
@@ -839,28 +1119,53 @@ export function createApiApp(): express.Express {
       });
     }
 
-    const state = storeRepo.getState();
     const isOnline = paymentMethod !== 'COD';
+    const isPostgres = storeRepo.isPostgresEnabled();
+
+    let ctx;
+    let contextMs = 0;
+    try {
+      const ctxStartedAt = Date.now();
+      ctx = await storeRepo.loadCheckoutContext({
+        razorpayOrderId: isOnline ? razorpayOrderId : undefined,
+        razorpayPaymentId: isOnline ? razorpayPaymentId : undefined,
+        includeOrderSequence: true,
+      });
+      contextMs = Date.now() - ctxStartedAt;
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to load checkout details right now. Please try again.';
+      return res.status(statusCode).json({ error: message, requestId: req.requestId });
+    }
 
     // Payment idempotency guard: prevent duplicate orders on retries or double-clicks
-    if (isOnline && razorpayPaymentId) {
-      const existingOrder = state.orders.find(
-        (o) => o.razorpayPaymentId && o.razorpayPaymentId === razorpayPaymentId
-      );
-      if (existingOrder) {
-        return res.status(200).json({
-          order: existingOrder,
-          updatedProducts: state.products.filter((p) => p.active),
-          idempotent: true,
-        });
-      }
+    if (isOnline && ctx.existingOrderByPayment) {
+      const totalMs = Date.now() - startedAt;
+      res.setHeader('Server-Timing', `context;dur=${contextMs}, total;dur=${totalMs}`);
+      logStructured('info', 'orders', 'create_order_timing', {
+        requestId: req.requestId,
+        orderNumber: ctx.existingOrderByPayment.orderNumber,
+        paymentMethod,
+        idempotent: true,
+        contextMs,
+        txMs: 0,
+        totalMs,
+      });
+      return res.status(200).json({
+        order: ctx.existingOrderByPayment,
+        updatedProducts: ctx.products.filter((p) => p.active),
+        idempotent: true,
+      });
     }
 
     const orderItems: Order['items'] = [];
     const stockDecrements: Array<{ productId: string; quantity: number }> = [];
 
     for (const item of items) {
-      const product = state.products.find((p) => p.id === item.productId && p.active);
+      const product = ctx.products.find((p) => p.id === item.productId && p.active);
       if (!product) {
         return res.status(400).json({ error: `Product not found: ${item.productId}` });
       }
@@ -884,21 +1189,24 @@ export function createApiApp(): express.Express {
     }
 
     const nowMs = Date.now();
-    const calc = calculateCartTotals(items, state.products, state.settings, {
+    const calc = calculateCartTotals(items, ctx.products, ctx.settings, {
       shippingSpeed,
       paymentMethod,
       couponCode,
-      coupons: state.coupons,
-      promotions: state.promotions,
+      coupons: ctx.coupons,
+      promotions: ctx.promotions,
       nowMs,
     });
 
     if (isOnline) {
-      const intent = razorpayOrderId ? state.paymentIntents[razorpayOrderId] : undefined;
+      const intent = ctx.paymentIntent;
       if (
         !intent ||
         !intent.verified ||
+        !intent.signatureVerified ||
+        !razorpayOrderId ||
         !razorpayPaymentId ||
+        intent.razorpayOrderId !== razorpayOrderId ||
         intent.paymentId !== razorpayPaymentId ||
         intent.amountPaise !== Math.round(calc.grandTotal * 100)
       ) {
@@ -908,53 +1216,31 @@ export function createApiApp(): express.Express {
       }
     }
 
-    // Snapshot previous values so we can roll back cleanly if DynamoDB TransactWrite rejects a stock race
-    const stockSnapshots = new Map<string, number>();
-    for (const dec of stockDecrements) {
-      const product = state.products.find((p) => p.id === dec.productId);
-      if (product) {
-        stockSnapshots.set(product.id, product.stock);
-        product.stock = Math.max(0, product.stock - dec.quantity);
-      }
-    }
-
-    const appliedPromo = calc.appliedPromotion
-      ? state.promotions.find((p) => p.id === calc.appliedPromotion!.id)
-      : undefined;
-    const prevPromoUsage = appliedPromo?.usageCount;
-    const prevPromoRevenue = appliedPromo?.revenueGenerated;
-    if (appliedPromo) {
-      appliedPromo.usageCount += 1;
-      appliedPromo.revenueGenerated += calc.grandTotal;
-    }
+    const resolvedPaymentMethod: PaymentMethod = isOnline
+      ? normalizeRazorpayPaymentMethod(ctx.paymentIntent?.method, paymentMethod)
+      : 'COD';
 
     const now = new Date(nowMs);
     const deliveryDays = shippingSpeed === 'express' ? 2 : 5;
     const estDate = new Date(now.getTime() + deliveryDays * 86400000).toISOString().slice(0, 10);
 
-    let maxSeq = state.orders.length;
-    for (const existing of state.orders) {
-      const match = /^HIM-2026-(\d+)$/.exec(existing.orderNumber);
-      if (match) {
-        const seq = Number(match[1]);
-        if (seq > maxSeq) maxSeq = seq;
-      }
-    }
-    const orderNumber = `HIM-2026-${String(maxSeq + 1).padStart(4, '0')}`;
+    let nextOrderSeq = ctx.maxOrderSeq + 1;
+    const buildOrderNumber = (seq: number) => `HIM-2026-${String(seq).padStart(4, '0')}`;
+    const orderNumber = buildOrderNumber(nextOrderSeq);
 
     const initialStatus: OrderStatus = isOnline ? 'Payment Confirmed' : 'Processing';
     const timeline: Order['timeline'] = [
       {
         status: 'Pending Payment',
         timestamp: now.toISOString(),
-        note: `Order created (${paymentMethod})`,
+        note: `Order created (${resolvedPaymentMethod})`,
       },
     ];
     if (isOnline) {
       timeline.push({
         status: 'Payment Confirmed',
         timestamp: now.toISOString(),
-        note: `Server-verified payment (${razorpayPaymentId})`,
+        note: `Server-verified ${resolvedPaymentMethod} payment (${razorpayPaymentId})`,
       });
     } else {
       timeline.push({
@@ -964,11 +1250,11 @@ export function createApiApp(): express.Express {
       });
     }
 
-    const gatewayFeePct = state.settings.gatewayFeePercent ?? 2;
+    const gatewayFeePct = ctx.settings.gatewayFeePercent ?? 2;
     const gatewayFeeAmount = isOnline
       ? Math.round(calc.grandTotal * (gatewayFeePct / 100) * 100) / 100
       : 0;
-    const actualShippingCost = state.settings.defaultShippingCostPerOrder ?? 65;
+    const actualShippingCost = ctx.settings.defaultShippingCostPerOrder ?? 65;
 
     const newOrder: Order = {
       id: `ord-${crypto.randomUUID().slice(0, 8)}`,
@@ -1001,7 +1287,7 @@ export function createApiApp(): express.Express {
       totalAmount: calc.grandTotal,
       gatewayFeeAmount,
       actualShippingCost,
-      paymentMethod,
+      paymentMethod: resolvedPaymentMethod,
       paymentStatus: isOnline ? 'Paid' : 'Pending COD',
       razorpayOrderId: isOnline ? razorpayOrderId : undefined,
       razorpayPaymentId: isOnline ? razorpayPaymentId : undefined,
@@ -1012,52 +1298,177 @@ export function createApiApp(): express.Express {
       createdAt: now.toISOString(),
     };
 
-    state.orders.unshift(newOrder);
+    const promotionUpdate = calc.appliedPromotion
+      ? { promotionId: calc.appliedPromotion.id, revenueDelta: calc.grandTotal }
+      : undefined;
 
-    let addedNotifId: string | null = null;
-    if (isOnline) {
-      addedNotifId = `notif-${crypto.randomUUID().slice(0, 8)}`;
-      const notif: AdminNotification = {
-        id: addedNotifId,
-        type: 'new_paid_order',
-        title: 'New Paid Order Received!',
-        message: `${newOrder.orderNumber} from ${newOrder.customerName} (₹${newOrder.totalAmount})`,
-        orderId: newOrder.id,
-        orderNumber: newOrder.orderNumber,
-        customerName: newOrder.customerName,
-        amount: newOrder.totalAmount,
-        read: false,
-        emailNotifiedTo: state.settings.emailNotificationsEnabled
-          ? state.settings.orderNotificationEmail
-          : undefined,
-        createdAt: now.toISOString(),
-      };
-      state.adminNotifications.unshift(notif);
-    }
+    const adminNotification: AdminNotification | undefined = isOnline
+      ? {
+          id: `notif-${crypto.randomUUID().slice(0, 8)}`,
+          type: 'new_paid_order',
+          title: 'New Paid Order Received!',
+          message: `${newOrder.orderNumber} from ${newOrder.customerName} (₹${newOrder.totalAmount})`,
+          orderId: newOrder.id,
+          orderNumber: newOrder.orderNumber,
+          customerName: newOrder.customerName,
+          amount: newOrder.totalAmount,
+          read: false,
+          emailNotifiedTo: ctx.settings.emailNotificationsEnabled
+            ? ctx.settings.orderNotificationEmail
+            : undefined,
+          createdAt: now.toISOString(),
+        }
+      : undefined;
 
     const hadDefaultAddress = Boolean(req.currentUser?.defaultAddress);
-    if (req.currentUser && !hadDefaultAddress) {
-      req.currentUser.defaultAddress = newOrder.shippingAddress;
-    }
+    const userDefaultAddressUpdate =
+      req.currentUser && !hadDefaultAddress
+        ? { userId: req.currentUser.id, address: newOrder.shippingAddress }
+        : undefined;
 
-    try {
-      await storeRepo.commitOrderAtomic(newOrder, stockDecrements);
-    } catch (err) {
-      // Roll back in-memory mutations cleanly if DynamoDB atomic transaction failed or rejected stock race
-      state.orders = state.orders.filter((o) => o.id !== newOrder.id);
-      if (addedNotifId) {
-        state.adminNotifications = state.adminNotifications.filter((n) => n.id !== addedNotifId);
+    const state = storeRepo.getState();
+    const stockSnapshots = new Map<string, number>();
+    const appliedPromoInState = calc.appliedPromotion
+      ? state.promotions.find((p) => p.id === calc.appliedPromotion!.id)
+      : undefined;
+    const prevPromoUsage = appliedPromoInState?.usageCount;
+    const prevPromoRevenue = appliedPromoInState?.revenueGenerated;
+
+    // For non-Postgres backends (DynamoDB / local JSON), mutate in-memory state with snapshot rollback
+    if (!isPostgres) {
+      for (const dec of stockDecrements) {
+        const product = state.products.find((p) => p.id === dec.productId);
+        if (product) {
+          stockSnapshots.set(product.id, product.stock);
+          product.stock = Math.max(0, product.stock - dec.quantity);
+        }
       }
-      for (const [prodId, prevStock] of stockSnapshots.entries()) {
-        const product = state.products.find((p) => p.id === prodId);
-        if (product) product.stock = prevStock;
+      if (appliedPromoInState) {
+        appliedPromoInState.usageCount += 1;
+        appliedPromoInState.revenueGenerated += calc.grandTotal;
       }
-      if (appliedPromo && prevPromoUsage !== undefined && prevPromoRevenue !== undefined) {
-        appliedPromo.usageCount = prevPromoUsage;
-        appliedPromo.revenueGenerated = prevPromoRevenue;
+      state.orders.unshift(newOrder);
+      if (adminNotification) {
+        state.adminNotifications.unshift(adminNotification);
       }
       if (req.currentUser && !hadDefaultAddress) {
-        req.currentUser.defaultAddress = undefined;
+        req.currentUser.defaultAddress = newOrder.shippingAddress;
+      }
+    }
+
+    const txStartedAt = Date.now();
+    try {
+      let commitResult: {
+        existingOrder?: Order;
+        updatedProducts?: Array<{ id: string; stock: number }>;
+      } = {};
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          commitResult = await storeRepo.commitOrderAtomic(newOrder, stockDecrements, {
+            promotionUpdate,
+            adminNotification,
+            userDefaultAddressUpdate,
+          });
+          break;
+        } catch (attemptErr) {
+          if (
+            isPostgres &&
+            attempt < 2 &&
+            attemptErr instanceof StorePersistenceError &&
+            attemptErr.code === 'ORDER_NUMBER_CONFLICT'
+          ) {
+            nextOrderSeq += 1;
+            newOrder.orderNumber = buildOrderNumber(nextOrderSeq);
+            if (adminNotification) {
+              adminNotification.orderNumber = newOrder.orderNumber;
+              adminNotification.message = `${newOrder.orderNumber} from ${newOrder.customerName} (₹${newOrder.totalAmount})`;
+            }
+            continue;
+          }
+          throw attemptErr;
+        }
+      }
+
+      const txMs = Date.now() - txStartedAt;
+      const totalMs = Date.now() - startedAt;
+
+      if (commitResult.existingOrder) {
+        res.setHeader(
+          'Server-Timing',
+          `context;dur=${contextMs}, tx;dur=${txMs}, total;dur=${totalMs}`
+        );
+        logStructured('info', 'orders', 'create_order_timing', {
+          requestId: req.requestId,
+          orderNumber: commitResult.existingOrder.orderNumber,
+          paymentMethod,
+          idempotent: true,
+          contextMs,
+          txMs,
+          totalMs,
+        });
+        return res.status(200).json({
+          order: commitResult.existingOrder,
+          updatedProducts: ctx.products.filter((p) => p.active),
+          idempotent: true,
+        });
+      }
+
+      if (isPostgres) {
+        if (commitResult.updatedProducts) {
+          for (const upd of commitResult.updatedProducts) {
+            const p = ctx.products.find((prod) => prod.id === upd.id);
+            if (p) p.stock = upd.stock;
+          }
+        }
+        if (appliedPromoInState) {
+          appliedPromoInState.usageCount += 1;
+          appliedPromoInState.revenueGenerated += calc.grandTotal;
+        }
+        if (req.currentUser && !hadDefaultAddress) {
+          req.currentUser.defaultAddress = newOrder.shippingAddress;
+        }
+      }
+
+      res.setHeader(
+        'Server-Timing',
+        `context;dur=${contextMs}, tx;dur=${txMs}, total;dur=${totalMs}`
+      );
+      logStructured('info', 'orders', 'create_order_timing', {
+        requestId: req.requestId,
+        orderNumber: newOrder.orderNumber,
+        paymentMethod,
+        idempotent: false,
+        contextMs,
+        txMs,
+        totalMs,
+      });
+
+      const updatedProductsList = isPostgres
+        ? ctx.products.filter((p) => p.active)
+        : state.products.filter((p) => p.active);
+
+      return res.status(201).json({ order: newOrder, updatedProducts: updatedProductsList });
+    } catch (err) {
+      if (!isPostgres) {
+        // Roll back in-memory mutations cleanly if DynamoDB atomic transaction failed or rejected stock race
+        state.orders = state.orders.filter((o) => o.id !== newOrder.id);
+        if (adminNotification) {
+          state.adminNotifications = state.adminNotifications.filter(
+            (n) => n.id !== adminNotification.id
+          );
+        }
+        for (const [prodId, prevStock] of stockSnapshots.entries()) {
+          const product = state.products.find((p) => p.id === prodId);
+          if (product) product.stock = prevStock;
+        }
+        if (appliedPromoInState && prevPromoUsage !== undefined && prevPromoRevenue !== undefined) {
+          appliedPromoInState.usageCount = prevPromoUsage;
+          appliedPromoInState.revenueGenerated = prevPromoRevenue;
+        }
+        if (req.currentUser && !hadDefaultAddress) {
+          req.currentUser.defaultAddress = undefined;
+        }
       }
 
       const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
@@ -1071,14 +1482,11 @@ export function createApiApp(): express.Express {
         orderNumber: newOrder.orderNumber,
         code,
         statusCode,
+        durationMs: Date.now() - startedAt,
         error: message,
       });
       return res.status(statusCode).json({ error: message, code, requestId: req.requestId });
     }
-
-    res
-      .status(201)
-      .json({ order: newOrder, updatedProducts: state.products.filter((p) => p.active) });
   });
 
   app.get('/api/orders/mine', requireAuth, (req: AuthRequest, res) => {
@@ -1093,7 +1501,7 @@ export function createApiApp(): express.Express {
     res.json({ orders });
   });
 
-  app.get('/api/orders/track', (req, res) => {
+  app.get('/api/orders/track', (req: AuthRequest, res) => {
     const orderNumber = String(req.query.orderNumber ?? '').trim().toUpperCase();
     const contact = String(req.query.contact ?? '').trim().toLowerCase();
 
@@ -1109,10 +1517,26 @@ export function createApiApp(): express.Express {
       return res.status(404).json({ error: `No order found matching ${orderNumber}.` });
     }
 
-    if (contact) {
+    const isOwnerOrAdmin = Boolean(
+      req.currentUser &&
+        (isAuthorizedAdmin(req.currentUser, getAdminOwnerEmail()) ||
+          order.userId === req.currentUser.id ||
+          order.customerEmail.toLowerCase() === req.currentUser.email.toLowerCase())
+    );
+
+    if (!isOwnerOrAdmin) {
+      if (!contact) {
+        return res.status(400).json({
+          error: 'Enter the email address or 10-digit mobile number used for this order.',
+        });
+      }
       const cleanPhone = contact.replace(/\D/g, '');
+      const orderPhoneDigits = order.customerPhone.replace(/\D/g, '');
       const matchesEmail = order.customerEmail.toLowerCase() === contact;
-      const matchesPhone = cleanPhone.length >= 6 && order.customerPhone.includes(cleanPhone);
+      const matchesPhone =
+        cleanPhone.length === 10 &&
+        orderPhoneDigits.length >= 10 &&
+        orderPhoneDigits.slice(-10) === cleanPhone;
       if (!matchesEmail && !matchesPhone) {
         return res.status(403).json({
           error: 'The email or phone number does not match this order record.',
@@ -1780,7 +2204,23 @@ ${labContext}`;
     }
 
     if (status && status !== order.status) {
+      const prevStatus = order.status;
       order.status = status;
+
+      // Restore deducted inventory at most once when transitioning into Cancelled or Refunded
+      const enteringRestockState =
+        (status === 'Cancelled' || status === 'Refunded') &&
+        prevStatus !== 'Cancelled' &&
+        prevStatus !== 'Refunded';
+      if (enteringRestockState) {
+        for (const item of order.items) {
+          const prod = state.products.find((p) => p.id === item.productId);
+          if (prod) {
+            prod.stock += item.quantity;
+          }
+        }
+      }
+
       if (status === 'Dispatched') {
         order.dispatchedAt = nowIso;
       }
@@ -1803,6 +2243,8 @@ ${labContext}`;
           note?.trim() ||
           (order.trackingNumber
             ? `Status updated to ${status} (${order.courierPartner || 'Courier'}: ${order.trackingNumber})`
+            : enteringRestockState
+            ? `Order marked as ${status} by store administrator (inventory restored)`
             : `Order marked as ${status} by store administrator`),
       });
     }

@@ -1,6 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
-  Download,
   Minus,
   Plus,
   ShieldCheck,
@@ -11,6 +10,11 @@ import {
 } from 'lucide-react';
 import { ProductArt, type ProductVisualKind } from './ProductArt';
 import { formatINR, getActiveFreeShippingPromotion } from '../lib/commerce';
+import {
+  getVerifiedFulvicAcidResult,
+  isVerifiedBatchLabReport,
+} from '../lib/labCertificate';
+import { resolveProductImageUrl } from '../lib/productImages';
 import type { LabReport, Product, Promotion, StoreSettings } from '../types';
 
 interface ProductShowcaseProps {
@@ -27,13 +31,6 @@ interface ProductShowcaseProps {
   activeLabReport?: LabReport | null;
   onOpenLabReport: () => void;
 }
-
-const ANGLE_LABELS: Record<'hero' | 'texture' | 'ritual' | 'box', string> = {
-  hero: '20 g Apothecary Jar',
-  texture: 'Resin Texture & Brass Spoon',
-  ritual: 'Warm Water Dissolution',
-  box: 'HimRudra Heritage Crest Poster',
-};
 
 type InfoTab = 'description' | 'usage' | 'specs' | 'shipping' | 'quality';
 
@@ -57,7 +54,12 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
   const purchaseBlockRef = useRef<HTMLDivElement>(null);
 
   const currentKind: ProductVisualKind = selectedProduct.galleryTypes[0] ?? 'hero';
-  const primaryImageUrl = selectedProduct.customImages?.[0];
+  const primaryImageUrl = resolveProductImageUrl(selectedProduct);
+  const isLabVerified = isVerifiedBatchLabReport(activeLabReport, selectedProduct.batchNumber);
+  const verifiedFulvicAcid = getVerifiedFulvicAcidResult(
+    activeLabReport,
+    selectedProduct.batchNumber
+  );
   const savings = Math.max(0, selectedProduct.mrp - selectedProduct.price);
   const discountPct =
     selectedProduct.mrp > 0 ? Math.round((savings / selectedProduct.mrp) * 100) : 0;
@@ -136,9 +138,11 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
           <div className="lg:col-span-6 lg:sticky lg:top-24">
             <div className="relative aspect-[4/3] w-full rounded-2xl border border-[#79543D]/15 bg-[#F3EDE5] overflow-hidden group">
               <ProductArt
+                key={`${selectedProduct.id}-${primaryImageUrl ?? ''}`}
                 kind={currentKind}
                 customImageUrl={primaryImageUrl}
-                alt={`${selectedProduct.name} — ${ANGLE_LABELS[currentKind]}`}
+                pedestalLabel={`${selectedProduct.netQuantity} Apothecary Jar`}
+                alt={`${selectedProduct.name} (${selectedProduct.netQuantity})`}
               />
 
               <button
@@ -182,11 +186,9 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
                 >
                   <ShieldCheck className="h-4 w-4 text-[#C69B51] shrink-0" strokeWidth={1.85} />
                   <span>
-                    Lab Certified
-                    {activeLabReport.heavyMetals[0]?.parameter.toLowerCase().includes('fulvic')
-                      ? ` (${activeLabReport.heavyMetals[0].observedResult} Fulvic Acid)`
-                      : ''}{' '}
-                    — View Certificate
+                    {isLabVerified
+                      ? `Lab Certified${verifiedFulvicAcid ? ` (${verifiedFulvicAcid} Fulvic Acid)` : ''} — View Certificate`
+                      : 'Batch Lab Documentation — View Report'}
                   </span>
                 </button>
               )}
@@ -349,7 +351,7 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
                     ['usage', 'Usage & Storage'],
                     ['specs', 'Specifications'],
                     ['shipping', 'Shipping & Returns'],
-                    ['quality', 'Lab Certified'],
+                    ['quality', isLabVerified ? 'Lab Certified' : 'Batch Docs'],
                   ] as Array<[InfoTab, string]>
                 ).map(([tabKey, label]) => (
                   <button
@@ -404,29 +406,30 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
                     <p className="flex items-start gap-2">
                       <ShieldCheck className="h-4 w-4 text-[#79543D] shrink-0 mt-0.5" />
                       <span>
-                        Batch <strong className="font-mono">{activeLabReport?.testedBatchNumber || selectedProduct.batchNumber}</strong>{' '}
-                        is lab certified
-                        {activeLabReport ? ` (${activeLabReport.reportNumber} · ${activeLabReport.laboratoryName})` : ''}.
-                        You can view or download the certificate directly below or from the top bar.
+                        {isLabVerified && activeLabReport ? (
+                          <>
+                            Batch{' '}
+                            <strong className="font-mono">{activeLabReport.testedBatchNumber}</strong>{' '}
+                            is lab certified ({activeLabReport.reportNumber} ·{' '}
+                            {activeLabReport.laboratoryName}). You can view the batch report below.
+                          </>
+                        ) : (
+                          <>
+                            Batch{' '}
+                            <strong className="font-mono">{selectedProduct.batchNumber}</strong>{' '}
+                            laboratory verification is pending an independently verified batch
+                            certificate. You can inspect the current reference documentation below.
+                          </>
+                        )}
                       </span>
                     </p>
                     <div className="flex flex-wrap items-center gap-3 pt-1">
-                      {activeLabReport && (
-                        <a
-                          href={`/api/lab-reports/${encodeURIComponent(activeLabReport.id)}/download`}
-                          download
-                          className="inline-flex items-center gap-1.5 rounded-lg bg-[#281A15] px-3.5 py-2 text-xs font-semibold text-[#FAF8F4] hover:bg-[#3A2720] transition-colors"
-                        >
-                          <Download className="h-3.5 w-3.5 text-[#C69B51]" />
-                          <span>Download Lab Certificate</span>
-                        </a>
-                      )}
                       <button
                         type="button"
                         onClick={onOpenLabReport}
-                        className="text-xs font-semibold text-[#79543D] underline underline-offset-4 hover:text-[#281A15]"
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-[#79543D]/35 bg-[#FAF8F4] px-3.5 py-2 text-xs font-semibold text-[#281A15] hover:bg-[#F3EDE5] transition-colors"
                       >
-                        Preview Certificate
+                        <span>{isLabVerified ? 'View Lab Certificate' : 'View Batch Documentation'}</span>
                       </button>
                     </div>
                   </div>
@@ -448,7 +451,7 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
           <div className="relative w-full max-w-3xl rounded-2xl bg-[#FAF8F4] p-4 sm:p-6 shadow-2xl">
             <div className="flex items-center justify-between mb-3">
               <span className="font-serif text-xl font-semibold text-[#281A15]">
-                {selectedProduct.name} — {ANGLE_LABELS[currentKind]}
+                {selectedProduct.name} — {selectedProduct.netQuantity}
               </span>
               <button
                 type="button"
@@ -461,9 +464,11 @@ export const ProductShowcase: React.FC<ProductShowcaseProps> = ({
             </div>
             <div className="aspect-[4/3] w-full overflow-hidden rounded-xl border border-[#79543D]/15">
               <ProductArt
+                key={`zoom-${selectedProduct.id}-${primaryImageUrl ?? ''}`}
                 kind={currentKind}
                 customImageUrl={primaryImageUrl}
-                alt={ANGLE_LABELS[currentKind]}
+                pedestalLabel={`${selectedProduct.netQuantity} Apothecary Jar`}
+                alt={`${selectedProduct.name} (${selectedProduct.netQuantity})`}
               />
             </div>
           </div>

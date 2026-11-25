@@ -3,6 +3,7 @@ import { ArrowDown, ArrowRight, Sparkles, Truck } from 'lucide-react';
 import { motion } from 'motion/react';
 import { ProductArt } from './ProductArt';
 import { formatINR, getCountdownParts } from '../lib/commerce';
+import { resolveProductImageUrl } from '../lib/productImages';
 import type { Product, Promotion } from '../types';
 
 interface HeroSectionProps {
@@ -186,7 +187,8 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
             <div className="relative w-full min-h-[300px] sm:min-h-[440px] lg:min-h-[540px] rounded-2xl border border-[#79543D]/15 shadow-[0_24px_60px_-20px_rgba(40,26,21,0.16)] overflow-hidden">
               <ProductArt
                 kind="hero"
-                customImageUrl={primaryProduct.customImages?.[0]}
+                customImageUrl={resolveProductImageUrl(primaryProduct)}
+                pedestalLabel={`${primaryProduct.netQuantity} Apothecary Jar`}
                 alt="HimRudra Himalayan Shilajit Resin 20 g glass jar on natural stone pedestal"
                 interactiveParallax
                 className="h-full"

@@ -136,7 +136,16 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
     try {
       const params = new URLSearchParams({ orderNumber: orderNum.trim() });
       if (contact.trim()) params.set('contact', contact.trim());
-      const res = await fetch(`/api/orders/track?${params.toString()}`);
+      let token: string | null = null;
+      try {
+        token = window.sessionStorage.getItem('himrudra_session_token');
+      } catch {
+        // ignore storage errors
+      }
+      const res = await fetch(`/api/orders/track?${params.toString()}`, {
+        credentials: 'include',
+        headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      });
       const data = await res.json();
       if (!res.ok) {
         setTrackError(data.error || 'Order not found.');
@@ -300,6 +309,9 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
           </div>
           <div className="text-right font-mono text-xs tabular-nums">
             <div className="font-semibold text-[#281A15]">{formatINR(order.totalAmount)}</div>
+            <div className="text-[#281A15]/80">
+              {order.paymentMethod} ({order.paymentStatus})
+            </div>
             <div className="text-[#79543D]">Est. {order.estimatedDelivery || 'Pending'}</div>
           </div>
         </div>

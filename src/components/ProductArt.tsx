@@ -1,5 +1,4 @@
-import React, { useState } from 'react';
-import { FileText } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 
 export type ProductVisualKind = 'hero' | 'texture' | 'ritual' | 'box' | 'lab';
@@ -11,6 +10,7 @@ interface ProductArtProps {
   className?: string;
   interactiveParallax?: boolean;
   compact?: boolean;
+  pedestalLabel?: string;
 }
 
 export const ProductArt: React.FC<ProductArtProps> = ({
@@ -20,9 +20,14 @@ export const ProductArt: React.FC<ProductArtProps> = ({
   className = '',
   interactiveParallax = false,
   compact = false,
+  pedestalLabel = '20 g Apothecary Jar',
 }) => {
   const [imgFailed, setImgFailed] = useState(false);
   const [tilt, setTilt] = useState({ x: 0, y: 0 });
+
+  useEffect(() => {
+    setImgFailed(false);
+  }, [customImageUrl, kind]);
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (!interactiveParallax) return;
@@ -36,9 +41,14 @@ export const ProductArt: React.FC<ProductArtProps> = ({
     if (interactiveParallax) setTilt({ x: 0, y: 0 });
   };
 
-  if (compact && kind === 'hero' && customImageUrl && !imgFailed) {
+  if (compact && kind !== 'lab' && customImageUrl && !imgFailed) {
+    const isSeal = customImageUrl.includes('9.55.23_PM');
     return (
-      <div className={`relative w-full h-full bg-black flex items-center justify-center p-1 ${className}`}>
+      <div
+        className={`relative w-full h-full flex items-center justify-center p-1 overflow-hidden ${
+          isSeal ? 'bg-[#FAF8F4]' : 'bg-black'
+        } ${className}`}
+      >
         <img
           src={customImageUrl}
           alt={alt}
@@ -137,7 +147,7 @@ export const ProductArt: React.FC<ProductArtProps> = ({
           <div className="h-4 w-[92%] rounded-[50%] bg-gradient-to-r from-[#C8B7A3] via-[#E5D9CA] to-[#B7A48F] border border-[#FAF8F4]/50 shadow-inner" />
           <div className="h-9 sm:h-11 w-[88%] -mt-2 rounded-b-2xl bg-gradient-to-r from-[#8D7562] via-[#A9927D] to-[#745D4B] border-x border-b border-[#281A15]/15 shadow-[0_18px_28px_-10px_rgba(40,26,21,0.35)] flex items-center justify-center">
             <span className="text-[10px] tracking-[0.26em] uppercase text-[#FAF8F4]/80 font-medium">
-              20 g Apothecary Jar
+              {pedestalLabel}
             </span>
           </div>
         </div>
@@ -145,31 +155,36 @@ export const ProductArt: React.FC<ProductArtProps> = ({
     );
   }
 
-  // Lab Report Reference Image / PDF Preview (never cropped or altered)
+  // Lab Report View-Only Image / PDF Preview (no explicit download controls)
   if (kind === 'lab' && customImageUrl && !imgFailed) {
     const isPdf =
       customImageUrl.toLowerCase().endsWith('.pdf') ||
       customImageUrl.startsWith('data:application/pdf');
     if (isPdf) {
+      const viewOnlyPdfSrc = customImageUrl.includes('#')
+        ? customImageUrl
+        : `${customImageUrl}#toolbar=0&navpanes=0&scrollbar=1`;
       return (
         <div
-          className={`w-full h-full flex flex-col items-center justify-center gap-3 bg-[#FAF8F4] p-6 text-center ${className}`}
+          className={`w-full bg-[#FAF8F4] flex flex-col items-center justify-center ${className}`}
         >
-          <FileText className="h-12 w-12 text-[#79543D]" />
-          <p className="font-serif text-lg font-semibold text-[#281A15]">
-            Laboratory Certificate (PDF)
-          </p>
-          <p className="text-xs text-[#79543D]">
-            Original laboratory document uploaded by store administrator.
-          </p>
+          <iframe
+            src={viewOnlyPdfSrc}
+            title={alt}
+            className="w-full h-[60vh] min-h-[360px] border-0 bg-white"
+          />
         </div>
       );
     }
     return (
-      <div className={`w-full h-full bg-white flex items-center justify-center p-2 ${className}`}>
+      <div
+        onContextMenu={(e) => e.preventDefault()}
+        className={`w-full h-full bg-white flex items-center justify-center p-2 select-none ${className}`}
+      >
         <img
           src={customImageUrl}
           alt={alt}
+          draggable={false}
           referrerPolicy="no-referrer"
           onError={() => setImgFailed(true)}
           className="w-full h-full object-contain"

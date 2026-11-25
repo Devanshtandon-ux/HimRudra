@@ -24,6 +24,7 @@ import {
 } from './lib/bootstrapCache';
 import { getActivePromotions } from './lib/commerce';
 import { signOutFirebase } from './lib/firebaseAuth';
+import { isVerifiedBatchLabReport } from './lib/labCertificate';
 import { getRouteMeta, resolveAppRoute, type AppRoute } from './lib/legalRoutes';
 import type {
   CartItem,
@@ -337,9 +338,10 @@ export default function App() {
     labReports.find((r) => r.id === selectedLabReportId) ??
     labReports[0] ??
     null;
-  const activeLabDownloadUrl = activeLabReport
-    ? `/api/lab-reports/${encodeURIComponent(activeLabReport.id)}/download`
-    : undefined;
+  const activeLabVerified = isVerifiedBatchLabReport(
+    activeLabReport,
+    selectedProduct?.batchNumber
+  );
 
   const openLabReportPreview = (reportId?: string) => {
     if (reportId) {
@@ -360,6 +362,7 @@ export default function App() {
           onClosePreview={() => setLabPreviewOpen(false)}
           selectedReportId={activeLabReport?.id ?? ''}
           onSelectReportId={setSelectedLabReportId}
+          activeProductBatch={selectedProduct?.batchNumber}
         />
       )}
       {!isLegalRoute && !bannerDismissed && (heroPromo || bootstrap?.settings.announcementText) && (
@@ -408,6 +411,7 @@ export default function App() {
         onOpenAdmin={() => setAdminOpen(true)}
         onOpenLabReport={() => openLabReportPreview(activeLabReport?.id)}
         onNavigateSection={scrollToSection}
+        labVerified={activeLabVerified}
       />
 
       <main>
@@ -428,7 +432,6 @@ export default function App() {
               }}
               onNavigateSection={scrollToSection}
               onNavigateLegal={(path) => navigateToPath(path)}
-              labDownloadUrl={activeLabDownloadUrl}
             />
           </>
         ) : (
@@ -464,10 +467,7 @@ export default function App() {
                 />
               )}
 
-              <WhyHimRudra
-                labDownloadUrl={activeLabDownloadUrl}
-                onOpenLabReport={() => openLabReportPreview(activeLabReport?.id)}
-              />
+              <WhyHimRudra />
 
               <ProductDescriptionSection cmsSections={bootstrap.cmsSections} />
 
@@ -479,7 +479,6 @@ export default function App() {
                 }}
                 onNavigateSection={scrollToSection}
                 onNavigateLegal={(path) => navigateToPath(path)}
-                labDownloadUrl={activeLabDownloadUrl}
               />
             </>
           )

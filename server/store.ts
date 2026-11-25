@@ -13,6 +13,7 @@ import type {
   Product,
   Promotion,
   PublicStoreBootstrap,
+  ShippingAddress,
   StoreSettings,
   User,
 } from '../src/types.ts';
@@ -30,7 +31,10 @@ import {
   serializeStateToDynamoItems,
 } from './dynamodb.ts';
 import { isCloudSqlConfigured } from '../src/db/index.ts';
-import { PostgresStateAdapter } from '../src/db/postgresAdapter.ts';
+import {
+  PostgresStateAdapter,
+  type PostgresCheckoutContext,
+} from '../src/db/postgresAdapter.ts';
 
 export interface StoredUser extends User {
   passwordHash: string;
@@ -102,11 +106,12 @@ export function getAdminOwnerEmail(): string {
 }
 
 function getInitialAdminPassword(): string {
-  return process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim()
-    ? process.env.ADMIN_PASSWORD.trim()
-    : 'Rahulmewara@himrudra123';
+  const password = process.env.ADMIN_PASSWORD?.trim();
+  if (!password) {
+    throw new Error('ADMIN_PASSWORD environment variable is required.');
+  }
+  return password;
 }
-
 const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const BUNDLED_DATA_DIR = path.resolve(process.cwd(), 'data');
 const BUNDLED_DB_FILE = path.join(BUNDLED_DATA_DIR, 'himrudra-db.json');
@@ -204,7 +209,7 @@ function createSeedState(): DatabaseState {
       ],
       galleryTypes: ['box', 'hero', 'texture', 'ritual'],
       customImages: [
-        '/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg',
+        '/assets/products/himrudra-twin-ritual-pack-40g.jpeg',
         '/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg',
       ],
       active: true,
@@ -569,19 +574,25 @@ class StoreRepository {
     let mutated = false;
     for (const p of parsed.products) {
       if (
-        (p.id === 'himrudra-shilajit-20g' || p.id === 'himrudra-shilajit-40g-duo') &&
+        p.id === 'himrudra-shilajit-20g' &&
         (!p.customImages || p.customImages.length === 0)
       ) {
-        p.customImages =
-          p.id === 'himrudra-shilajit-40g-duo'
-            ? [
-                '/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg',
-                '/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg',
-              ]
-            : [
-                '/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg',
-                '/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg',
-              ];
+        p.customImages = [
+          '/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg',
+          '/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg',
+        ];
+        mutated = true;
+      } else if (
+        p.id === 'himrudra-shilajit-40g-duo' &&
+        (!p.customImages ||
+          p.customImages.length === 0 ||
+          p.customImages[0]?.includes('9.55.23_PM_2635dbf3') ||
+          p.customImages[0]?.includes('image_1c70e55c.png'))
+      ) {
+        p.customImages = [
+          '/assets/products/himrudra-twin-ritual-pack-40g.jpeg',
+          '/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg',
+        ];
         mutated = true;
       }
     }
@@ -668,8 +679,9 @@ class StoreRepository {
       return true;
     });
     if (filteredUsers.length !== (parsed.users ?? []).length) {
+      // Filter legacy addresses in memory without forcing a full 12-table persistState rewrite,
+      // because persistState intentionally preserves existing user rows without deleting them.
       parsed.users = filteredUsers;
-      mutated = true;
     }
     for (const u of parsed.users) {
       if (u.email.toLowerCase() !== ownerEmail && u.role === 'admin') {
@@ -1248,30 +1260,162 @@ class StoreRepository {
     return user;
   }
 
+  async upsertPaymentIntent(intent: PaymentIntentRecord): Promise<void> {
+    const pg = this.getPostgres();
+    if (pg) {
+      await pg.upsertPaymentIntent(intent);
+      this.state.paymentIntents[intent.razorpayOrderId] = intent;
+      this.lastSyncedAt = new Date().toISOString();
+      this.lastCloudError = null;
+      return;
+    }
+
+    this.state.paymentIntents[intent.razorpayOrderId] = intent;
+    this.commit();
+  }
+
+  async findPaymentIntent(razorpayOrderId: string): Promise<PaymentIntentRecord | null> {
+    const pg = this.getPostgres();
+    if (pg) {
+      const found = await pg.findPaymentIntent(razorpayOrderId);
+      if (found) {
+        this.state.paymentIntents[found.razorpayOrderId] = found;
+      }
+      return found;
+    }
+
+    return this.state.paymentIntents[razorpayOrderId] ?? null;
+  }
+
+  async loadCheckoutContext(params?: {
+    razorpayOrderId?: string;
+    razorpayPaymentId?: string;
+    includeOrderSequence?: boolean;
+  }): Promise<Omit<PostgresCheckoutContext, 'empty' | 'settings'> & { settings: StoreSettings }> {
+    const pg = this.getPostgres();
+    if (pg) {
+      const loaded = await pg.loadCheckoutContext(params);
+      if (!loaded.empty) {
+        const effectiveSettings = loaded.settings ?? this.state.settings;
+        // Keep in-memory catalog mirrors fresh for public bootstrap without marking full 12-table hydration complete
+        this.state.products = loaded.products;
+        this.state.coupons = loaded.coupons;
+        this.state.promotions = loaded.promotions;
+        this.state.settings = effectiveSettings;
+        if (loaded.paymentIntent) {
+          this.state.paymentIntents[loaded.paymentIntent.razorpayOrderId] = loaded.paymentIntent;
+        }
+        return {
+          products: loaded.products,
+          coupons: loaded.coupons,
+          promotions: loaded.promotions,
+          settings: effectiveSettings,
+          paymentIntent: loaded.paymentIntent,
+          existingOrderByPayment: loaded.existingOrderByPayment,
+          maxOrderSeq: loaded.maxOrderSeq,
+        };
+      }
+      // Brand-new empty Postgres DB: perform initial one-time seed hydration
+      await this.ensureLoaded({ forceRefresh: true });
+    }
+
+    const existingOrderByPayment =
+      params?.razorpayPaymentId || params?.razorpayOrderId
+        ? this.state.orders.find(
+            (o) =>
+              (params.razorpayPaymentId && o.razorpayPaymentId === params.razorpayPaymentId) ||
+              (params.razorpayOrderId && o.razorpayOrderId === params.razorpayOrderId)
+          ) ?? null
+        : null;
+
+    let maxOrderSeq = this.state.orders.length;
+    if (params?.includeOrderSequence) {
+      for (const existing of this.state.orders) {
+        const match = /^HIM-2026-(\d+)$/.exec(existing.orderNumber);
+        if (match) {
+          const seq = Number(match[1]);
+          if (seq > maxOrderSeq) maxOrderSeq = seq;
+        }
+      }
+    }
+
+    return {
+      products: this.state.products,
+      coupons: this.state.coupons,
+      promotions: this.state.promotions,
+      settings: this.state.settings,
+      paymentIntent: params?.razorpayOrderId
+        ? this.state.paymentIntents[params.razorpayOrderId] ?? null
+        : null,
+      existingOrderByPayment,
+      maxOrderSeq,
+    };
+  }
+
   /**
    * Atomically persists a newly placed Order + inventory stock decrement using a PostgreSQL ACID transaction
    * (or DynamoDB TransactWrite when DynamoDB is configured).
-   * Ensures 500 concurrent buyers cannot oversell stock or create duplicate orders.
+   * On PostgreSQL, also atomically updates promotion metrics, admin notification, and user default address
+   * inside the same transaction so no full 12-table persistState rewrite is needed.
    */
   async commitOrderAtomic(
     order: Order,
-    stockDecrements: Array<{ productId: string; quantity: number }>
-  ): Promise<void> {
+    stockDecrements: Array<{ productId: string; quantity: number }>,
+    extras?: {
+      promotionUpdate?: { promotionId: string; revenueDelta: number };
+      adminNotification?: AdminNotification;
+      userDefaultAddressUpdate?: { userId: string; address: ShippingAddress };
+    }
+  ): Promise<{ existingOrder?: Order; updatedProducts?: Array<{ id: string; stock: number }> }> {
     const pg = this.getPostgres();
     if (pg) {
-      await pg.transactCreateOrderAndDecrementStock({
+      const txResult = await pg.transactCreateOrderAndDecrementStock({
         order,
         stockDecrements,
+        promotionUpdate: extras?.promotionUpdate,
+        adminNotification: extras?.adminNotification,
+        userDefaultAddressUpdate: extras?.userDefaultAddressUpdate,
       });
-      this.commit();
-      await this.flushPendingSync();
-      return;
+
+      if (txResult.existingOrder) {
+        return { existingOrder: txResult.existingOrder };
+      }
+
+      // Sync authoritative decremented stock & order metadata into memory without running a full 12-table persistState()
+      for (const upd of txResult.updatedProducts) {
+        const prod = this.state.products.find((p) => p.id === upd.id);
+        if (prod) {
+          prod.stock = upd.stock;
+        }
+      }
+      if (!this.state.orders.some((o) => o.id === order.id)) {
+        this.state.orders.unshift(order);
+      }
+      if (
+        extras?.adminNotification &&
+        !this.state.adminNotifications.some((n) => n.id === extras.adminNotification!.id)
+      ) {
+        this.state.adminNotifications.unshift(extras.adminNotification);
+      }
+      if (extras?.userDefaultAddressUpdate) {
+        const u = this.state.users.find((usr) => usr.id === extras.userDefaultAddressUpdate!.userId);
+        if (u && !u.defaultAddress) {
+          u.defaultAddress = extras.userDefaultAddressUpdate.address;
+        }
+      }
+
+      this.stateVersion += 1;
+      this.publicBootstrapCache = null;
+      this.lastSyncedAt = new Date().toISOString();
+      this.lastCloudError = null;
+      this.lastCommitError = null;
+      return { updatedProducts: txResult.updatedProducts };
     }
 
     const adapter = this.getDynamo();
     if (!adapter) {
       this.commit();
-      return;
+      return {};
     }
 
     const orderItem = {
@@ -1290,6 +1434,7 @@ class StoreRepository {
     this.lastPersistedFingerprints.set(orderItem.pk, buildItemFingerprint(orderItem));
     this.commit();
     await this.flushPendingSync();
+    return {};
   }
 
   commit() {

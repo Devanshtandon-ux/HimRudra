@@ -5,7 +5,7 @@ var __export = (target, all) => {
 };
 
 // server.ts
-import crypto5 from "node:crypto";
+import crypto6 from "node:crypto";
 import fs2 from "node:fs";
 import os2 from "node:os";
 import path2 from "node:path";
@@ -1278,9 +1278,11 @@ var createPool = () => {
         password: decodeURIComponent(parsed.password),
         database: parsed.pathname.replace(/^\//, ""),
         ...sslDisabled ? {} : { ssl: { rejectUnauthorized: false } },
-        max: process.env.VERCEL ? 5 : 15,
-        idleTimeoutMillis: 3e4,
-        connectionTimeoutMillis: 15e3
+        max: process.env.VERCEL ? 3 : 10,
+        idleTimeoutMillis: process.env.VERCEL ? 1e4 : 3e4,
+        connectionTimeoutMillis: process.env.VERCEL ? 8e3 : 15e3,
+        keepAlive: true,
+        allowExitOnIdle: Boolean(process.env.VERCEL)
       });
     } else {
       const sslMode = (process.env.SQL_SSL || "").trim().toLowerCase();
@@ -1308,7 +1310,234 @@ var pool = createPool();
 var db = drizzle(pool, { schema: schema_exports });
 
 // src/db/postgresAdapter.ts
-import { and, asc, eq, gte, notInArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, notInArray, or, sql } from "drizzle-orm";
+function getPgErrorCode(error) {
+  if (!error || typeof error !== "object") return "";
+  const direct = error.code;
+  if (typeof direct === "string" && direct) return direct;
+  const cause = error.cause;
+  if (cause && typeof cause.code === "string") return cause.code;
+  return "";
+}
+function isUndefinedTableError(error) {
+  if (getPgErrorCode(error) === "42P01") return true;
+  const msg = error instanceof Error ? error.message : String(error);
+  return /relation ["']?[a-z_]+["']? does not exist/i.test(msg);
+}
+function isTransientConnectionError(error) {
+  const code = getPgErrorCode(error);
+  if (code === "ECONNRESET" || code === "ETIMEDOUT" || code === "EPIPE" || code === "57P01" || code === "08006" || code === "08003") {
+    return true;
+  }
+  const msg = error instanceof Error ? error.message : String(error);
+  return /ECONNRESET|Connection terminated unexpectedly|terminating connection|socket hang up/i.test(
+    msg
+  );
+}
+var EXTERNAL_SCHEMA_DDL = `
+CREATE TABLE IF NOT EXISTS users (
+  id text PRIMARY KEY,
+  uid text UNIQUE,
+  name text NOT NULL,
+  email text NOT NULL UNIQUE,
+  phone text NOT NULL DEFAULT '',
+  role text NOT NULL DEFAULT 'customer',
+  password_hash text NOT NULL,
+  default_address jsonb,
+  wishlist_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_at text NOT NULL,
+  updated_at timestamp DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS products (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  slug text NOT NULL UNIQUE,
+  name text NOT NULL,
+  subtitle text NOT NULL,
+  net_quantity text NOT NULL,
+  sku text NOT NULL,
+  hsn_code text NOT NULL,
+  mrp double precision NOT NULL,
+  price double precision NOT NULL,
+  cost_per_unit double precision NOT NULL,
+  stock integer NOT NULL DEFAULT 0,
+  low_stock_threshold integer NOT NULL DEFAULT 10,
+  batch_number text NOT NULL,
+  gst_rate_percent double precision NOT NULL DEFAULT 12,
+  short_description text NOT NULL,
+  usage_guidance text NOT NULL,
+  storage_instructions text NOT NULL,
+  shipping_note text NOT NULL,
+  return_policy text NOT NULL,
+  specifications jsonb NOT NULL DEFAULT '[]'::jsonb,
+  gallery_types jsonb NOT NULL DEFAULT '[]'::jsonb,
+  custom_images jsonb,
+  active boolean NOT NULL DEFAULT true,
+  updated_at timestamp DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS orders (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  order_number text NOT NULL UNIQUE,
+  user_id text REFERENCES users(id) ON DELETE SET NULL,
+  customer_name text NOT NULL,
+  customer_email text NOT NULL,
+  customer_phone text NOT NULL,
+  shipping_address jsonb NOT NULL,
+  delivery_instructions text,
+  items jsonb NOT NULL,
+  subtotal double precision NOT NULL,
+  mrp_total double precision NOT NULL,
+  instant_savings double precision NOT NULL,
+  coupon_code text,
+  coupon_discount double precision NOT NULL DEFAULT 0,
+  promotion_id text,
+  promotion_title text,
+  shipping_fee double precision NOT NULL DEFAULT 0,
+  shipping_speed text NOT NULL DEFAULT 'standard',
+  cod_fee double precision NOT NULL DEFAULT 0,
+  taxable_value double precision NOT NULL,
+  gst_amount double precision NOT NULL,
+  total_amount double precision NOT NULL,
+  gateway_fee_amount double precision,
+  actual_shipping_cost double precision,
+  payment_method text NOT NULL,
+  payment_status text NOT NULL,
+  razorpay_order_id text,
+  razorpay_payment_id text,
+  payment_verified_at text,
+  status text NOT NULL,
+  tracking_number text,
+  courier_name text,
+  tracking_url text,
+  estimated_delivery text,
+  dispatched_at text,
+  delivered_at text,
+  refund_amount double precision,
+  refund_reason text,
+  refund_requested_at text,
+  timeline jsonb NOT NULL DEFAULT '[]'::jsonb,
+  created_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS coupons (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  code text NOT NULL UNIQUE,
+  type text NOT NULL,
+  value double precision NOT NULL,
+  min_order_value double precision NOT NULL DEFAULT 0,
+  max_discount double precision,
+  active boolean NOT NULL DEFAULT true,
+  description text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS promotions (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  title text NOT NULL,
+  description text NOT NULL,
+  banner_headline text NOT NULL,
+  banner_subtext text NOT NULL,
+  banner_theme text NOT NULL,
+  starts_at text NOT NULL,
+  ends_at text NOT NULL,
+  free_shipping boolean NOT NULL DEFAULT false,
+  free_shipping_speed text NOT NULL DEFAULT 'standard',
+  discount_percent double precision NOT NULL DEFAULT 0,
+  promo_code text,
+  enabled boolean NOT NULL DEFAULT true,
+  usage_count integer NOT NULL DEFAULT 0,
+  revenue_generated double precision NOT NULL DEFAULT 0,
+  created_at text NOT NULL,
+  updated_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS lab_reports (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  batch_number text NOT NULL DEFAULT '',
+  tested_batch_number text NOT NULL,
+  report_number text NOT NULL,
+  laboratory_name text NOT NULL,
+  accreditation text NOT NULL DEFAULT '',
+  test_date text NOT NULL,
+  expiry_date text NOT NULL DEFAULT '',
+  sample_description text NOT NULL DEFAULT '',
+  fulvic_acid_percent text NOT NULL DEFAULT '',
+  heavy_metals jsonb NOT NULL DEFAULT '[]'::jsonb,
+  microbiological jsonb NOT NULL DEFAULT '[]'::jsonb,
+  verdict text NOT NULL DEFAULT 'Reference Sample',
+  summary_note text NOT NULL DEFAULT '',
+  mapped_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
+  testing_methodology text NOT NULL DEFAULT '',
+  verified_status text NOT NULL DEFAULT 'Reference Sample',
+  notes text NOT NULL DEFAULT '',
+  updated_at text NOT NULL DEFAULT '',
+  custom_document_url text,
+  original_file_name text,
+  original_mime_type text
+);
+CREATE TABLE IF NOT EXISTS cms_sections (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  key text NOT NULL,
+  title text NOT NULL,
+  category text NOT NULL,
+  content text NOT NULL,
+  approved_by_admin boolean NOT NULL DEFAULT false,
+  approved_at text,
+  updated_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS expenses (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  date text NOT NULL,
+  category text NOT NULL,
+  description text NOT NULL,
+  amount double precision NOT NULL
+);
+CREATE TABLE IF NOT EXISTS inquiries (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  name text NOT NULL,
+  email text NOT NULL,
+  phone text NOT NULL DEFAULT '',
+  subject text NOT NULL,
+  message text NOT NULL,
+  status text NOT NULL DEFAULT 'New',
+  reply_message text,
+  replied_at text,
+  replied_via jsonb,
+  email_delivery_status text,
+  created_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS admin_notifications (
+  id text PRIMARY KEY,
+  sort_order integer NOT NULL DEFAULT 0,
+  type text NOT NULL,
+  title text NOT NULL,
+  message text NOT NULL,
+  order_id text,
+  order_number text,
+  customer_name text,
+  amount double precision,
+  read boolean NOT NULL DEFAULT false,
+  email_notified_to text,
+  created_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS payment_intents (
+  razorpay_order_id text PRIMARY KEY,
+  amount_paise integer NOT NULL,
+  verified boolean NOT NULL DEFAULT false,
+  payment_id text,
+  signature_verified boolean NOT NULL DEFAULT false,
+  method text NOT NULL,
+  created_at text NOT NULL
+);
+CREATE TABLE IF NOT EXISTS store_settings (
+  id text PRIMARY KEY,
+  payload jsonb NOT NULL,
+  updated_at timestamp DEFAULT now()
+);
+`;
 function isTableEmpty(state) {
   return state.userCount === 0 && state.productCount === 0 && state.settingsCount === 0;
 }
@@ -1318,9 +1547,9 @@ var PostgresStateAdapter = class {
     this.externalSchemaPromise = null;
   }
   /**
-   * When deployed externally (e.g. Vercel + Neon / Supabase via DATABASE_URL),
-   * ensures the 12 relational tables exist on a fresh database without manual CLI migration.
-   * Skipped completely on AI Studio Cloud SQL where Drizzle manages DDL.
+   * Lazily provisions the 12 relational tables in a single SQL batch ONLY if an external
+   * Postgres database (e.g., fresh Neon DB via DATABASE_URL) reports undefined_table (42P01).
+   * Eliminates 12 sequential DDL round-trips from every Vercel cold start.
    */
   async ensureExternalSchemaIfNeeded() {
     if (this.externalSchemaReady || !isUsingExternalPostgresUrl()) return;
@@ -1328,219 +1557,188 @@ var PostgresStateAdapter = class {
       await this.externalSchemaPromise;
       return;
     }
+    const startedAt = Date.now();
     this.externalSchemaPromise = (async () => {
-      const statements = [
-        sql`CREATE TABLE IF NOT EXISTS users (
-          id text PRIMARY KEY,
-          uid text UNIQUE,
-          name text NOT NULL,
-          email text NOT NULL UNIQUE,
-          phone text NOT NULL DEFAULT '',
-          role text NOT NULL DEFAULT 'customer',
-          password_hash text NOT NULL,
-          default_address jsonb,
-          wishlist_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
-          created_at text NOT NULL,
-          updated_at timestamp DEFAULT now()
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS products (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          slug text NOT NULL UNIQUE,
-          name text NOT NULL,
-          subtitle text NOT NULL,
-          net_quantity text NOT NULL,
-          sku text NOT NULL,
-          hsn_code text NOT NULL,
-          mrp double precision NOT NULL,
-          price double precision NOT NULL,
-          cost_per_unit double precision NOT NULL,
-          stock integer NOT NULL DEFAULT 0,
-          low_stock_threshold integer NOT NULL DEFAULT 10,
-          batch_number text NOT NULL,
-          gst_rate_percent double precision NOT NULL DEFAULT 12,
-          short_description text NOT NULL,
-          usage_guidance text NOT NULL,
-          storage_instructions text NOT NULL,
-          shipping_note text NOT NULL,
-          return_policy text NOT NULL,
-          specifications jsonb NOT NULL DEFAULT '[]'::jsonb,
-          gallery_types jsonb NOT NULL DEFAULT '[]'::jsonb,
-          custom_images jsonb,
-          active boolean NOT NULL DEFAULT true,
-          updated_at timestamp DEFAULT now()
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS orders (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          order_number text NOT NULL UNIQUE,
-          user_id text REFERENCES users(id) ON DELETE SET NULL,
-          customer_name text NOT NULL,
-          customer_email text NOT NULL,
-          customer_phone text NOT NULL,
-          shipping_address jsonb NOT NULL,
-          delivery_instructions text,
-          items jsonb NOT NULL,
-          subtotal double precision NOT NULL,
-          mrp_total double precision NOT NULL,
-          instant_savings double precision NOT NULL,
-          coupon_code text,
-          coupon_discount double precision NOT NULL DEFAULT 0,
-          promotion_id text,
-          promotion_title text,
-          shipping_fee double precision NOT NULL DEFAULT 0,
-          shipping_speed text NOT NULL DEFAULT 'standard',
-          cod_fee double precision NOT NULL DEFAULT 0,
-          taxable_value double precision NOT NULL,
-          gst_amount double precision NOT NULL,
-          total_amount double precision NOT NULL,
-          gateway_fee_amount double precision,
-          actual_shipping_cost double precision,
-          payment_method text NOT NULL,
-          payment_status text NOT NULL,
-          razorpay_order_id text,
-          razorpay_payment_id text,
-          payment_verified_at text,
-          status text NOT NULL,
-          tracking_number text,
-          courier_name text,
-          tracking_url text,
-          estimated_delivery text,
-          dispatched_at text,
-          delivered_at text,
-          refund_amount double precision,
-          refund_reason text,
-          refund_requested_at text,
-          timeline jsonb NOT NULL DEFAULT '[]'::jsonb,
-          created_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS coupons (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          code text NOT NULL UNIQUE,
-          type text NOT NULL,
-          value double precision NOT NULL,
-          min_order_value double precision NOT NULL DEFAULT 0,
-          max_discount double precision,
-          active boolean NOT NULL DEFAULT true,
-          description text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS promotions (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          title text NOT NULL,
-          description text NOT NULL,
-          banner_headline text NOT NULL,
-          banner_subtext text NOT NULL,
-          banner_theme text NOT NULL,
-          starts_at text NOT NULL,
-          ends_at text NOT NULL,
-          free_shipping boolean NOT NULL DEFAULT false,
-          free_shipping_speed text NOT NULL DEFAULT 'standard',
-          discount_percent double precision NOT NULL DEFAULT 0,
-          promo_code text,
-          enabled boolean NOT NULL DEFAULT true,
-          usage_count integer NOT NULL DEFAULT 0,
-          revenue_generated double precision NOT NULL DEFAULT 0,
-          created_at text NOT NULL,
-          updated_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS lab_reports (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          batch_number text NOT NULL DEFAULT '',
-          tested_batch_number text NOT NULL,
-          report_number text NOT NULL,
-          laboratory_name text NOT NULL,
-          accreditation text NOT NULL DEFAULT '',
-          test_date text NOT NULL,
-          expiry_date text NOT NULL DEFAULT '',
-          sample_description text NOT NULL DEFAULT '',
-          fulvic_acid_percent text NOT NULL DEFAULT '',
-          heavy_metals jsonb NOT NULL DEFAULT '[]'::jsonb,
-          microbiological jsonb NOT NULL DEFAULT '[]'::jsonb,
-          verdict text NOT NULL DEFAULT 'Reference Sample',
-          summary_note text NOT NULL DEFAULT '',
-          mapped_product_ids jsonb NOT NULL DEFAULT '[]'::jsonb,
-          testing_methodology text NOT NULL DEFAULT '',
-          verified_status text NOT NULL DEFAULT 'Reference Sample',
-          notes text NOT NULL DEFAULT '',
-          updated_at text NOT NULL DEFAULT '',
-          custom_document_url text,
-          original_file_name text,
-          original_mime_type text
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS cms_sections (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          key text NOT NULL,
-          title text NOT NULL,
-          category text NOT NULL,
-          content text NOT NULL,
-          approved_by_admin boolean NOT NULL DEFAULT false,
-          approved_at text,
-          updated_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS expenses (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          date text NOT NULL,
-          category text NOT NULL,
-          description text NOT NULL,
-          amount double precision NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS inquiries (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          name text NOT NULL,
-          email text NOT NULL,
-          phone text NOT NULL DEFAULT '',
-          subject text NOT NULL,
-          message text NOT NULL,
-          status text NOT NULL DEFAULT 'New',
-          reply_message text,
-          replied_at text,
-          replied_via jsonb,
-          email_delivery_status text,
-          created_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS admin_notifications (
-          id text PRIMARY KEY,
-          sort_order integer NOT NULL DEFAULT 0,
-          type text NOT NULL,
-          title text NOT NULL,
-          message text NOT NULL,
-          order_id text,
-          order_number text,
-          customer_name text,
-          amount double precision,
-          read boolean NOT NULL DEFAULT false,
-          email_notified_to text,
-          created_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS payment_intents (
-          razorpay_order_id text PRIMARY KEY,
-          amount_paise integer NOT NULL,
-          verified boolean NOT NULL DEFAULT false,
-          payment_id text,
-          signature_verified boolean NOT NULL DEFAULT false,
-          method text NOT NULL,
-          created_at text NOT NULL
-        )`,
-        sql`CREATE TABLE IF NOT EXISTS store_settings (
-          id text PRIMARY KEY,
-          payload jsonb NOT NULL,
-          updated_at timestamp DEFAULT now()
-        )`
-      ];
-      for (const stmt of statements) {
-        await db.execute(stmt);
-      }
+      const pool2 = createPool();
+      await pool2.query(EXTERNAL_SCHEMA_DDL);
       this.externalSchemaReady = true;
+      logStructured("info", "cloud-sql", "external_schema_bootstrapped", {
+        durationMs: Date.now() - startedAt
+      });
     })().finally(() => {
       this.externalSchemaPromise = null;
     });
     await this.externalSchemaPromise;
+  }
+  /**
+   * Executes a Postgres operation without upfront DDL round-trips.
+   * Automatically bootstraps external schema once on 42P01 and retries once on transient
+   * idle-socket resets (common when Neon compute wakes from scale-to-zero).
+   */
+  async runWithRecovery(operation) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (isUsingExternalPostgresUrl() && isUndefinedTableError(error)) {
+        await this.ensureExternalSchemaIfNeeded();
+        return await operation();
+      }
+      if (isTransientConnectionError(error)) {
+        logStructured("warn", "cloud-sql", "transient_connection_retry", {
+          code: getPgErrorCode(error) || "connection_reset"
+        });
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        return await operation();
+      }
+      throw error;
+    }
+  }
+  /**
+   * Single-round-trip public storefront bootstrap query.
+   * Fetches ONLY the 6 public tables (products, store_settings, coupons, promotions,
+   * lab_reports, cms_sections) using one SQL query over one pooled connection — avoiding
+   * full 12-table hydration and private tables (users, orders, expenses, inquiries, etc.).
+   */
+  async loadPublicBootstrap() {
+    const startedAt = Date.now();
+    try {
+      const result = await this.runWithRecovery(async () => {
+        const pool2 = createPool();
+        return pool2.query(`
+          SELECT
+            (SELECT COALESCE(json_agg(t ORDER BY t.sort_order ASC), '[]'::json)
+             FROM products t WHERE t.active = true) AS products,
+            (SELECT COALESCE(json_agg(t ORDER BY t.sort_order ASC), '[]'::json)
+             FROM coupons t WHERE t.active = true) AS coupons,
+            (SELECT COALESCE(json_agg(t ORDER BY t.sort_order ASC), '[]'::json)
+             FROM promotions t) AS promotions,
+            (SELECT COALESCE(json_agg(t ORDER BY t.sort_order ASC), '[]'::json)
+             FROM lab_reports t) AS lab_reports,
+            (SELECT COALESCE(json_agg(t ORDER BY t.sort_order ASC), '[]'::json)
+             FROM cms_sections t WHERE t.approved_by_admin = true) AS cms_sections,
+            (SELECT payload FROM store_settings WHERE id = 'default' LIMIT 1) AS settings
+        `);
+      });
+      const dbMs = Date.now() - startedAt;
+      const row = result.rows[0];
+      const rawProducts = Array.isArray(row?.products) ? row.products : [];
+      const rawCoupons = Array.isArray(row?.coupons) ? row.coupons : [];
+      const rawPromotions = Array.isArray(row?.promotions) ? row.promotions : [];
+      const rawLabReports = Array.isArray(row?.lab_reports) ? row.lab_reports : [];
+      const rawCms = Array.isArray(row?.cms_sections) ? row.cms_sections : [];
+      const rawSettings = row?.settings ?? null;
+      if (rawProducts.length === 0 && !rawSettings) {
+        return {
+          empty: true,
+          data: {
+            products: [],
+            settings: null,
+            coupons: [],
+            promotions: [],
+            labReports: [],
+            cmsSections: []
+          },
+          dbMs
+        };
+      }
+      const mappedProducts = rawProducts.map((r) => ({
+        id: String(r.id),
+        slug: String(r.slug),
+        name: String(r.name),
+        subtitle: String(r.subtitle),
+        netQuantity: String(r.net_quantity),
+        sku: String(r.sku),
+        hsnCode: String(r.hsn_code),
+        mrp: Number(r.mrp),
+        price: Number(r.price),
+        costPerUnit: Number(r.cost_per_unit),
+        stock: Number(r.stock),
+        lowStockThreshold: Number(r.low_stock_threshold),
+        batchNumber: String(r.batch_number),
+        gstRatePercent: Number(r.gst_rate_percent),
+        shortDescription: String(r.short_description),
+        usageGuidance: String(r.usage_guidance),
+        storageInstructions: String(r.storage_instructions),
+        shippingNote: String(r.shipping_note),
+        returnPolicy: String(r.return_policy),
+        specifications: Array.isArray(r.specifications) ? r.specifications : [],
+        galleryTypes: Array.isArray(r.gallery_types) ? r.gallery_types : [],
+        customImages: Array.isArray(r.custom_images) ? r.custom_images : void 0,
+        active: Boolean(r.active)
+      }));
+      const mappedCoupons = rawCoupons.map((r) => ({
+        code: String(r.code),
+        discountType: r.type === "flat" ? "flat" : "percent",
+        value: Number(r.value),
+        minOrderAmount: Number(r.min_order_value),
+        active: Boolean(r.active),
+        description: String(r.description)
+      }));
+      const mappedPromotions = rawPromotions.map((r) => ({
+        id: String(r.id),
+        title: String(r.title),
+        description: String(r.description),
+        bannerHeadline: String(r.banner_headline),
+        bannerSubtext: String(r.banner_subtext),
+        bannerTheme: r.banner_theme,
+        startsAt: String(r.starts_at),
+        endsAt: String(r.ends_at),
+        freeShipping: Boolean(r.free_shipping),
+        freeShippingSpeed: r.free_shipping_speed === "all" ? "all" : "standard",
+        discountPercent: Number(r.discount_percent),
+        promoCode: r.promo_code ? String(r.promo_code) : void 0,
+        enabled: Boolean(r.enabled),
+        usageCount: Number(r.usage_count),
+        revenueGenerated: Number(r.revenue_generated),
+        createdAt: String(r.created_at),
+        updatedAt: String(r.updated_at)
+      }));
+      const mappedLabReports = rawLabReports.map((r) => ({
+        id: String(r.id),
+        laboratoryName: String(r.laboratory_name),
+        reportNumber: String(r.report_number),
+        testedBatchNumber: String(r.tested_batch_number),
+        testDate: String(r.test_date),
+        mappedProductIds: Array.isArray(r.mapped_product_ids) ? r.mapped_product_ids : [],
+        testingMethodology: String(r.testing_methodology || r.accreditation || ""),
+        verifiedStatus: r.verified_status === "Verified" || r.verified_status === "Pending Verification" ? r.verified_status : "Reference Sample",
+        notes: String(r.notes || r.summary_note || ""),
+        customDocumentUrl: r.custom_document_url ? String(r.custom_document_url) : void 0,
+        originalFileName: r.original_file_name ? String(r.original_file_name) : void 0,
+        originalMimeType: r.original_mime_type ? String(r.original_mime_type) : void 0,
+        heavyMetals: Array.isArray(r.heavy_metals) ? r.heavy_metals : [],
+        microbiological: Array.isArray(r.microbiological) ? r.microbiological : [],
+        updatedAt: String(r.updated_at || r.test_date)
+      }));
+      const mappedCms = rawCms.map((r) => ({
+        id: String(r.id),
+        key: String(r.key),
+        title: String(r.title),
+        category: r.category === "faq" ? "faq" : "product",
+        content: String(r.content),
+        approvedByAdmin: Boolean(r.approved_by_admin),
+        approvedAt: r.approved_at ? String(r.approved_at) : void 0,
+        updatedAt: String(r.updated_at)
+      }));
+      return {
+        empty: false,
+        data: {
+          products: mappedProducts,
+          settings: rawSettings,
+          coupons: mappedCoupons,
+          promotions: mappedPromotions,
+          labReports: mappedLabReports,
+          cmsSections: mappedCms
+        },
+        dbMs
+      };
+    } catch (error) {
+      logStructured("error", "cloud-sql", "load_public_bootstrap_failed", {
+        durationMs: Date.now() - startedAt,
+        code: getPgErrorCode(error) || "unknown"
+      });
+      throw error;
+    }
   }
   mapUserRow(row) {
     return {
@@ -1555,11 +1753,270 @@ var PostgresStateAdapter = class {
       createdAt: row.createdAt
     };
   }
+  mapProductRow(row) {
+    return {
+      id: row.id,
+      slug: row.slug,
+      name: row.name,
+      subtitle: row.subtitle,
+      netQuantity: row.netQuantity,
+      sku: row.sku,
+      hsnCode: row.hsnCode,
+      mrp: row.mrp,
+      price: row.price,
+      costPerUnit: row.costPerUnit,
+      stock: row.stock,
+      lowStockThreshold: row.lowStockThreshold,
+      batchNumber: row.batchNumber,
+      gstRatePercent: row.gstRatePercent,
+      shortDescription: row.shortDescription,
+      usageGuidance: row.usageGuidance,
+      storageInstructions: row.storageInstructions,
+      shippingNote: row.shippingNote,
+      returnPolicy: row.returnPolicy,
+      specifications: Array.isArray(row.specifications) ? row.specifications : [],
+      galleryTypes: Array.isArray(row.galleryTypes) ? row.galleryTypes : [],
+      customImages: Array.isArray(row.customImages) ? row.customImages : void 0,
+      active: row.active
+    };
+  }
+  mapOrderRow(row) {
+    return {
+      id: row.id,
+      orderNumber: row.orderNumber,
+      userId: row.userId ?? void 0,
+      customerName: row.customerName,
+      customerEmail: row.customerEmail,
+      customerPhone: row.customerPhone,
+      shippingAddress: row.shippingAddress,
+      deliveryInstructions: row.deliveryInstructions ?? void 0,
+      items: Array.isArray(row.items) ? row.items : [],
+      subtotal: row.subtotal,
+      mrpTotal: row.mrpTotal,
+      instantSavings: row.instantSavings,
+      couponCode: row.couponCode ?? void 0,
+      couponDiscount: row.couponDiscount,
+      promotionId: row.promotionId ?? void 0,
+      promotionTitle: row.promotionTitle ?? void 0,
+      shippingFee: row.shippingFee,
+      shippingSpeed: row.shippingSpeed === "express" ? "express" : "standard",
+      codFee: row.codFee,
+      taxableValue: row.taxableValue,
+      gstAmount: row.gstAmount,
+      totalAmount: row.totalAmount,
+      gatewayFeeAmount: row.gatewayFeeAmount ?? void 0,
+      actualShippingCost: row.actualShippingCost ?? void 0,
+      paymentMethod: row.paymentMethod,
+      paymentStatus: row.paymentStatus,
+      razorpayOrderId: row.razorpayOrderId ?? void 0,
+      razorpayPaymentId: row.razorpayPaymentId ?? void 0,
+      paymentVerifiedAt: row.paymentVerifiedAt ?? void 0,
+      status: row.status,
+      courierPartner: row.courierName ?? void 0,
+      trackingNumber: row.trackingNumber ?? void 0,
+      trackingUrl: row.trackingUrl ?? void 0,
+      estimatedDelivery: row.estimatedDelivery ?? void 0,
+      dispatchedAt: row.dispatchedAt ?? void 0,
+      deliveredAt: row.deliveredAt ?? void 0,
+      refundAmount: row.refundAmount ?? void 0,
+      refundReason: row.refundReason ?? void 0,
+      refundRequestedAt: row.refundRequestedAt ?? void 0,
+      timeline: Array.isArray(row.timeline) ? row.timeline : [],
+      createdAt: row.createdAt
+    };
+  }
+  mapPaymentIntentRow(row) {
+    return {
+      razorpayOrderId: row.razorpayOrderId,
+      amountPaise: row.amountPaise,
+      verified: row.verified,
+      paymentId: row.paymentId ?? void 0,
+      signatureVerified: row.signatureVerified,
+      method: row.method,
+      createdAt: row.createdAt
+    };
+  }
+  /**
+   * Targeted single-row upsert for a Razorpay payment intent.
+   * Avoids rewriting all 12 tables during /api/payments/create-order and /api/payments/verify.
+   */
+  async upsertPaymentIntent(intent) {
+    const startedAt = Date.now();
+    try {
+      await this.runWithRecovery(
+        () => db.insert(paymentIntents).values({
+          razorpayOrderId: intent.razorpayOrderId,
+          amountPaise: intent.amountPaise,
+          verified: intent.verified,
+          paymentId: intent.paymentId ?? null,
+          signatureVerified: intent.signatureVerified,
+          method: intent.method,
+          createdAt: intent.createdAt
+        }).onConflictDoUpdate({
+          target: paymentIntents.razorpayOrderId,
+          set: {
+            amountPaise: intent.amountPaise,
+            verified: intent.verified,
+            paymentId: intent.paymentId ?? null,
+            signatureVerified: intent.signatureVerified,
+            method: intent.method
+          }
+        })
+      );
+      logStructured("info", "cloud-sql", "upsert_payment_intent_success", {
+        verified: intent.verified,
+        durationMs: Date.now() - startedAt
+      });
+    } catch (error) {
+      logStructured("error", "cloud-sql", "upsert_payment_intent_failed", {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new StorePersistenceError("Unable to save payment session right now. Please try again.", {
+        code: "POSTGRES_PAYMENT_INTENT_WRITE_FAILED",
+        statusCode: 503,
+        retryable: true
+      });
+    }
+  }
+  /**
+   * Targeted single-row lookup for a Razorpay payment intent by razorpayOrderId.
+   */
+  async findPaymentIntent(razorpayOrderId) {
+    const startedAt = Date.now();
+    try {
+      const rows = await this.runWithRecovery(
+        () => db.select().from(paymentIntents).where(eq(paymentIntents.razorpayOrderId, razorpayOrderId)).limit(1)
+      );
+      logStructured("info", "cloud-sql", "find_payment_intent_success", {
+        found: rows.length > 0,
+        durationMs: Date.now() - startedAt
+      });
+      return rows[0] ? this.mapPaymentIntentRow(rows[0]) : null;
+    } catch (error) {
+      logStructured("error", "cloud-sql", "find_payment_intent_failed", {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new StorePersistenceError("Unable to verify payment session right now. Please try again.", {
+        code: "POSTGRES_PAYMENT_INTENT_READ_FAILED",
+        statusCode: 503,
+        retryable: true
+      });
+    }
+  }
+  /**
+   * Loads only the minimal tables required for checkout pricing, stock validation,
+   * payment intent verification, order idempotency, and next order sequence numbering.
+   * Skips users, all historical orders, lab_reports, cms_sections, expenses, inquiries, and notifications.
+   */
+  async loadCheckoutContext(params) {
+    const startedAt = Date.now();
+    try {
+      const [
+        productRows,
+        couponRows,
+        promotionRows,
+        settingsRows,
+        intentRows,
+        existingOrderRows,
+        seqResult
+      ] = await this.runWithRecovery(
+        () => Promise.all([
+          db.select().from(products).orderBy(asc(products.sortOrder)),
+          db.select().from(coupons).orderBy(asc(coupons.sortOrder)),
+          db.select().from(promotions).orderBy(asc(promotions.sortOrder)),
+          db.select().from(storeSettings).where(eq(storeSettings.id, "default")).limit(1),
+          params?.razorpayOrderId ? db.select().from(paymentIntents).where(eq(paymentIntents.razorpayOrderId, params.razorpayOrderId)).limit(1) : Promise.resolve([]),
+          params?.razorpayPaymentId || params?.razorpayOrderId ? db.select().from(orders).where(
+            params.razorpayPaymentId && params.razorpayOrderId ? or(
+              eq(orders.razorpayPaymentId, params.razorpayPaymentId),
+              eq(orders.razorpayOrderId, params.razorpayOrderId)
+            ) : params.razorpayPaymentId ? eq(orders.razorpayPaymentId, params.razorpayPaymentId) : eq(orders.razorpayOrderId, params.razorpayOrderId)
+          ).limit(1) : Promise.resolve([]),
+          params?.includeOrderSequence ? db.execute(
+            sql`SELECT
+                  GREATEST(
+                    COUNT(*)::int,
+                    COALESCE(
+                      MAX(
+                        CASE
+                          WHEN order_number ~ '^HIM-2026-[0-9]+$'
+                          THEN SUBSTRING(order_number FROM '^HIM-2026-([0-9]+)$')::int
+                          ELSE 0
+                        END
+                      ),
+                      0
+                    )
+                  ) AS max_seq
+                FROM orders`
+          ) : Promise.resolve(null)
+        ])
+      );
+      const rawSeqRow = seqResult && Array.isArray(seqResult.rows) ? seqResult.rows[0] ?? null : null;
+      const maxOrderSeq = Number(rawSeqRow?.max_seq ?? 0) || 0;
+      const mappedProducts = productRows.map((row) => this.mapProductRow(row));
+      const mappedCoupons = couponRows.map((row) => ({
+        code: row.code,
+        discountType: row.type === "flat" ? "flat" : "percent",
+        value: row.value,
+        minOrderAmount: row.minOrderValue,
+        active: row.active,
+        description: row.description
+      }));
+      const mappedPromotions = promotionRows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        description: row.description,
+        bannerHeadline: row.bannerHeadline,
+        bannerSubtext: row.bannerSubtext,
+        bannerTheme: row.bannerTheme,
+        startsAt: row.startsAt,
+        endsAt: row.endsAt,
+        freeShipping: row.freeShipping,
+        freeShippingSpeed: row.freeShippingSpeed === "all" ? "all" : "standard",
+        discountPercent: row.discountPercent,
+        promoCode: row.promoCode ?? void 0,
+        enabled: row.enabled,
+        usageCount: row.usageCount,
+        revenueGenerated: row.revenueGenerated,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt
+      }));
+      logStructured("info", "cloud-sql", "load_checkout_context_success", {
+        productCount: mappedProducts.length,
+        hasIntent: intentRows.length > 0,
+        hasExistingOrder: existingOrderRows.length > 0,
+        durationMs: Date.now() - startedAt
+      });
+      return {
+        empty: mappedProducts.length === 0 && settingsRows.length === 0,
+        products: mappedProducts,
+        coupons: mappedCoupons,
+        promotions: mappedPromotions,
+        settings: settingsRows[0]?.payload ?? null,
+        paymentIntent: intentRows[0] ? this.mapPaymentIntentRow(intentRows[0]) : null,
+        existingOrderByPayment: existingOrderRows[0] ? this.mapOrderRow(existingOrderRows[0]) : null,
+        maxOrderSeq
+      };
+    } catch (error) {
+      logStructured("error", "cloud-sql", "load_checkout_context_failed", {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new StorePersistenceError("Database read failed during checkout. Please try again shortly.", {
+        code: "POSTGRES_CHECKOUT_READ_FAILED",
+        statusCode: 503,
+        retryable: true
+      });
+    }
+  }
   async findUserByEmail(email) {
     try {
-      await this.ensureExternalSchemaIfNeeded();
       const normalized = email.trim().toLowerCase();
-      const rows = await db.select().from(users).where(eq(users.email, normalized)).limit(1);
+      const rows = await this.runWithRecovery(
+        () => db.select().from(users).where(eq(users.email, normalized)).limit(1)
+      );
       return rows[0] ? this.mapUserRow(rows[0]) : null;
     } catch (error) {
       logStructured("error", "cloud-sql", "find_user_by_email_failed", {
@@ -1574,8 +2031,9 @@ var PostgresStateAdapter = class {
   }
   async findUserById(id) {
     try {
-      await this.ensureExternalSchemaIfNeeded();
-      const rows = await db.select().from(users).where(eq(users.id, id)).limit(1);
+      const rows = await this.runWithRecovery(
+        () => db.select().from(users).where(eq(users.id, id)).limit(1)
+      );
       return rows[0] ? this.mapUserRow(rows[0]) : null;
     } catch (error) {
       logStructured("error", "cloud-sql", "find_user_by_id_failed", {
@@ -1596,31 +2054,32 @@ var PostgresStateAdapter = class {
     const startedAt = Date.now();
     const normalizedEmail = user.email.trim().toLowerCase();
     try {
-      await this.ensureExternalSchemaIfNeeded();
-      const rows = await db.insert(users).values({
-        id: user.id,
-        ...uid ? { uid } : {},
-        name: user.name,
-        email: normalizedEmail,
-        phone: user.phone ?? "",
-        role: user.role,
-        passwordHash: user.passwordHash,
-        defaultAddress: user.defaultAddress ?? null,
-        wishlistProductIds: user.wishlistProductIds ?? [],
-        createdAt: user.createdAt,
-        updatedAt: /* @__PURE__ */ new Date()
-      }).onConflictDoUpdate({
-        target: users.email,
-        set: {
+      const rows = await this.runWithRecovery(
+        () => db.insert(users).values({
+          id: user.id,
           ...uid ? { uid } : {},
           name: user.name,
+          email: normalizedEmail,
           phone: user.phone ?? "",
           role: user.role,
+          passwordHash: user.passwordHash,
           defaultAddress: user.defaultAddress ?? null,
           wishlistProductIds: user.wishlistProductIds ?? [],
+          createdAt: user.createdAt,
           updatedAt: /* @__PURE__ */ new Date()
-        }
-      }).returning();
+        }).onConflictDoUpdate({
+          target: users.email,
+          set: {
+            ...uid ? { uid } : {},
+            name: user.name,
+            phone: user.phone ?? "",
+            role: user.role,
+            defaultAddress: user.defaultAddress ?? null,
+            wishlistProductIds: user.wishlistProductIds ?? [],
+            updatedAt: /* @__PURE__ */ new Date()
+          }
+        }).returning()
+      );
       logStructured("info", "cloud-sql", "upsert_user_success", {
         durationMs: Date.now() - startedAt
       });
@@ -1644,19 +2103,20 @@ var PostgresStateAdapter = class {
     const startedAt = Date.now();
     const normalizedEmail = user.email.trim().toLowerCase();
     try {
-      await this.ensureExternalSchemaIfNeeded();
-      const rows = await db.insert(users).values({
-        id: user.id,
-        name: user.name,
-        email: normalizedEmail,
-        phone: user.phone ?? "",
-        role: user.role,
-        passwordHash: user.passwordHash,
-        defaultAddress: user.defaultAddress ?? null,
-        wishlistProductIds: user.wishlistProductIds ?? [],
-        createdAt: user.createdAt,
-        updatedAt: /* @__PURE__ */ new Date()
-      }).onConflictDoNothing({ target: users.email }).returning();
+      const rows = await this.runWithRecovery(
+        () => db.insert(users).values({
+          id: user.id,
+          name: user.name,
+          email: normalizedEmail,
+          phone: user.phone ?? "",
+          role: user.role,
+          passwordHash: user.passwordHash,
+          defaultAddress: user.defaultAddress ?? null,
+          wishlistProductIds: user.wishlistProductIds ?? [],
+          createdAt: user.createdAt,
+          updatedAt: /* @__PURE__ */ new Date()
+        }).onConflictDoNothing({ target: users.email }).returning()
+      );
       logStructured("info", "cloud-sql", "create_user_attempt", {
         durationMs: Date.now() - startedAt,
         created: rows.length > 0
@@ -1674,9 +2134,10 @@ var PostgresStateAdapter = class {
       });
     }
   }
-  async loadState(fallbackSeed) {
+  async loadState(getFallbackSeed) {
+    const startedAt = Date.now();
+    const resolveFallbackSeed = () => typeof getFallbackSeed === "function" ? getFallbackSeed() : getFallbackSeed;
     try {
-      await this.ensureExternalSchemaIfNeeded();
       const [
         userRows,
         productRows,
@@ -1690,26 +2151,28 @@ var PostgresStateAdapter = class {
         notifRows,
         intentRows,
         settingsRows
-      ] = await Promise.all([
-        db.select().from(users).orderBy(asc(users.createdAt)),
-        db.select().from(products).orderBy(asc(products.sortOrder)),
-        db.select().from(orders).orderBy(asc(orders.sortOrder)),
-        db.select().from(coupons).orderBy(asc(coupons.sortOrder)),
-        db.select().from(promotions).orderBy(asc(promotions.sortOrder)),
-        db.select().from(labReports).orderBy(asc(labReports.sortOrder)),
-        db.select().from(cmsSections).orderBy(asc(cmsSections.sortOrder)),
-        db.select().from(expenses).orderBy(asc(expenses.sortOrder)),
-        db.select().from(inquiries).orderBy(asc(inquiries.sortOrder)),
-        db.select().from(adminNotifications).orderBy(asc(adminNotifications.sortOrder)),
-        db.select().from(paymentIntents),
-        db.select().from(storeSettings).where(eq(storeSettings.id, "default")).limit(1)
-      ]);
+      ] = await this.runWithRecovery(
+        () => Promise.all([
+          db.select().from(users).orderBy(asc(users.createdAt)),
+          db.select().from(products).orderBy(asc(products.sortOrder)),
+          db.select().from(orders).orderBy(asc(orders.sortOrder), desc(orders.createdAt)),
+          db.select().from(coupons).orderBy(asc(coupons.sortOrder)),
+          db.select().from(promotions).orderBy(asc(promotions.sortOrder)),
+          db.select().from(labReports).orderBy(asc(labReports.sortOrder)),
+          db.select().from(cmsSections).orderBy(asc(cmsSections.sortOrder)),
+          db.select().from(expenses).orderBy(asc(expenses.sortOrder)),
+          db.select().from(inquiries).orderBy(asc(inquiries.sortOrder)),
+          db.select().from(adminNotifications).orderBy(asc(adminNotifications.sortOrder), desc(adminNotifications.createdAt)),
+          db.select().from(paymentIntents),
+          db.select().from(storeSettings).where(eq(storeSettings.id, "default")).limit(1)
+        ])
+      );
       if (isTableEmpty({
         userCount: userRows.length,
         productCount: productRows.length,
         settingsCount: settingsRows.length
       })) {
-        return { empty: true, state: fallbackSeed };
+        return { empty: true, state: resolveFallbackSeed(), dbMs: Date.now() - startedAt };
       }
       const mappedUsers = userRows.map((row) => ({
         id: row.id,
@@ -1895,7 +2358,7 @@ var PostgresStateAdapter = class {
         state: {
           users: mappedUsers,
           products: mappedProducts,
-          settings: settingsRows[0]?.payload ?? fallbackSeed.settings,
+          settings: settingsRows[0]?.payload ?? resolveFallbackSeed().settings,
           coupons: mappedCoupons,
           promotions: mappedPromotions,
           orders: mappedOrders,
@@ -1905,7 +2368,8 @@ var PostgresStateAdapter = class {
           inquiries: mappedInquiries,
           adminNotifications: mappedNotifs,
           paymentIntents: mappedIntents
-        }
+        },
+        dbMs: Date.now() - startedAt
       };
     } catch (error) {
       logStructured("error", "cloud-sql", "load_state_failed", {
@@ -1925,211 +2389,50 @@ var PostgresStateAdapter = class {
   async transactCreateOrderAndDecrementStock(params) {
     const startedAt = Date.now();
     try {
-      await this.ensureExternalSchemaIfNeeded();
-      await db.transaction(async (tx) => {
-        for (const dec of params.stockDecrements) {
-          const updated = await tx.update(products).set({
-            stock: sql`${products.stock} - ${dec.quantity}`,
-            updatedAt: /* @__PURE__ */ new Date()
-          }).where(and(eq(products.id, dec.productId), gte(products.stock, dec.quantity))).returning({ id: products.id, stock: products.stock });
-          if (updated.length === 0) {
-            throw new StorePersistenceError(
-              "Order could not be completed because one or more items just went out of stock. Please review your cart and try again.",
-              {
-                code: "ORDER_STOCK_CONFLICT",
-                statusCode: 409,
-                retryable: false
-              }
-            );
-          }
-        }
-        const o = params.order;
-        await tx.insert(orders).values({
-          id: o.id,
-          sortOrder: 0,
-          orderNumber: o.orderNumber,
-          userId: o.userId ?? null,
-          customerName: o.customerName,
-          customerEmail: o.customerEmail,
-          customerPhone: o.customerPhone,
-          shippingAddress: o.shippingAddress,
-          deliveryInstructions: o.deliveryInstructions ?? null,
-          items: o.items,
-          subtotal: o.subtotal,
-          mrpTotal: o.mrpTotal,
-          instantSavings: o.instantSavings,
-          couponCode: o.couponCode ?? null,
-          couponDiscount: o.couponDiscount,
-          promotionId: o.promotionId ?? null,
-          promotionTitle: o.promotionTitle ?? null,
-          shippingFee: o.shippingFee,
-          shippingSpeed: o.shippingSpeed,
-          codFee: o.codFee,
-          taxableValue: o.taxableValue,
-          gstAmount: o.gstAmount,
-          totalAmount: o.totalAmount,
-          gatewayFeeAmount: o.gatewayFeeAmount ?? null,
-          actualShippingCost: o.actualShippingCost ?? null,
-          paymentMethod: o.paymentMethod,
-          paymentStatus: o.paymentStatus,
-          razorpayOrderId: o.razorpayOrderId ?? null,
-          razorpayPaymentId: o.razorpayPaymentId ?? null,
-          paymentVerifiedAt: o.paymentVerifiedAt ?? null,
-          status: o.status,
-          courierName: o.courierPartner ?? null,
-          trackingNumber: o.trackingNumber ?? null,
-          trackingUrl: o.trackingUrl ?? null,
-          estimatedDelivery: o.estimatedDelivery ?? null,
-          dispatchedAt: o.dispatchedAt ?? null,
-          deliveredAt: o.deliveredAt ?? null,
-          refundAmount: o.refundAmount ?? null,
-          refundReason: o.refundReason ?? null,
-          refundRequestedAt: o.refundRequestedAt ?? null,
-          timeline: o.timeline,
-          createdAt: o.createdAt
-        }).onConflictDoNothing({ target: orders.id });
-      });
-      logStructured("info", "cloud-sql", "transact_order_success", {
-        orderId: params.order.id,
-        orderNumber: params.order.orderNumber,
-        durationMs: Date.now() - startedAt
-      });
-    } catch (error) {
-      if (error instanceof StorePersistenceError) {
-        throw error;
-      }
-      logStructured("error", "cloud-sql", "transact_order_failed", {
-        orderId: params.order.id,
-        durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error)
-      });
-      throw new StorePersistenceError("Unable to confirm your order right now. Please try again.", {
-        code: "POSTGRES_TX_FAILED",
-        statusCode: 503,
-        retryable: true
-      });
-    }
-  }
-  /**
-   * Synchronizes all entities transactionally into PostgreSQL using Drizzle type-safe upserts & targeted deletions.
-   */
-  async persistState(state) {
-    const startedAt = Date.now();
-    try {
-      await this.ensureExternalSchemaIfNeeded();
-      await db.transaction(async (tx) => {
-        await tx.insert(storeSettings).values({
-          id: "default",
-          payload: state.settings,
-          updatedAt: /* @__PURE__ */ new Date()
-        }).onConflictDoUpdate({
-          target: storeSettings.id,
-          set: {
-            payload: state.settings,
-            updatedAt: /* @__PURE__ */ new Date()
-          }
-        });
-        const userIds = [];
-        for (const u of state.users) {
-          const normalizedEmail = u.email.trim().toLowerCase();
-          const savedRows = await tx.insert(users).values({
-            id: u.id,
-            name: u.name,
-            email: normalizedEmail,
-            phone: u.phone,
-            role: u.role,
-            passwordHash: u.passwordHash,
-            defaultAddress: u.defaultAddress ?? null,
-            wishlistProductIds: u.wishlistProductIds ?? [],
-            createdAt: u.createdAt,
-            updatedAt: /* @__PURE__ */ new Date()
-          }).onConflictDoUpdate({
-            target: users.email,
-            set: {
-              name: u.name,
-              phone: u.phone,
-              role: u.role,
-              defaultAddress: u.defaultAddress ?? null,
-              wishlistProductIds: u.wishlistProductIds ?? [],
-              updatedAt: /* @__PURE__ */ new Date()
+      const txResult = await this.runWithRecovery(
+        () => db.transaction(async (tx) => {
+          const o = params.order;
+          if (o.paymentMethod !== "COD" && (o.razorpayPaymentId || o.razorpayOrderId)) {
+            const dupCondition = o.razorpayPaymentId && o.razorpayOrderId ? or(
+              eq(orders.razorpayPaymentId, o.razorpayPaymentId),
+              eq(orders.razorpayOrderId, o.razorpayOrderId)
+            ) : o.razorpayPaymentId ? eq(orders.razorpayPaymentId, o.razorpayPaymentId) : eq(orders.razorpayOrderId, o.razorpayOrderId);
+            const existingRows = await tx.select().from(orders).where(dupCondition).limit(1);
+            if (existingRows[0]) {
+              return {
+                existingOrder: this.mapOrderRow(existingRows[0]),
+                updatedProducts: []
+              };
             }
-          }).returning({ id: users.id });
-          userIds.push(savedRows[0]?.id ?? u.id);
-        }
-        const productIds = [];
-        for (let idx = 0; idx < state.products.length; idx += 1) {
-          const p = state.products[idx];
-          productIds.push(p.id);
-          await tx.insert(products).values({
-            id: p.id,
-            sortOrder: idx,
-            slug: p.slug,
-            name: p.name,
-            subtitle: p.subtitle,
-            netQuantity: p.netQuantity,
-            sku: p.sku,
-            hsnCode: p.hsnCode,
-            mrp: p.mrp,
-            price: p.price,
-            costPerUnit: p.costPerUnit,
-            stock: p.stock,
-            lowStockThreshold: p.lowStockThreshold,
-            batchNumber: p.batchNumber,
-            gstRatePercent: p.gstRatePercent,
-            shortDescription: p.shortDescription,
-            usageGuidance: p.usageGuidance,
-            storageInstructions: p.storageInstructions,
-            shippingNote: p.shippingNote,
-            returnPolicy: p.returnPolicy,
-            specifications: p.specifications ?? [],
-            galleryTypes: p.galleryTypes ?? [],
-            customImages: p.customImages ?? null,
-            active: p.active,
-            updatedAt: /* @__PURE__ */ new Date()
-          }).onConflictDoUpdate({
-            target: products.id,
-            set: {
-              sortOrder: idx,
-              slug: p.slug,
-              name: p.name,
-              subtitle: p.subtitle,
-              netQuantity: p.netQuantity,
-              sku: p.sku,
-              hsnCode: p.hsnCode,
-              mrp: p.mrp,
-              price: p.price,
-              costPerUnit: p.costPerUnit,
-              stock: p.stock,
-              lowStockThreshold: p.lowStockThreshold,
-              batchNumber: p.batchNumber,
-              gstRatePercent: p.gstRatePercent,
-              shortDescription: p.shortDescription,
-              usageGuidance: p.usageGuidance,
-              storageInstructions: p.storageInstructions,
-              shippingNote: p.shippingNote,
-              returnPolicy: p.returnPolicy,
-              specifications: p.specifications ?? [],
-              galleryTypes: p.galleryTypes ?? [],
-              customImages: p.customImages ?? null,
-              active: p.active,
+          }
+          const updatedProducts = [];
+          for (const dec of params.stockDecrements) {
+            const updated = await tx.update(products).set({
+              stock: sql`${products.stock} - ${dec.quantity}`,
               updatedAt: /* @__PURE__ */ new Date()
+            }).where(and(eq(products.id, dec.productId), gte(products.stock, dec.quantity))).returning({ id: products.id, stock: products.stock });
+            if (updated.length === 0) {
+              throw new StorePersistenceError(
+                "Order could not be completed because one or more items just went out of stock. Please review your cart and try again.",
+                {
+                  code: "ORDER_STOCK_CONFLICT",
+                  statusCode: 409,
+                  retryable: false
+                }
+              );
             }
-          });
-        }
-        if (productIds.length > 0) {
-          await tx.delete(products).where(notInArray(products.id, productIds));
-        } else {
-          await tx.delete(products);
-        }
-        const validUserIdSet = new Set(userIds);
-        const orderIds = [];
-        for (let idx = 0; idx < state.orders.length; idx += 1) {
-          const o = state.orders[idx];
-          orderIds.push(o.id);
-          const safeUserId = o.userId && validUserIdSet.has(o.userId) ? o.userId : null;
+            updatedProducts.push(updated[0]);
+          }
+          let safeUserId = o.userId ?? null;
+          if (safeUserId) {
+            const foundUser = await tx.select({ id: users.id }).from(users).where(eq(users.id, safeUserId)).limit(1);
+            if (foundUser.length === 0) {
+              safeUserId = null;
+            }
+          }
           await tx.insert(orders).values({
             id: o.id,
-            sortOrder: idx,
+            sortOrder: 0,
             orderNumber: o.orderNumber,
             userId: safeUserId,
             customerName: o.customerName,
@@ -2168,12 +2471,188 @@ var PostgresStateAdapter = class {
             refundAmount: o.refundAmount ?? null,
             refundReason: o.refundReason ?? null,
             refundRequestedAt: o.refundRequestedAt ?? null,
-            timeline: o.timeline ?? [],
+            timeline: o.timeline,
             createdAt: o.createdAt
+          }).onConflictDoNothing({ target: orders.id });
+          if (params.promotionUpdate) {
+            await tx.update(promotions).set({
+              usageCount: sql`${promotions.usageCount} + 1`,
+              revenueGenerated: sql`${promotions.revenueGenerated} + ${params.promotionUpdate.revenueDelta}`,
+              updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+            }).where(eq(promotions.id, params.promotionUpdate.promotionId));
+          }
+          if (params.adminNotification) {
+            const n = params.adminNotification;
+            await tx.insert(adminNotifications).values({
+              id: n.id,
+              sortOrder: 0,
+              type: n.type,
+              title: n.title,
+              message: n.message,
+              orderId: n.orderId ?? null,
+              orderNumber: n.orderNumber ?? null,
+              customerName: n.customerName ?? null,
+              amount: n.amount ?? null,
+              read: n.read,
+              emailNotifiedTo: n.emailNotifiedTo ?? null,
+              createdAt: n.createdAt
+            }).onConflictDoNothing({ target: adminNotifications.id });
+          }
+          if (params.userDefaultAddressUpdate && safeUserId) {
+            await tx.update(users).set({
+              defaultAddress: params.userDefaultAddressUpdate.address,
+              updatedAt: /* @__PURE__ */ new Date()
+            }).where(eq(users.id, safeUserId));
+          }
+          return { existingOrder: void 0, updatedProducts };
+        })
+      );
+      logStructured("info", "cloud-sql", "transact_order_success", {
+        orderId: params.order.id,
+        orderNumber: params.order.orderNumber,
+        idempotent: Boolean(txResult.existingOrder),
+        durationMs: Date.now() - startedAt
+      });
+      return txResult;
+    } catch (error) {
+      if (error instanceof StorePersistenceError) {
+        throw error;
+      }
+      const pgCode = getPgErrorCode(error);
+      logStructured("error", "cloud-sql", "transact_order_failed", {
+        orderId: params.order.id,
+        pgCode: pgCode || void 0,
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      throw new StorePersistenceError("Unable to confirm your order right now. Please try again.", {
+        code: pgCode === "23505" ? "ORDER_NUMBER_CONFLICT" : "POSTGRES_TX_FAILED",
+        statusCode: pgCode === "23505" ? 409 : 503,
+        retryable: true
+      });
+    }
+  }
+  /**
+   * Synchronizes all entities transactionally into PostgreSQL using Drizzle type-safe upserts & targeted deletions.
+   */
+  async persistState(state) {
+    const startedAt = Date.now();
+    try {
+      await this.runWithRecovery(
+        () => db.transaction(async (tx) => {
+          await tx.insert(storeSettings).values({
+            id: "default",
+            payload: state.settings,
+            updatedAt: /* @__PURE__ */ new Date()
           }).onConflictDoUpdate({
-            target: orders.id,
+            target: storeSettings.id,
             set: {
+              payload: state.settings,
+              updatedAt: /* @__PURE__ */ new Date()
+            }
+          });
+          const userIds = [];
+          for (const u of state.users) {
+            const normalizedEmail = u.email.trim().toLowerCase();
+            const savedRows = await tx.insert(users).values({
+              id: u.id,
+              name: u.name,
+              email: normalizedEmail,
+              phone: u.phone,
+              role: u.role,
+              passwordHash: u.passwordHash,
+              defaultAddress: u.defaultAddress ?? null,
+              wishlistProductIds: u.wishlistProductIds ?? [],
+              createdAt: u.createdAt,
+              updatedAt: /* @__PURE__ */ new Date()
+            }).onConflictDoUpdate({
+              target: users.email,
+              set: {
+                name: u.name,
+                phone: u.phone,
+                role: u.role,
+                defaultAddress: u.defaultAddress ?? null,
+                wishlistProductIds: u.wishlistProductIds ?? [],
+                updatedAt: /* @__PURE__ */ new Date()
+              }
+            }).returning({ id: users.id });
+            userIds.push(savedRows[0]?.id ?? u.id);
+          }
+          const productIds = [];
+          for (let idx = 0; idx < state.products.length; idx += 1) {
+            const p = state.products[idx];
+            productIds.push(p.id);
+            await tx.insert(products).values({
+              id: p.id,
               sortOrder: idx,
+              slug: p.slug,
+              name: p.name,
+              subtitle: p.subtitle,
+              netQuantity: p.netQuantity,
+              sku: p.sku,
+              hsnCode: p.hsnCode,
+              mrp: p.mrp,
+              price: p.price,
+              costPerUnit: p.costPerUnit,
+              stock: p.stock,
+              lowStockThreshold: p.lowStockThreshold,
+              batchNumber: p.batchNumber,
+              gstRatePercent: p.gstRatePercent,
+              shortDescription: p.shortDescription,
+              usageGuidance: p.usageGuidance,
+              storageInstructions: p.storageInstructions,
+              shippingNote: p.shippingNote,
+              returnPolicy: p.returnPolicy,
+              specifications: p.specifications ?? [],
+              galleryTypes: p.galleryTypes ?? [],
+              customImages: p.customImages ?? null,
+              active: p.active,
+              updatedAt: /* @__PURE__ */ new Date()
+            }).onConflictDoUpdate({
+              target: products.id,
+              set: {
+                sortOrder: idx,
+                slug: p.slug,
+                name: p.name,
+                subtitle: p.subtitle,
+                netQuantity: p.netQuantity,
+                sku: p.sku,
+                hsnCode: p.hsnCode,
+                mrp: p.mrp,
+                price: p.price,
+                costPerUnit: p.costPerUnit,
+                stock: p.stock,
+                lowStockThreshold: p.lowStockThreshold,
+                batchNumber: p.batchNumber,
+                gstRatePercent: p.gstRatePercent,
+                shortDescription: p.shortDescription,
+                usageGuidance: p.usageGuidance,
+                storageInstructions: p.storageInstructions,
+                shippingNote: p.shippingNote,
+                returnPolicy: p.returnPolicy,
+                specifications: p.specifications ?? [],
+                galleryTypes: p.galleryTypes ?? [],
+                customImages: p.customImages ?? null,
+                active: p.active,
+                updatedAt: /* @__PURE__ */ new Date()
+              }
+            });
+          }
+          if (productIds.length > 0) {
+            await tx.delete(products).where(notInArray(products.id, productIds));
+          } else {
+            await tx.delete(products);
+          }
+          const validUserIdSet = new Set(userIds);
+          const orderIds = [];
+          for (let idx = 0; idx < state.orders.length; idx += 1) {
+            const o = state.orders[idx];
+            orderIds.push(o.id);
+            const safeUserId = o.userId && validUserIdSet.has(o.userId) ? o.userId : null;
+            await tx.insert(orders).values({
+              id: o.id,
+              sortOrder: idx,
+              orderNumber: o.orderNumber,
               userId: safeUserId,
               customerName: o.customerName,
               customerEmail: o.customerEmail,
@@ -2211,73 +2690,96 @@ var PostgresStateAdapter = class {
               refundAmount: o.refundAmount ?? null,
               refundReason: o.refundReason ?? null,
               refundRequestedAt: o.refundRequestedAt ?? null,
-              timeline: o.timeline ?? []
-            }
-          });
-        }
-        if (orderIds.length > 0) {
-          await tx.delete(orders).where(notInArray(orders.id, orderIds));
-        } else {
-          await tx.delete(orders);
-        }
-        const couponIds = [];
-        for (let idx = 0; idx < state.coupons.length; idx += 1) {
-          const c = state.coupons[idx];
-          couponIds.push(c.code);
-          await tx.insert(coupons).values({
-            id: c.code,
-            sortOrder: idx,
-            code: c.code,
-            type: c.discountType,
-            value: c.value,
-            minOrderValue: c.minOrderAmount,
-            maxDiscount: null,
-            active: c.active,
-            description: c.description
-          }).onConflictDoUpdate({
-            target: coupons.id,
-            set: {
+              timeline: o.timeline ?? [],
+              createdAt: o.createdAt
+            }).onConflictDoUpdate({
+              target: orders.id,
+              set: {
+                sortOrder: idx,
+                userId: safeUserId,
+                customerName: o.customerName,
+                customerEmail: o.customerEmail,
+                customerPhone: o.customerPhone,
+                shippingAddress: o.shippingAddress,
+                deliveryInstructions: o.deliveryInstructions ?? null,
+                items: o.items,
+                subtotal: o.subtotal,
+                mrpTotal: o.mrpTotal,
+                instantSavings: o.instantSavings,
+                couponCode: o.couponCode ?? null,
+                couponDiscount: o.couponDiscount,
+                promotionId: o.promotionId ?? null,
+                promotionTitle: o.promotionTitle ?? null,
+                shippingFee: o.shippingFee,
+                shippingSpeed: o.shippingSpeed,
+                codFee: o.codFee,
+                taxableValue: o.taxableValue,
+                gstAmount: o.gstAmount,
+                totalAmount: o.totalAmount,
+                gatewayFeeAmount: o.gatewayFeeAmount ?? null,
+                actualShippingCost: o.actualShippingCost ?? null,
+                paymentMethod: o.paymentMethod,
+                paymentStatus: o.paymentStatus,
+                razorpayOrderId: o.razorpayOrderId ?? null,
+                razorpayPaymentId: o.razorpayPaymentId ?? null,
+                paymentVerifiedAt: o.paymentVerifiedAt ?? null,
+                status: o.status,
+                courierName: o.courierPartner ?? null,
+                trackingNumber: o.trackingNumber ?? null,
+                trackingUrl: o.trackingUrl ?? null,
+                estimatedDelivery: o.estimatedDelivery ?? null,
+                dispatchedAt: o.dispatchedAt ?? null,
+                deliveredAt: o.deliveredAt ?? null,
+                refundAmount: o.refundAmount ?? null,
+                refundReason: o.refundReason ?? null,
+                refundRequestedAt: o.refundRequestedAt ?? null,
+                timeline: o.timeline ?? []
+              }
+            });
+          }
+          if (orderIds.length > 0) {
+            await tx.delete(orders).where(notInArray(orders.id, orderIds));
+          } else {
+            await tx.delete(orders);
+          }
+          const couponIds = [];
+          for (let idx = 0; idx < state.coupons.length; idx += 1) {
+            const c = state.coupons[idx];
+            couponIds.push(c.code);
+            await tx.insert(coupons).values({
+              id: c.code,
               sortOrder: idx,
               code: c.code,
               type: c.discountType,
               value: c.value,
               minOrderValue: c.minOrderAmount,
+              maxDiscount: null,
               active: c.active,
               description: c.description
-            }
-          });
-        }
-        if (couponIds.length > 0) {
-          await tx.delete(coupons).where(notInArray(coupons.id, couponIds));
-        } else {
-          await tx.delete(coupons);
-        }
-        const promoIds = [];
-        for (let idx = 0; idx < state.promotions.length; idx += 1) {
-          const pr = state.promotions[idx];
-          promoIds.push(pr.id);
-          await tx.insert(promotions).values({
-            id: pr.id,
-            sortOrder: idx,
-            title: pr.title,
-            description: pr.description,
-            bannerHeadline: pr.bannerHeadline,
-            bannerSubtext: pr.bannerSubtext,
-            bannerTheme: pr.bannerTheme,
-            startsAt: pr.startsAt,
-            endsAt: pr.endsAt,
-            freeShipping: pr.freeShipping,
-            freeShippingSpeed: pr.freeShippingSpeed,
-            discountPercent: pr.discountPercent,
-            promoCode: pr.promoCode ?? null,
-            enabled: pr.enabled,
-            usageCount: pr.usageCount,
-            revenueGenerated: pr.revenueGenerated,
-            createdAt: pr.createdAt,
-            updatedAt: pr.updatedAt
-          }).onConflictDoUpdate({
-            target: promotions.id,
-            set: {
+            }).onConflictDoUpdate({
+              target: coupons.id,
+              set: {
+                sortOrder: idx,
+                code: c.code,
+                type: c.discountType,
+                value: c.value,
+                minOrderValue: c.minOrderAmount,
+                active: c.active,
+                description: c.description
+              }
+            });
+          }
+          if (couponIds.length > 0) {
+            await tx.delete(coupons).where(notInArray(coupons.id, couponIds));
+          } else {
+            await tx.delete(coupons);
+          }
+          const promoIds = [];
+          for (let idx = 0; idx < state.promotions.length; idx += 1) {
+            const pr = state.promotions[idx];
+            promoIds.push(pr.id);
+            await tx.insert(promotions).values({
+              id: pr.id,
               sortOrder: idx,
               title: pr.title,
               description: pr.description,
@@ -2293,46 +2795,41 @@ var PostgresStateAdapter = class {
               enabled: pr.enabled,
               usageCount: pr.usageCount,
               revenueGenerated: pr.revenueGenerated,
+              createdAt: pr.createdAt,
               updatedAt: pr.updatedAt
-            }
-          });
-        }
-        if (promoIds.length > 0) {
-          await tx.delete(promotions).where(notInArray(promotions.id, promoIds));
-        } else {
-          await tx.delete(promotions);
-        }
-        const labIds = [];
-        for (let idx = 0; idx < state.labReports.length; idx += 1) {
-          const r = state.labReports[idx];
-          labIds.push(r.id);
-          await tx.insert(labReports).values({
-            id: r.id,
-            sortOrder: idx,
-            batchNumber: r.testedBatchNumber,
-            testedBatchNumber: r.testedBatchNumber,
-            reportNumber: r.reportNumber,
-            laboratoryName: r.laboratoryName,
-            accreditation: r.testingMethodology,
-            testDate: r.testDate,
-            expiryDate: "",
-            sampleDescription: "",
-            fulvicAcidPercent: "",
-            verdict: r.verifiedStatus,
-            summaryNote: r.notes,
-            mappedProductIds: r.mappedProductIds ?? [],
-            testingMethodology: r.testingMethodology,
-            verifiedStatus: r.verifiedStatus,
-            notes: r.notes,
-            updatedAt: r.updatedAt,
-            customDocumentUrl: r.customDocumentUrl ?? null,
-            originalFileName: r.originalFileName ?? null,
-            originalMimeType: r.originalMimeType ?? null,
-            heavyMetals: r.heavyMetals ?? [],
-            microbiological: r.microbiological ?? []
-          }).onConflictDoUpdate({
-            target: labReports.id,
-            set: {
+            }).onConflictDoUpdate({
+              target: promotions.id,
+              set: {
+                sortOrder: idx,
+                title: pr.title,
+                description: pr.description,
+                bannerHeadline: pr.bannerHeadline,
+                bannerSubtext: pr.bannerSubtext,
+                bannerTheme: pr.bannerTheme,
+                startsAt: pr.startsAt,
+                endsAt: pr.endsAt,
+                freeShipping: pr.freeShipping,
+                freeShippingSpeed: pr.freeShippingSpeed,
+                discountPercent: pr.discountPercent,
+                promoCode: pr.promoCode ?? null,
+                enabled: pr.enabled,
+                usageCount: pr.usageCount,
+                revenueGenerated: pr.revenueGenerated,
+                updatedAt: pr.updatedAt
+              }
+            });
+          }
+          if (promoIds.length > 0) {
+            await tx.delete(promotions).where(notInArray(promotions.id, promoIds));
+          } else {
+            await tx.delete(promotions);
+          }
+          const labIds = [];
+          for (let idx = 0; idx < state.labReports.length; idx += 1) {
+            const r = state.labReports[idx];
+            labIds.push(r.id);
+            await tx.insert(labReports).values({
+              id: r.id,
               sortOrder: idx,
               batchNumber: r.testedBatchNumber,
               testedBatchNumber: r.testedBatchNumber,
@@ -2340,6 +2837,9 @@ var PostgresStateAdapter = class {
               laboratoryName: r.laboratoryName,
               accreditation: r.testingMethodology,
               testDate: r.testDate,
+              expiryDate: "",
+              sampleDescription: "",
+              fulvicAcidPercent: "",
               verdict: r.verifiedStatus,
               summaryNote: r.notes,
               mappedProductIds: r.mappedProductIds ?? [],
@@ -2352,31 +2852,42 @@ var PostgresStateAdapter = class {
               originalMimeType: r.originalMimeType ?? null,
               heavyMetals: r.heavyMetals ?? [],
               microbiological: r.microbiological ?? []
-            }
-          });
-        }
-        if (labIds.length > 0) {
-          await tx.delete(labReports).where(notInArray(labReports.id, labIds));
-        } else {
-          await tx.delete(labReports);
-        }
-        const cmsIds = [];
-        for (let idx = 0; idx < state.cmsSections.length; idx += 1) {
-          const s = state.cmsSections[idx];
-          cmsIds.push(s.id);
-          await tx.insert(cmsSections).values({
-            id: s.id,
-            sortOrder: idx,
-            key: s.key,
-            title: s.title,
-            category: s.category,
-            content: s.content,
-            approvedByAdmin: s.approvedByAdmin,
-            approvedAt: s.approvedAt ?? null,
-            updatedAt: s.updatedAt
-          }).onConflictDoUpdate({
-            target: cmsSections.id,
-            set: {
+            }).onConflictDoUpdate({
+              target: labReports.id,
+              set: {
+                sortOrder: idx,
+                batchNumber: r.testedBatchNumber,
+                testedBatchNumber: r.testedBatchNumber,
+                reportNumber: r.reportNumber,
+                laboratoryName: r.laboratoryName,
+                accreditation: r.testingMethodology,
+                testDate: r.testDate,
+                verdict: r.verifiedStatus,
+                summaryNote: r.notes,
+                mappedProductIds: r.mappedProductIds ?? [],
+                testingMethodology: r.testingMethodology,
+                verifiedStatus: r.verifiedStatus,
+                notes: r.notes,
+                updatedAt: r.updatedAt,
+                customDocumentUrl: r.customDocumentUrl ?? null,
+                originalFileName: r.originalFileName ?? null,
+                originalMimeType: r.originalMimeType ?? null,
+                heavyMetals: r.heavyMetals ?? [],
+                microbiological: r.microbiological ?? []
+              }
+            });
+          }
+          if (labIds.length > 0) {
+            await tx.delete(labReports).where(notInArray(labReports.id, labIds));
+          } else {
+            await tx.delete(labReports);
+          }
+          const cmsIds = [];
+          for (let idx = 0; idx < state.cmsSections.length; idx += 1) {
+            const s = state.cmsSections[idx];
+            cmsIds.push(s.id);
+            await tx.insert(cmsSections).values({
+              id: s.id,
               sortOrder: idx,
               key: s.key,
               title: s.title,
@@ -2385,62 +2896,58 @@ var PostgresStateAdapter = class {
               approvedByAdmin: s.approvedByAdmin,
               approvedAt: s.approvedAt ?? null,
               updatedAt: s.updatedAt
-            }
-          });
-        }
-        if (cmsIds.length > 0) {
-          await tx.delete(cmsSections).where(notInArray(cmsSections.id, cmsIds));
-        } else {
-          await tx.delete(cmsSections);
-        }
-        const expenseIds = [];
-        for (let idx = 0; idx < state.expenses.length; idx += 1) {
-          const e = state.expenses[idx];
-          expenseIds.push(e.id);
-          await tx.insert(expenses).values({
-            id: e.id,
-            sortOrder: idx,
-            date: e.date,
-            category: e.category,
-            description: e.description,
-            amount: e.amount
-          }).onConflictDoUpdate({
-            target: expenses.id,
-            set: {
+            }).onConflictDoUpdate({
+              target: cmsSections.id,
+              set: {
+                sortOrder: idx,
+                key: s.key,
+                title: s.title,
+                category: s.category,
+                content: s.content,
+                approvedByAdmin: s.approvedByAdmin,
+                approvedAt: s.approvedAt ?? null,
+                updatedAt: s.updatedAt
+              }
+            });
+          }
+          if (cmsIds.length > 0) {
+            await tx.delete(cmsSections).where(notInArray(cmsSections.id, cmsIds));
+          } else {
+            await tx.delete(cmsSections);
+          }
+          const expenseIds = [];
+          for (let idx = 0; idx < state.expenses.length; idx += 1) {
+            const e = state.expenses[idx];
+            expenseIds.push(e.id);
+            await tx.insert(expenses).values({
+              id: e.id,
               sortOrder: idx,
               date: e.date,
               category: e.category,
               description: e.description,
               amount: e.amount
-            }
-          });
-        }
-        if (expenseIds.length > 0) {
-          await tx.delete(expenses).where(notInArray(expenses.id, expenseIds));
-        } else {
-          await tx.delete(expenses);
-        }
-        const inquiryIds = [];
-        for (let idx = 0; idx < state.inquiries.length; idx += 1) {
-          const inq = state.inquiries[idx];
-          inquiryIds.push(inq.id);
-          await tx.insert(inquiries).values({
-            id: inq.id,
-            sortOrder: idx,
-            name: inq.name,
-            email: inq.email,
-            phone: inq.phone ?? "",
-            subject: inq.subject,
-            message: inq.message,
-            status: inq.status,
-            replyMessage: inq.replyMessage ?? null,
-            repliedAt: inq.repliedAt ?? null,
-            repliedVia: inq.repliedVia ?? null,
-            emailDeliveryStatus: inq.emailDeliveryStatus ?? null,
-            createdAt: inq.createdAt
-          }).onConflictDoUpdate({
-            target: inquiries.id,
-            set: {
+            }).onConflictDoUpdate({
+              target: expenses.id,
+              set: {
+                sortOrder: idx,
+                date: e.date,
+                category: e.category,
+                description: e.description,
+                amount: e.amount
+              }
+            });
+          }
+          if (expenseIds.length > 0) {
+            await tx.delete(expenses).where(notInArray(expenses.id, expenseIds));
+          } else {
+            await tx.delete(expenses);
+          }
+          const inquiryIds = [];
+          for (let idx = 0; idx < state.inquiries.length; idx += 1) {
+            const inq = state.inquiries[idx];
+            inquiryIds.push(inq.id);
+            await tx.insert(inquiries).values({
+              id: inq.id,
               sortOrder: idx,
               name: inq.name,
               email: inq.email,
@@ -2451,76 +2958,92 @@ var PostgresStateAdapter = class {
               replyMessage: inq.replyMessage ?? null,
               repliedAt: inq.repliedAt ?? null,
               repliedVia: inq.repliedVia ?? null,
-              emailDeliveryStatus: inq.emailDeliveryStatus ?? null
-            }
-          });
-        }
-        if (inquiryIds.length > 0) {
-          await tx.delete(inquiries).where(notInArray(inquiries.id, inquiryIds));
-        } else {
-          await tx.delete(inquiries);
-        }
-        const notifIds = [];
-        for (let idx = 0; idx < state.adminNotifications.length; idx += 1) {
-          const n = state.adminNotifications[idx];
-          notifIds.push(n.id);
-          await tx.insert(adminNotifications).values({
-            id: n.id,
-            sortOrder: idx,
-            type: n.type,
-            title: n.title,
-            message: n.message,
-            orderId: n.orderId ?? null,
-            orderNumber: n.orderNumber ?? null,
-            customerName: n.customerName ?? null,
-            amount: n.amount ?? null,
-            read: n.read,
-            emailNotifiedTo: n.emailNotifiedTo ?? null,
-            createdAt: n.createdAt
-          }).onConflictDoUpdate({
-            target: adminNotifications.id,
-            set: {
+              emailDeliveryStatus: inq.emailDeliveryStatus ?? null,
+              createdAt: inq.createdAt
+            }).onConflictDoUpdate({
+              target: inquiries.id,
+              set: {
+                sortOrder: idx,
+                name: inq.name,
+                email: inq.email,
+                phone: inq.phone ?? "",
+                subject: inq.subject,
+                message: inq.message,
+                status: inq.status,
+                replyMessage: inq.replyMessage ?? null,
+                repliedAt: inq.repliedAt ?? null,
+                repliedVia: inq.repliedVia ?? null,
+                emailDeliveryStatus: inq.emailDeliveryStatus ?? null
+              }
+            });
+          }
+          if (inquiryIds.length > 0) {
+            await tx.delete(inquiries).where(notInArray(inquiries.id, inquiryIds));
+          } else {
+            await tx.delete(inquiries);
+          }
+          const notifIds = [];
+          for (let idx = 0; idx < state.adminNotifications.length; idx += 1) {
+            const n = state.adminNotifications[idx];
+            notifIds.push(n.id);
+            await tx.insert(adminNotifications).values({
+              id: n.id,
               sortOrder: idx,
-              read: n.read,
+              type: n.type,
               title: n.title,
               message: n.message,
-              emailNotifiedTo: n.emailNotifiedTo ?? null
-            }
-          });
-        }
-        if (notifIds.length > 0) {
-          await tx.delete(adminNotifications).where(notInArray(adminNotifications.id, notifIds));
-        } else {
-          await tx.delete(adminNotifications);
-        }
-        const intentIds = Object.keys(state.paymentIntents || {});
-        for (const intentId of intentIds) {
-          const rec = state.paymentIntents[intentId];
-          await tx.insert(paymentIntents).values({
-            razorpayOrderId: rec.razorpayOrderId,
-            amountPaise: rec.amountPaise,
-            verified: rec.verified,
-            paymentId: rec.paymentId ?? null,
-            signatureVerified: rec.signatureVerified,
-            method: rec.method,
-            createdAt: rec.createdAt
-          }).onConflictDoUpdate({
-            target: paymentIntents.razorpayOrderId,
-            set: {
+              orderId: n.orderId ?? null,
+              orderNumber: n.orderNumber ?? null,
+              customerName: n.customerName ?? null,
+              amount: n.amount ?? null,
+              read: n.read,
+              emailNotifiedTo: n.emailNotifiedTo ?? null,
+              createdAt: n.createdAt
+            }).onConflictDoUpdate({
+              target: adminNotifications.id,
+              set: {
+                sortOrder: idx,
+                read: n.read,
+                title: n.title,
+                message: n.message,
+                emailNotifiedTo: n.emailNotifiedTo ?? null
+              }
+            });
+          }
+          if (notifIds.length > 0) {
+            await tx.delete(adminNotifications).where(notInArray(adminNotifications.id, notifIds));
+          } else {
+            await tx.delete(adminNotifications);
+          }
+          const intentIds = Object.keys(state.paymentIntents || {});
+          for (const intentId of intentIds) {
+            const rec = state.paymentIntents[intentId];
+            await tx.insert(paymentIntents).values({
+              razorpayOrderId: rec.razorpayOrderId,
               amountPaise: rec.amountPaise,
               verified: rec.verified,
               paymentId: rec.paymentId ?? null,
               signatureVerified: rec.signatureVerified,
-              method: rec.method
-            }
-          });
-        }
-        if (intentIds.length > 0) {
-          await tx.delete(paymentIntents).where(notInArray(paymentIntents.razorpayOrderId, intentIds));
-        } else {
-          await tx.delete(paymentIntents);
-        }
-      });
+              method: rec.method,
+              createdAt: rec.createdAt
+            }).onConflictDoUpdate({
+              target: paymentIntents.razorpayOrderId,
+              set: {
+                amountPaise: rec.amountPaise,
+                verified: rec.verified,
+                paymentId: rec.paymentId ?? null,
+                signatureVerified: rec.signatureVerified,
+                method: rec.method
+              }
+            });
+          }
+          if (intentIds.length > 0) {
+            await tx.delete(paymentIntents).where(notInArray(paymentIntents.razorpayOrderId, intentIds));
+          } else {
+            await tx.delete(paymentIntents);
+          }
+        })
+      );
       logStructured("info", "cloud-sql", "persist_state_success", {
         durationMs: Date.now() - startedAt
       });
@@ -2570,7 +3093,11 @@ function getAdminOwnerEmail() {
   return (process.env.ADMIN_EMAIL || "himrudraofficial@gmail.com").trim().toLowerCase();
 }
 function getInitialAdminPassword() {
-  return process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim() ? process.env.ADMIN_PASSWORD.trim() : "Rahulmewara@himrudra123";
+  const password = process.env.ADMIN_PASSWORD?.trim();
+  if (!password) {
+    throw new Error("ADMIN_PASSWORD environment variable is required.");
+  }
+  return password;
 }
 var IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 var BUNDLED_DATA_DIR = path.resolve(process.cwd(), "data");
@@ -2656,7 +3183,7 @@ function createSeedState() {
       ],
       galleryTypes: ["box", "hero", "texture", "ritual"],
       customImages: [
-        "/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg",
+        "/assets/products/himrudra-twin-ritual-pack-40g.jpeg",
         "/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg"
       ],
       active: true
@@ -2934,6 +3461,9 @@ var StoreRepository = class {
     this.hydratedFromCloud = false;
     this.lastHydratedAtMs = 0;
     this.hydrationPromise = null;
+    this.publicBootstrapCache = null;
+    this.publicBootstrapPromise = null;
+    this.hasServedPublicBootstrap = false;
     this.syncChain = Promise.resolve();
     this.pendingSyncCount = 0;
     this.lastCommitError = null;
@@ -2968,13 +3498,16 @@ var StoreRepository = class {
   normalizeState(parsed) {
     let mutated = false;
     for (const p of parsed.products) {
-      if ((p.id === "himrudra-shilajit-20g" || p.id === "himrudra-shilajit-40g-duo") && (!p.customImages || p.customImages.length === 0)) {
-        p.customImages = p.id === "himrudra-shilajit-40g-duo" ? [
-          "/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg",
-          "/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg"
-        ] : [
+      if (p.id === "himrudra-shilajit-20g" && (!p.customImages || p.customImages.length === 0)) {
+        p.customImages = [
           "/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg",
           "/assets/aistudio/WhatsApp_Image_2026-11-17_at_9.55.23_PM_2635dbf3.jpeg"
+        ];
+        mutated = true;
+      } else if (p.id === "himrudra-shilajit-40g-duo" && (!p.customImages || p.customImages.length === 0 || p.customImages[0]?.includes("9.55.23_PM_2635dbf3") || p.customImages[0]?.includes("image_1c70e55c.png"))) {
+        p.customImages = [
+          "/assets/products/himrudra-twin-ritual-pack-40g.jpeg",
+          "/assets/aistudio/WhatsApp_Image_2026-11-17_at_10.53.05_PM_b92dccc4.jpeg"
         ];
         mutated = true;
       }
@@ -3059,7 +3592,6 @@ var StoreRepository = class {
     });
     if (filteredUsers.length !== (parsed.users ?? []).length) {
       parsed.users = filteredUsers;
-      mutated = true;
     }
     for (const u of parsed.users) {
       if (u.email.toLowerCase() !== ownerEmail && u.role === "admin") {
@@ -3260,7 +3792,7 @@ var StoreRepository = class {
       });
     }
     const nowMs = Date.now();
-    const cacheTtlMs = IS_SERVERLESS ? 1e4 : 3e4;
+    const cacheTtlMs = IS_SERVERLESS ? 6e4 : 3e4;
     const isFresh = this.hydratedFromCloud && nowMs - this.lastHydratedAtMs < cacheTtlMs;
     if (isFresh && !options?.forceRefresh) {
       return;
@@ -3275,8 +3807,7 @@ var StoreRepository = class {
     this.hydrationPromise = (async () => {
       try {
         if (pg) {
-          const fallbackSeed = createSeedState();
-          const loaded = await pg.loadState(fallbackSeed);
+          const loaded = await pg.loadState(() => createSeedState());
           if (loaded.empty) {
             await pg.persistState(this.state);
             this.hydratedFromCloud = true;
@@ -3284,6 +3815,7 @@ var StoreRepository = class {
             this.lastSyncedAt = (/* @__PURE__ */ new Date()).toISOString();
             this.lastCloudError = null;
             this.stateVersion += 1;
+            this.publicBootstrapCache = null;
             return null;
           }
           const mutated = this.normalizeState(loaded.state);
@@ -3293,7 +3825,8 @@ var StoreRepository = class {
           this.lastSyncedAt = (/* @__PURE__ */ new Date()).toISOString();
           this.lastCloudError = null;
           this.stateVersion += 1;
-          if (mutated) {
+          this.publicBootstrapCache = null;
+          if (mutated && options?.forceRefresh) {
             await pg.persistState(this.state);
           }
           return null;
@@ -3350,6 +3883,135 @@ var StoreRepository = class {
   }
   getState() {
     return this.state;
+  }
+  buildPublicBootstrapFromState(source, nowMs) {
+    return {
+      products: source.products.filter((p) => p.active),
+      settings: source.settings,
+      coupons: source.coupons.filter((c) => c.active),
+      promotions: getActivePromotions(source.promotions, nowMs),
+      labReports: source.labReports,
+      cmsSections: source.cmsSections.filter((s) => s.approvedByAdmin),
+      serverNow: new Date(nowMs).toISOString()
+    };
+  }
+  /**
+   * Fast-path public catalog bootstrap for GET /api/store/bootstrap.
+   * On Postgres (Neon / Cloud SQL), runs ONE single SQL round-trip touching ONLY the
+   * 6 public tables instead of full 12-table hydration, with in-memory TTL caching and
+   * concurrent request coalescing.
+   */
+  async getPublicBootstrap() {
+    const coldStart = !this.hasServedPublicBootstrap;
+    this.hasServedPublicBootstrap = true;
+    const nowMs = Date.now();
+    const cacheTtlMs = IS_SERVERLESS ? 6e4 : 3e4;
+    if (this.publicBootstrapCache && this.publicBootstrapCache.stateVersion === this.stateVersion && nowMs - this.publicBootstrapCache.loadedAtMs < cacheTtlMs) {
+      return {
+        payload: {
+          ...this.publicBootstrapCache.data,
+          promotions: getActivePromotions(this.publicBootstrapCache.data.promotions, nowMs),
+          serverNow: new Date(nowMs).toISOString()
+        },
+        cacheHit: true,
+        coldStart,
+        dbMs: 0
+      };
+    }
+    const pg = this.getPostgres();
+    if (!pg) {
+      await this.ensureLoaded();
+      const payload = this.buildPublicBootstrapFromState(this.state, nowMs);
+      this.publicBootstrapCache = {
+        data: {
+          products: payload.products,
+          settings: payload.settings,
+          coupons: payload.coupons,
+          promotions: this.state.promotions,
+          labReports: payload.labReports,
+          cmsSections: payload.cmsSections
+        },
+        loadedAtMs: nowMs,
+        stateVersion: this.stateVersion
+      };
+      return { payload, cacheHit: false, coldStart, dbMs: 0 };
+    }
+    if (this.hydratedFromCloud && nowMs - this.lastHydratedAtMs < cacheTtlMs && this.pendingSyncCount === 0) {
+      const payload = this.buildPublicBootstrapFromState(this.state, nowMs);
+      this.publicBootstrapCache = {
+        data: {
+          products: payload.products,
+          settings: payload.settings,
+          coupons: payload.coupons,
+          promotions: this.state.promotions,
+          labReports: payload.labReports,
+          cmsSections: payload.cmsSections
+        },
+        loadedAtMs: nowMs,
+        stateVersion: this.stateVersion
+      };
+      return { payload, cacheHit: true, coldStart, dbMs: 0 };
+    }
+    if (!this.publicBootstrapPromise) {
+      this.publicBootstrapPromise = (async () => {
+        const res = await pg.loadPublicBootstrap();
+        if (res.empty) {
+          await this.ensureLoaded();
+          const seeded = {
+            products: this.state.products.filter((p) => p.active),
+            settings: this.state.settings,
+            coupons: this.state.coupons.filter((c) => c.active),
+            promotions: this.state.promotions,
+            labReports: this.state.labReports,
+            cmsSections: this.state.cmsSections.filter((s) => s.approvedByAdmin)
+          };
+          return { data: seeded, dbMs: res.dbMs };
+        }
+        const effectiveSettings = res.data.settings ?? this.state.settings;
+        const effectivePromotions = res.data.promotions.length > 0 ? res.data.promotions : this.state.promotions;
+        const data = {
+          products: res.data.products,
+          settings: effectiveSettings,
+          coupons: res.data.coupons,
+          promotions: effectivePromotions,
+          labReports: res.data.labReports,
+          cmsSections: res.data.cmsSections
+        };
+        return { data, dbMs: res.dbMs };
+      })().finally(() => {
+        this.publicBootstrapPromise = null;
+      });
+    }
+    try {
+      const { data, dbMs } = await this.publicBootstrapPromise;
+      const doneMs = Date.now();
+      this.publicBootstrapCache = {
+        data,
+        loadedAtMs: doneMs,
+        stateVersion: this.stateVersion
+      };
+      this.lastSyncedAt = new Date(doneMs).toISOString();
+      this.lastCloudError = null;
+      return {
+        payload: {
+          ...data,
+          promotions: getActivePromotions(data.promotions, doneMs),
+          serverNow: new Date(doneMs).toISOString()
+        },
+        cacheHit: false,
+        coldStart,
+        dbMs
+      };
+    } catch (err) {
+      this.lastCloudError = err instanceof Error ? err.message : String(err);
+      const fallback = this.buildPublicBootstrapFromState(this.state, Date.now());
+      return {
+        payload: fallback,
+        cacheHit: false,
+        coldStart,
+        dbMs: Date.now() - nowMs
+      };
+    }
   }
   mergeUserIntoMemory(saved) {
     const normalizedEmail = saved.email.trim().toLowerCase();
@@ -3422,26 +4084,125 @@ var StoreRepository = class {
     this.commit();
     return user;
   }
+  async upsertPaymentIntent(intent) {
+    const pg = this.getPostgres();
+    if (pg) {
+      await pg.upsertPaymentIntent(intent);
+      this.state.paymentIntents[intent.razorpayOrderId] = intent;
+      this.lastSyncedAt = (/* @__PURE__ */ new Date()).toISOString();
+      this.lastCloudError = null;
+      return;
+    }
+    this.state.paymentIntents[intent.razorpayOrderId] = intent;
+    this.commit();
+  }
+  async findPaymentIntent(razorpayOrderId) {
+    const pg = this.getPostgres();
+    if (pg) {
+      const found = await pg.findPaymentIntent(razorpayOrderId);
+      if (found) {
+        this.state.paymentIntents[found.razorpayOrderId] = found;
+      }
+      return found;
+    }
+    return this.state.paymentIntents[razorpayOrderId] ?? null;
+  }
+  async loadCheckoutContext(params) {
+    const pg = this.getPostgres();
+    if (pg) {
+      const loaded = await pg.loadCheckoutContext(params);
+      if (!loaded.empty) {
+        const effectiveSettings = loaded.settings ?? this.state.settings;
+        this.state.products = loaded.products;
+        this.state.coupons = loaded.coupons;
+        this.state.promotions = loaded.promotions;
+        this.state.settings = effectiveSettings;
+        if (loaded.paymentIntent) {
+          this.state.paymentIntents[loaded.paymentIntent.razorpayOrderId] = loaded.paymentIntent;
+        }
+        return {
+          products: loaded.products,
+          coupons: loaded.coupons,
+          promotions: loaded.promotions,
+          settings: effectiveSettings,
+          paymentIntent: loaded.paymentIntent,
+          existingOrderByPayment: loaded.existingOrderByPayment,
+          maxOrderSeq: loaded.maxOrderSeq
+        };
+      }
+      await this.ensureLoaded({ forceRefresh: true });
+    }
+    const existingOrderByPayment = params?.razorpayPaymentId || params?.razorpayOrderId ? this.state.orders.find(
+      (o) => params.razorpayPaymentId && o.razorpayPaymentId === params.razorpayPaymentId || params.razorpayOrderId && o.razorpayOrderId === params.razorpayOrderId
+    ) ?? null : null;
+    let maxOrderSeq = this.state.orders.length;
+    if (params?.includeOrderSequence) {
+      for (const existing of this.state.orders) {
+        const match = /^HIM-2026-(\d+)$/.exec(existing.orderNumber);
+        if (match) {
+          const seq = Number(match[1]);
+          if (seq > maxOrderSeq) maxOrderSeq = seq;
+        }
+      }
+    }
+    return {
+      products: this.state.products,
+      coupons: this.state.coupons,
+      promotions: this.state.promotions,
+      settings: this.state.settings,
+      paymentIntent: params?.razorpayOrderId ? this.state.paymentIntents[params.razorpayOrderId] ?? null : null,
+      existingOrderByPayment,
+      maxOrderSeq
+    };
+  }
   /**
    * Atomically persists a newly placed Order + inventory stock decrement using a PostgreSQL ACID transaction
    * (or DynamoDB TransactWrite when DynamoDB is configured).
-   * Ensures 500 concurrent buyers cannot oversell stock or create duplicate orders.
+   * On PostgreSQL, also atomically updates promotion metrics, admin notification, and user default address
+   * inside the same transaction so no full 12-table persistState rewrite is needed.
    */
-  async commitOrderAtomic(order, stockDecrements) {
+  async commitOrderAtomic(order, stockDecrements, extras) {
     const pg = this.getPostgres();
     if (pg) {
-      await pg.transactCreateOrderAndDecrementStock({
+      const txResult = await pg.transactCreateOrderAndDecrementStock({
         order,
-        stockDecrements
+        stockDecrements,
+        promotionUpdate: extras?.promotionUpdate,
+        adminNotification: extras?.adminNotification,
+        userDefaultAddressUpdate: extras?.userDefaultAddressUpdate
       });
-      this.commit();
-      await this.flushPendingSync();
-      return;
+      if (txResult.existingOrder) {
+        return { existingOrder: txResult.existingOrder };
+      }
+      for (const upd of txResult.updatedProducts) {
+        const prod = this.state.products.find((p) => p.id === upd.id);
+        if (prod) {
+          prod.stock = upd.stock;
+        }
+      }
+      if (!this.state.orders.some((o) => o.id === order.id)) {
+        this.state.orders.unshift(order);
+      }
+      if (extras?.adminNotification && !this.state.adminNotifications.some((n) => n.id === extras.adminNotification.id)) {
+        this.state.adminNotifications.unshift(extras.adminNotification);
+      }
+      if (extras?.userDefaultAddressUpdate) {
+        const u = this.state.users.find((usr) => usr.id === extras.userDefaultAddressUpdate.userId);
+        if (u && !u.defaultAddress) {
+          u.defaultAddress = extras.userDefaultAddressUpdate.address;
+        }
+      }
+      this.stateVersion += 1;
+      this.publicBootstrapCache = null;
+      this.lastSyncedAt = (/* @__PURE__ */ new Date()).toISOString();
+      this.lastCloudError = null;
+      this.lastCommitError = null;
+      return { updatedProducts: txResult.updatedProducts };
     }
     const adapter = this.getDynamo();
     if (!adapter) {
       this.commit();
-      return;
+      return {};
     }
     const orderItem = {
       pk: `ORDER#${order.id}`,
@@ -3457,9 +4218,11 @@ var StoreRepository = class {
     this.lastPersistedFingerprints.set(orderItem.pk, buildItemFingerprint(orderItem));
     this.commit();
     await this.flushPendingSync();
+    return {};
   }
   commit() {
     this.stateVersion += 1;
+    this.publicBootstrapCache = null;
     this.saveLocal(this.state);
     const pg = this.getPostgres();
     if (pg) {
@@ -4017,26 +4780,281 @@ function createTrafficGuardMiddleware(options) {
   };
 }
 
+// server/razorpay.ts
+import crypto5 from "node:crypto";
+var RAZORPAY_ORDER_ID_PATTERN = /^order_[A-Za-z0-9]{6,50}$/;
+var RAZORPAY_PAYMENT_ID_PATTERN = /^pay_[A-Za-z0-9]{6,50}$/;
+var RAZORPAY_SIGNATURE_HEX_PATTERN = /^[a-f0-9]{64}$/i;
+function getRazorpayConfig(env = process.env) {
+  const keyId = env.RAZORPAY_KEY_ID?.trim();
+  const keySecret = env.RAZORPAY_KEY_SECRET?.trim();
+  if (!keyId || !keySecret) {
+    return null;
+  }
+  const mode = keyId.startsWith("rzp_test_") ? "test" : keyId.startsWith("rzp_live_") ? "live" : "custom";
+  return { keyId, keySecret, mode };
+}
+function isValidRazorpayOrderId(orderId) {
+  return typeof orderId === "string" && RAZORPAY_ORDER_ID_PATTERN.test(orderId.trim());
+}
+function isValidRazorpayPaymentId(paymentId) {
+  return typeof paymentId === "string" && RAZORPAY_PAYMENT_ID_PATTERN.test(paymentId.trim());
+}
+function normalizeRazorpayPaymentMethod(rawMethod, fallback) {
+  const mapToken = (value) => {
+    if (typeof value !== "string") return null;
+    const normalized = value.trim().toLowerCase().replace(/[\s_-]+/g, "");
+    switch (normalized) {
+      case "upi":
+        return "UPI";
+      case "card":
+      case "creditcard":
+      case "debitcard":
+        return "Card";
+      case "netbanking":
+      case "banktransfer":
+        return "NetBanking";
+      case "wallet":
+        return "Wallet";
+      case "emi":
+      case "cardlessemi":
+        return "EMI";
+      case "paylater":
+        return "PayLater";
+      case "online":
+        return "Online";
+      default:
+        return null;
+    }
+  };
+  return mapToken(rawMethod) ?? mapToken(fallback) ?? "Online";
+}
+function verifyRazorpaySignature(params) {
+  const signature = params.razorpaySignature.trim();
+  if (!RAZORPAY_SIGNATURE_HEX_PATTERN.test(signature)) {
+    return false;
+  }
+  const expected = crypto5.createHmac("sha256", params.keySecret).update(`${params.razorpayOrderId}|${params.razorpayPaymentId}`).digest("hex");
+  const sigBuf = Buffer.from(signature.toLowerCase(), "utf8");
+  const expBuf = Buffer.from(expected.toLowerCase(), "utf8");
+  return sigBuf.length === expBuf.length && crypto5.timingSafeEqual(sigBuf, expBuf);
+}
+function verifyRazorpayWebhookSignature(params) {
+  const signature = params.signature.trim();
+  const secret = params.webhookSecret.trim();
+  if (!secret || !RAZORPAY_SIGNATURE_HEX_PATTERN.test(signature)) {
+    return false;
+  }
+  const expected = crypto5.createHmac("sha256", secret).update(params.rawBody).digest("hex");
+  const sigBuf = Buffer.from(signature.toLowerCase(), "utf8");
+  const expBuf = Buffer.from(expected.toLowerCase(), "utf8");
+  return sigBuf.length === expBuf.length && crypto5.timingSafeEqual(sigBuf, expBuf);
+}
+function validateRazorpayPaymentDetails(payment, expected) {
+  const expectedCurrency = (expected.currency ?? "INR").toUpperCase();
+  const requireCaptured = expected.requireCaptured ?? true;
+  if (!payment || typeof payment !== "object") {
+    return {
+      ok: false,
+      statusCode: 502,
+      code: "RAZORPAY_INVALID_RESPONSE",
+      message: "Razorpay returned an invalid payment response. Please contact support."
+    };
+  }
+  if (payment.id !== expected.razorpayPaymentId) {
+    return {
+      ok: false,
+      statusCode: 400,
+      code: "RAZORPAY_PAYMENT_ID_MISMATCH",
+      message: "Payment transaction reference does not match Razorpay records."
+    };
+  }
+  if (payment.order_id !== expected.razorpayOrderId) {
+    return {
+      ok: false,
+      statusCode: 400,
+      code: "RAZORPAY_ORDER_ID_MISMATCH",
+      message: "Payment does not belong to this Razorpay order."
+    };
+  }
+  if (Number(payment.amount) !== expected.amountPaise) {
+    return {
+      ok: false,
+      statusCode: 400,
+      code: "RAZORPAY_AMOUNT_MISMATCH",
+      message: "Paid amount does not match the expected order total."
+    };
+  }
+  if (String(payment.currency || "").toUpperCase() !== expectedCurrency) {
+    return {
+      ok: false,
+      statusCode: 400,
+      code: "RAZORPAY_CURRENCY_MISMATCH",
+      message: `Payment currency must be ${expectedCurrency}.`
+    };
+  }
+  if (requireCaptured && payment.status !== "captured") {
+    return {
+      ok: false,
+      statusCode: 402,
+      code: "RAZORPAY_PAYMENT_NOT_CAPTURED",
+      message: payment.status === "failed" ? payment.error_description || "Payment failed at the bank or gateway. Please try again." : `Payment has not been captured yet (status: ${payment.status || "unknown"}).`
+    };
+  }
+  return { ok: true, payment };
+}
+function buildBasicAuthHeader(config) {
+  return `Basic ${Buffer.from(`${config.keyId}:${config.keySecret}`).toString("base64")}`;
+}
+async function createRazorpayServerOrder(params) {
+  const fetchFn = params.fetchImpl ?? fetch;
+  try {
+    const rzpRes = await fetchFn("https://api.razorpay.com/v1/orders", {
+      method: "POST",
+      headers: {
+        Authorization: buildBasicAuthHeader(params.config),
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        amount: params.amountPaise,
+        currency: (params.currency ?? "INR").toUpperCase(),
+        receipt: params.receipt,
+        payment_capture: 1,
+        notes: params.notes ?? { store: "HimRudra" }
+      })
+    });
+    const rzpData = await rzpRes.json().catch(() => ({}));
+    if (!rzpRes.ok || !isValidRazorpayOrderId(rzpData.id)) {
+      return {
+        ok: false,
+        statusCode: 502,
+        gatewayStatus: rzpRes.status,
+        message: rzpData.error?.description || "Payment gateway could not initialize your order. Please try again."
+      };
+    }
+    return { ok: true, razorpayOrderId: rzpData.id, status: rzpRes.status };
+  } catch {
+    return {
+      ok: false,
+      statusCode: 502,
+      message: "Unable to reach Razorpay payment gateway. Please retry in a moment."
+    };
+  }
+}
+async function fetchAndVerifyCapturedRazorpayPayment(params) {
+  const fetchFn = params.fetchImpl ?? fetch;
+  const expectedCurrency = (params.expectedCurrency ?? "INR").toUpperCase();
+  const authHeader = buildBasicAuthHeader(params.config);
+  let payment;
+  try {
+    const fetchRes = await fetchFn(
+      `https://api.razorpay.com/v1/payments/${encodeURIComponent(params.razorpayPaymentId)}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: authHeader,
+          Accept: "application/json"
+        }
+      }
+    );
+    const payload = await fetchRes.json().catch(() => ({}));
+    if (!fetchRes.ok) {
+      return {
+        ok: false,
+        statusCode: fetchRes.status === 404 ? 400 : 502,
+        code: "RAZORPAY_PAYMENT_FETCH_FAILED",
+        message: payload.error?.description || "Could not verify payment details with Razorpay. Please retry."
+      };
+    }
+    payment = payload;
+  } catch {
+    return {
+      ok: false,
+      statusCode: 502,
+      code: "RAZORPAY_PAYMENT_FETCH_NETWORK_ERROR",
+      message: "Unable to reach Razorpay to confirm your payment. Please retry."
+    };
+  }
+  const preCaptureCheck = validateRazorpayPaymentDetails(payment, {
+    razorpayOrderId: params.razorpayOrderId,
+    razorpayPaymentId: params.razorpayPaymentId,
+    amountPaise: params.expectedAmountPaise,
+    currency: expectedCurrency,
+    requireCaptured: false
+  });
+  if (!preCaptureCheck.ok) {
+    return preCaptureCheck;
+  }
+  if (payment.status === "authorized") {
+    try {
+      const captureRes = await fetchFn(
+        `https://api.razorpay.com/v1/payments/${encodeURIComponent(params.razorpayPaymentId)}/capture`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: authHeader,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            amount: params.expectedAmountPaise,
+            currency: expectedCurrency
+          })
+        }
+      );
+      const capturedPayload = await captureRes.json().catch(() => ({}));
+      if (!captureRes.ok) {
+        return {
+          ok: false,
+          statusCode: 402,
+          code: "RAZORPAY_CAPTURE_FAILED",
+          message: capturedPayload.error?.description || "Razorpay could not capture this payment. No order was placed."
+        };
+      }
+      payment = capturedPayload;
+    } catch {
+      return {
+        ok: false,
+        statusCode: 502,
+        code: "RAZORPAY_CAPTURE_NETWORK_ERROR",
+        message: "Unable to complete payment capture with Razorpay. Please retry."
+      };
+    }
+  }
+  return validateRazorpayPaymentDetails(payment, {
+    razorpayOrderId: params.razorpayOrderId,
+    razorpayPaymentId: params.razorpayPaymentId,
+    amountPaise: params.expectedAmountPaise,
+    currency: expectedCurrency,
+    requireCaptured: true
+  });
+}
+
 // server.ts
 dotenv.config({ path: ".env.local" });
 dotenv.config();
 var PORT = Number(process.env.PORT) || 3e3;
 var IS_SERVERLESS2 = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 var SESSION_COOKIE = "himrudra_session";
-var SESSION_SECRET = process.env.SESSION_SECRET && process.env.SESSION_SECRET !== "change-me-in-production" ? process.env.SESSION_SECRET : "himrudra-dev-session-hmac-secret-2026";
+var USING_FALLBACK_SESSION_SECRET = !process.env.SESSION_SECRET || process.env.SESSION_SECRET === "change-me-in-production";
+var SESSION_SECRET = USING_FALLBACK_SESSION_SECRET ? "himrudra-dev-session-hmac-secret-2026" : process.env.SESSION_SECRET;
+if (USING_FALLBACK_SESSION_SECRET && process.env.NODE_ENV === "production") {
+  logStructured("warn", "security", "session_secret_fallback_in_production", {
+    message: "SESSION_SECRET env var is not configured; set a strong random secret in production."
+  });
+}
 function signSession(payload) {
   const data = Buffer.from(JSON.stringify(payload)).toString("base64url");
-  const sig = crypto5.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
+  const sig = crypto6.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
   return `${data}.${sig}`;
 }
 function verifySession(token) {
   try {
     const [data, sig] = token.split(".");
     if (!data || !sig) return null;
-    const expected = crypto5.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
+    const expected = crypto6.createHmac("sha256", SESSION_SECRET).update(data).digest("base64url");
     const sigBuf = Buffer.from(sig);
     const expBuf = Buffer.from(expected);
-    if (sigBuf.length !== expBuf.length || !crypto5.timingSafeEqual(sigBuf, expBuf)) {
+    if (sigBuf.length !== expBuf.length || !crypto6.timingSafeEqual(sigBuf, expBuf)) {
       return null;
     }
     const payload = JSON.parse(Buffer.from(data, "base64url").toString("utf-8"));
@@ -4068,14 +5086,16 @@ async function attachUser(req, _res, next) {
     const cookies = parseCookies(req.headers.cookie);
     const authHeader = req.headers.authorization;
     const bearerToken = typeof authHeader === "string" && authHeader.startsWith("Bearer ") ? authHeader.slice(7).trim() : void 0;
-    const rawToken = cookies[SESSION_COOKIE] || bearerToken;
-    if (rawToken) {
+    const candidateTokens = [bearerToken, cookies[SESSION_COOKIE]].filter(
+      (t) => Boolean(t)
+    );
+    for (const rawToken of candidateTokens) {
       const session = verifySession(rawToken);
-      if (session) {
-        const user = await storeRepo.findUserById(session.userId).catch(() => null);
-        if (user) {
-          req.currentUser = user;
-        }
+      if (!session) continue;
+      const user = await storeRepo.findUserById(session.userId).catch(() => null);
+      if (user) {
+        req.currentUser = user;
+        break;
       }
     }
     next();
@@ -4090,8 +5110,17 @@ function requireAuth(req, res, next) {
   next();
 }
 function requireAdmin(req, res, next) {
+  if (!req.currentUser) {
+    return res.status(401).json({
+      error: "Admin session expired or missing. Please sign in as the store owner.",
+      code: "ADMIN_AUTH_REQUIRED"
+    });
+  }
   if (!isAuthorizedAdmin(req.currentUser, getAdminOwnerEmail())) {
-    return res.status(403).json({ error: "Private store owner access required." });
+    return res.status(403).json({
+      error: "Private store owner access required.",
+      code: "ADMIN_FORBIDDEN"
+    });
   }
   next();
 }
@@ -4135,8 +5164,8 @@ function createApiApp() {
   app2.use("/api", async (req, res, next) => {
     try {
       const isMutation = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
-      const isDirectPostgresAuthRoute = storeRepo.isPostgresEnabled() && (req.path === "/auth/login" || req.path === "/auth/register" || req.path === "/auth/google" || req.path === "/auth/logout" || req.path === "/auth/profile" || req.path === "/auth/wishlist");
-      if (!isDirectPostgresAuthRoute) {
+      const isDirectPostgresRoute = storeRepo.isPostgresEnabled() && (req.path === "/auth/login" || req.path === "/auth/register" || req.path === "/auth/google" || req.path === "/auth/logout" || req.path === "/auth/profile" || req.path === "/auth/wishlist" || req.path === "/payments/create-order" || req.path === "/payments/verify" || req.method === "POST" && req.path === "/orders");
+      if (!isDirectPostgresRoute) {
         await storeRepo.ensureLoaded({ forceRefresh: isMutation });
       }
       if (isMutation) {
@@ -4247,7 +5276,7 @@ function createApiApp() {
       }
       const passwordHash = await hashPasswordAsync(password);
       const newUser = {
-        id: `usr-${crypto5.randomUUID().slice(0, 8)}`,
+        id: `usr-${crypto6.randomUUID().slice(0, 8)}`,
         name: name.trim(),
         email: normalizedEmail,
         phone: phone.replace(/\D/g, ""),
@@ -4312,12 +5341,12 @@ function createApiApp() {
         ...existing,
         role: isOwner ? "admin" : existing.role
       } : {
-        id: `usr-${crypto5.randomUUID().slice(0, 8)}`,
+        id: `usr-${crypto6.randomUUID().slice(0, 8)}`,
         name: fallbackName,
         email: normalizedEmail,
         phone: "",
         role: isOwner ? "admin" : "customer",
-        passwordHash: await hashPasswordAsync(crypto5.randomBytes(24).toString("hex")),
+        passwordHash: await hashPasswordAsync(crypto6.randomBytes(24).toString("hex")),
         createdAt: (/* @__PURE__ */ new Date()).toISOString(),
         wishlistProductIds: []
       };
@@ -4386,191 +5415,410 @@ function createApiApp() {
     }
   });
   app2.post("/api/payments/create-order", async (req, res) => {
+    const startedAt = Date.now();
     const { items, shippingSpeed, paymentMethod, couponCode } = req.body;
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Your cart is empty." });
     }
-    const state = storeRepo.getState();
-    for (const item of items) {
-      const product = state.products.find((p) => p.id === item.productId && p.active);
-      if (!product) {
-        return res.status(400).json({ error: `Product ${item.productId} is unavailable.` });
-      }
-      if (item.quantity <= 0 || item.quantity > product.stock) {
-        return res.status(400).json({
-          error: `Only ${product.stock} unit(s) available for ${product.name}.`
-        });
-      }
+    if (paymentMethod === "COD") {
+      return res.status(400).json({ error: "Cash on Delivery does not require an online payment order." });
     }
-    const calc = calculateCartTotals(items, state.products, state.settings, {
-      shippingSpeed,
-      paymentMethod,
-      couponCode,
-      coupons: state.coupons,
-      promotions: state.promotions,
-      nowMs: Date.now()
-    });
-    const amountPaise = Math.round(calc.grandTotal * 100);
-    const keyId = process.env.RAZORPAY_KEY_ID?.trim();
-    const keySecret = process.env.RAZORPAY_KEY_SECRET?.trim();
-    let razorpayOrderId = `order_HR${crypto5.randomBytes(6).toString("hex")}`;
-    if (keyId && keySecret) {
-      try {
-        const authHeader = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
-        const rzpRes = await fetch("https://api.razorpay.com/v1/orders", {
-          method: "POST",
-          headers: {
-            Authorization: `Basic ${authHeader}`,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            amount: amountPaise,
-            currency: "INR",
-            receipt: `hr_${Date.now()}`,
-            notes: { store: "HimRudra", method: paymentMethod || "UPI" }
-          })
-        });
-        const rzpData = await rzpRes.json().catch(() => ({}));
-        if (!rzpRes.ok || !rzpData.id) {
-          logStructured("error", "payments", "razorpay_order_create_failed", {
-            requestId: req.requestId,
-            status: rzpRes.status,
-            error: rzpData.error?.description || "Gateway rejected order creation"
-          });
-          return res.status(502).json({
-            error: rzpData.error?.description || "Payment gateway could not initialize your order. Please try again."
-          });
-        }
-        razorpayOrderId = rzpData.id;
-      } catch (err) {
-        logStructured("error", "payments", "razorpay_order_create_exception", {
-          requestId: req.requestId,
-          error: err instanceof Error ? err.message : "Network error"
-        });
-        return res.status(502).json({
-          error: "Unable to reach Razorpay payment gateway. Please retry in a moment."
-        });
-      }
-    }
-    state.paymentIntents[razorpayOrderId] = {
-      razorpayOrderId,
-      amountPaise,
-      verified: false,
-      signatureVerified: false,
-      method: paymentMethod || "UPI",
-      createdAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    storeRepo.commit();
-    res.json({
-      razorpayOrderId,
-      amountPaise,
-      currency: "INR",
-      keyId: keyId || "rzp_test_himrudra_gateway",
-      liveGateway: Boolean(keyId && keySecret),
-      calculation: calc
-    });
-  });
-  app2.post("/api/payments/verify", (req, res) => {
-    const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
-    if (!razorpayOrderId || !razorpayPaymentId) {
-      return res.status(400).json({ error: "Missing payment order or transaction reference." });
-    }
-    const state = storeRepo.getState();
-    const intent = state.paymentIntents[razorpayOrderId];
-    if (!intent) {
-      return res.status(404).json({ error: "Payment session not found or expired." });
-    }
-    const secret = process.env.RAZORPAY_KEY_SECRET?.trim();
-    if (secret) {
-      if (!razorpaySignature) {
-        return res.status(400).json({ error: "Payment signature missing." });
-      }
-      const expected = crypto5.createHmac("sha256", secret).update(`${razorpayOrderId}|${razorpayPaymentId}`).digest("hex");
-      const sigBuf = Buffer.from(razorpaySignature);
-      const expBuf = Buffer.from(expected);
-      if (sigBuf.length !== expBuf.length || !crypto5.timingSafeEqual(sigBuf, expBuf)) {
-        logStructured("warn", "payments", "signature_mismatch", {
-          requestId: req.requestId,
-          razorpayOrderId
-        });
-        return res.status(400).json({ error: "Payment signature verification failed." });
-      }
-    } else if (!razorpayPaymentId.startsWith("pay_")) {
-      return res.status(400).json({ error: "Invalid payment transaction reference." });
-    }
-    intent.verified = true;
-    intent.signatureVerified = Boolean(secret);
-    intent.paymentId = razorpayPaymentId;
-    storeRepo.commit();
-    res.json({
-      verified: true,
-      razorpayOrderId,
-      razorpayPaymentId,
-      verifiedAt: (/* @__PURE__ */ new Date()).toISOString()
-    });
-  });
-  app2.post("/api/payments/webhook", (req, res) => {
-    const signature = String(req.headers["x-razorpay-signature"] ?? "");
-    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET?.trim();
-    if (webhookSecret) {
-      const payloadToVerify = req.rawBody ?? JSON.stringify(req.body);
-      const expected = crypto5.createHmac("sha256", webhookSecret).update(payloadToVerify).digest("hex");
-      const sigBuf = Buffer.from(signature);
-      const expBuf = Buffer.from(expected);
-      if (!signature || sigBuf.length !== expBuf.length || !crypto5.timingSafeEqual(sigBuf, expBuf)) {
-        logStructured("warn", "payments", "webhook_signature_invalid", {
-          requestId: req.requestId
-        });
-        return res.status(400).json({ error: "Invalid webhook signature." });
-      }
-    } else if (process.env.NODE_ENV === "production" && IS_SERVERLESS2) {
+    const razorpayConfig = getRazorpayConfig();
+    if (!razorpayConfig) {
+      logStructured("error", "payments", "razorpay_credentials_missing", {
+        requestId: req.requestId
+      });
       return res.status(503).json({
-        error: "RAZORPAY_WEBHOOK_SECRET must be configured in production to process webhooks."
+        error: "Online payments are temporarily unavailable because Razorpay credentials are not configured on the server. Please use Cash on Delivery or try again later.",
+        code: "RAZORPAY_NOT_CONFIGURED"
       });
     }
+    try {
+      const ctxStartedAt = Date.now();
+      const ctx = await storeRepo.loadCheckoutContext();
+      const contextMs = Date.now() - ctxStartedAt;
+      for (const item of items) {
+        const product = ctx.products.find((p) => p.id === item.productId && p.active);
+        if (!product) {
+          return res.status(400).json({ error: `Product ${item.productId} is unavailable.` });
+        }
+        if (item.quantity <= 0 || item.quantity > product.stock) {
+          return res.status(400).json({
+            error: `Only ${product.stock} unit(s) available for ${product.name}.`
+          });
+        }
+      }
+      const calc = calculateCartTotals(items, ctx.products, ctx.settings, {
+        shippingSpeed,
+        paymentMethod,
+        couponCode,
+        coupons: ctx.coupons,
+        promotions: ctx.promotions,
+        nowMs: Date.now()
+      });
+      const amountPaise = Math.round(calc.grandTotal * 100);
+      if (!Number.isFinite(amountPaise) || amountPaise < 100) {
+        return res.status(400).json({ error: "Invalid payable amount for online payment." });
+      }
+      const rzpStartedAt = Date.now();
+      const orderCreation = await createRazorpayServerOrder({
+        config: razorpayConfig,
+        amountPaise,
+        currency: "INR",
+        receipt: `hr_${Date.now()}`,
+        notes: { store: "HimRudra", method: paymentMethod || "UPI" }
+      });
+      const razorpayMs = Date.now() - rzpStartedAt;
+      if (!orderCreation.ok) {
+        logStructured("error", "payments", "razorpay_order_create_failed", {
+          requestId: req.requestId,
+          status: orderCreation.gatewayStatus,
+          razorpayMs,
+          error: orderCreation.message
+        });
+        return res.status(orderCreation.statusCode).json({
+          error: orderCreation.message,
+          code: "RAZORPAY_ORDER_CREATE_FAILED"
+        });
+      }
+      const razorpayOrderId = orderCreation.razorpayOrderId;
+      const dbWriteStartedAt = Date.now();
+      await storeRepo.upsertPaymentIntent({
+        razorpayOrderId,
+        amountPaise,
+        verified: false,
+        signatureVerified: false,
+        method: paymentMethod || "UPI",
+        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      const dbWriteMs = Date.now() - dbWriteStartedAt;
+      const totalMs = Date.now() - startedAt;
+      res.setHeader(
+        "Server-Timing",
+        `context;dur=${contextMs}, razorpay;dur=${razorpayMs}, dbWrite;dur=${dbWriteMs}, total;dur=${totalMs}`
+      );
+      logStructured("info", "payments", "create_order_timing", {
+        requestId: req.requestId,
+        razorpayMode: razorpayConfig.mode,
+        contextMs,
+        razorpayMs,
+        dbWriteMs,
+        totalMs
+      });
+      res.json({
+        razorpayOrderId,
+        amountPaise,
+        currency: "INR",
+        keyId: razorpayConfig.keyId,
+        mode: razorpayConfig.mode,
+        liveGateway: true,
+        calculation: calc
+      });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message = err instanceof Error && err.message ? err.message : "Unable to initialize payment right now. Please try again.";
+      logStructured("error", "payments", "create_order_failed", {
+        requestId: req.requestId,
+        durationMs: Date.now() - startedAt,
+        error: message
+      });
+      return res.status(statusCode).json({ error: message, requestId: req.requestId });
+    }
+  });
+  app2.post("/api/payments/verify", async (req, res) => {
+    const startedAt = Date.now();
+    const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
+    const razorpayConfig = getRazorpayConfig();
+    if (!razorpayConfig) {
+      logStructured("error", "payments", "razorpay_credentials_missing_verify", {
+        requestId: req.requestId
+      });
+      return res.status(503).json({
+        error: "Online payment verification is unavailable because Razorpay credentials are not configured on the server.",
+        code: "RAZORPAY_NOT_CONFIGURED"
+      });
+    }
+    if (!isValidRazorpayOrderId(razorpayOrderId) || !isValidRazorpayPaymentId(razorpayPaymentId)) {
+      return res.status(400).json({
+        error: "Valid Razorpay order ID and payment ID are required.",
+        code: "RAZORPAY_INVALID_REFERENCE"
+      });
+    }
+    if (typeof razorpaySignature !== "string" || !razorpaySignature.trim()) {
+      return res.status(400).json({
+        error: "Payment signature is required for verification.",
+        code: "RAZORPAY_SIGNATURE_MISSING"
+      });
+    }
+    const cleanOrderId = razorpayOrderId.trim();
+    const cleanPaymentId = razorpayPaymentId.trim();
+    const cleanSignature = razorpaySignature.trim();
+    try {
+      const dbReadStartedAt = Date.now();
+      const intent = await storeRepo.findPaymentIntent(cleanOrderId);
+      const dbReadMs = Date.now() - dbReadStartedAt;
+      if (!intent) {
+        return res.status(404).json({
+          error: "Payment session not found or expired.",
+          code: "PAYMENT_SESSION_NOT_FOUND"
+        });
+      }
+      const verifyStartedAt = Date.now();
+      const signatureValid = verifyRazorpaySignature({
+        razorpayOrderId: cleanOrderId,
+        razorpayPaymentId: cleanPaymentId,
+        razorpaySignature: cleanSignature,
+        keySecret: razorpayConfig.keySecret
+      });
+      if (!signatureValid) {
+        logStructured("warn", "payments", "signature_mismatch", {
+          requestId: req.requestId,
+          razorpayOrderId: cleanOrderId
+        });
+        return res.status(400).json({
+          error: "Payment signature verification failed.",
+          code: "RAZORPAY_SIGNATURE_INVALID"
+        });
+      }
+      if (intent.verified && intent.paymentId && intent.paymentId !== cleanPaymentId) {
+        return res.status(409).json({
+          error: "This payment session has already been verified with a different transaction.",
+          code: "PAYMENT_ALREADY_BOUND"
+        });
+      }
+      const idempotent = Boolean(
+        intent.verified && intent.signatureVerified && intent.paymentId === cleanPaymentId
+      );
+      let verifiedPaymentMethod = normalizeRazorpayPaymentMethod(intent.method);
+      let razorpayApiMs = 0;
+      let dbWriteMs = 0;
+      if (!idempotent) {
+        const apiStartedAt = Date.now();
+        const apiCheck = await fetchAndVerifyCapturedRazorpayPayment({
+          config: razorpayConfig,
+          razorpayOrderId: cleanOrderId,
+          razorpayPaymentId: cleanPaymentId,
+          expectedAmountPaise: intent.amountPaise,
+          expectedCurrency: "INR"
+        });
+        razorpayApiMs = Date.now() - apiStartedAt;
+        if (!apiCheck.ok) {
+          logStructured("warn", "payments", "razorpay_api_verification_failed", {
+            requestId: req.requestId,
+            razorpayOrderId: cleanOrderId,
+            code: apiCheck.code,
+            statusCode: apiCheck.statusCode,
+            razorpayApiMs
+          });
+          return res.status(apiCheck.statusCode).json({
+            error: apiCheck.message,
+            code: apiCheck.code
+          });
+        }
+        verifiedPaymentMethod = normalizeRazorpayPaymentMethod(
+          apiCheck.payment.method,
+          intent.method
+        );
+        const dbWriteStartedAt = Date.now();
+        await storeRepo.upsertPaymentIntent({
+          ...intent,
+          method: verifiedPaymentMethod,
+          verified: true,
+          signatureVerified: true,
+          paymentId: cleanPaymentId
+        });
+        dbWriteMs = Date.now() - dbWriteStartedAt;
+      }
+      const verifyMs = Date.now() - verifyStartedAt;
+      const totalMs = Date.now() - startedAt;
+      res.setHeader(
+        "Server-Timing",
+        `dbRead;dur=${dbReadMs}, verify;dur=${verifyMs}, razorpayApi;dur=${razorpayApiMs}, dbWrite;dur=${dbWriteMs}, total;dur=${totalMs}`
+      );
+      logStructured("info", "payments", "verify_timing", {
+        requestId: req.requestId,
+        idempotent,
+        paymentMethod: verifiedPaymentMethod,
+        dbReadMs,
+        razorpayApiMs,
+        verifyMs,
+        dbWriteMs,
+        totalMs
+      });
+      res.json({
+        verified: true,
+        idempotent,
+        paymentMethod: verifiedPaymentMethod,
+        razorpayOrderId: cleanOrderId,
+        razorpayPaymentId: cleanPaymentId,
+        verifiedAt: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message = err instanceof Error && err.message ? err.message : "Unable to verify payment right now. Please try again.";
+      logStructured("error", "payments", "verify_failed", {
+        requestId: req.requestId,
+        durationMs: Date.now() - startedAt,
+        error: message
+      });
+      return res.status(statusCode).json({ error: message, requestId: req.requestId });
+    }
+  });
+  app2.post("/api/payments/webhook", async (req, res) => {
+    const signature = String(req.headers["x-razorpay-signature"] ?? "");
+    const webhookSecret = process.env.RAZORPAY_WEBHOOK_SECRET?.trim();
+    if (!webhookSecret) {
+      logStructured("error", "payments", "webhook_secret_missing", {
+        requestId: req.requestId
+      });
+      return res.status(503).json({
+        error: "RAZORPAY_WEBHOOK_SECRET is not configured on the server.",
+        code: "RAZORPAY_WEBHOOK_NOT_CONFIGURED"
+      });
+    }
+    const payloadToVerify = req.rawBody ?? JSON.stringify(req.body);
+    if (!verifyRazorpayWebhookSignature({
+      rawBody: payloadToVerify,
+      signature,
+      webhookSecret
+    })) {
+      logStructured("warn", "payments", "webhook_signature_invalid", {
+        requestId: req.requestId
+      });
+      return res.status(400).json({ error: "Invalid webhook signature." });
+    }
     const body = req.body;
-    const event = body.event;
-    const razorpayOrderId = body.razorpayOrderId || body.payload?.payment?.entity?.order_id;
-    const razorpayPaymentId = body.razorpayPaymentId || body.payload?.payment?.entity?.id;
+    const event = String(body.event || "").trim();
+    const paymentEntity = body.payload?.payment?.entity;
+    const refundEntity = body.payload?.refund?.entity;
+    const razorpayOrderId = body.razorpayOrderId || paymentEntity?.order_id;
+    const razorpayPaymentId = body.razorpayPaymentId || paymentEntity?.id || refundEntity?.payment_id;
+    const entityAmountPaise = typeof paymentEntity?.amount === "number" ? paymentEntity.amount : void 0;
+    const entityCurrency = paymentEntity?.currency ? String(paymentEntity.currency).toUpperCase() : "INR";
     const state = storeRepo.getState();
+    let intentReconciled = false;
+    if ((event === "payment.captured" || event === "order.paid") && razorpayOrderId && razorpayPaymentId && entityCurrency === "INR") {
+      const intent = await storeRepo.findPaymentIntent(razorpayOrderId).catch(() => null);
+      if (intent && (entityAmountPaise === void 0 || entityAmountPaise === intent.amountPaise) && (!intent.paymentId || intent.paymentId === razorpayPaymentId)) {
+        const reconciledMethod = normalizeRazorpayPaymentMethod(
+          paymentEntity?.method,
+          intent.method
+        );
+        if (!intent.verified || !intent.signatureVerified || intent.method !== reconciledMethod) {
+          await storeRepo.upsertPaymentIntent({
+            ...intent,
+            method: reconciledMethod,
+            verified: true,
+            signatureVerified: true,
+            paymentId: razorpayPaymentId
+          });
+          intentReconciled = true;
+        }
+      }
+    }
     const order = state.orders.find(
       (o) => razorpayOrderId && o.razorpayOrderId === razorpayOrderId || razorpayPaymentId && o.razorpayPaymentId === razorpayPaymentId
     );
     if (!order) {
-      return res.json({ received: true, matched: false });
+      return res.json({ received: true, matched: false, intentReconciled });
     }
-    if (event === "payment.captured" && order.paymentStatus !== "Paid") {
-      const nowIso = (/* @__PURE__ */ new Date()).toISOString();
-      order.paymentStatus = "Paid";
-      order.paymentVerifiedAt = nowIso;
-      if (order.status === "Pending Payment") {
-        order.status = "Payment Confirmed";
-      }
-      order.timeline.push({
-        status: "Payment Confirmed",
-        timestamp: nowIso,
-        note: `Webhook verified payment (${razorpayPaymentId || order.razorpayPaymentId || "Gateway"})`
-      });
-      if (!state.adminNotifications.some((n) => n.orderId === order.id && n.type === "new_paid_order")) {
-        state.adminNotifications.unshift({
-          id: `notif-${crypto5.randomUUID().slice(0, 8)}`,
-          type: "new_paid_order",
-          title: "New Paid Order Received!",
-          message: `${order.orderNumber} from ${order.customerName} (\u20B9${order.totalAmount})`,
-          orderId: order.id,
+    const expectedOrderPaise = Math.round(order.totalAmount * 100);
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    let orderUpdated = false;
+    if (event === "payment.captured" || event === "order.paid") {
+      if (entityCurrency !== "INR" || entityAmountPaise !== void 0 && entityAmountPaise !== expectedOrderPaise) {
+        logStructured("warn", "payments", "webhook_amount_or_currency_mismatch", {
+          requestId: req.requestId,
           orderNumber: order.orderNumber,
-          customerName: order.customerName,
-          amount: order.totalAmount,
-          read: false,
-          emailNotifiedTo: state.settings.emailNotificationsEnabled ? state.settings.orderNotificationEmail : void 0,
-          createdAt: nowIso
+          entityCurrency
         });
+        return res.status(400).json({ error: "Webhook payment amount or currency mismatch." });
       }
+      if (order.paymentStatus !== "Paid") {
+        const verifiedMethod = normalizeRazorpayPaymentMethod(
+          paymentEntity?.method,
+          order.paymentMethod
+        );
+        order.paymentStatus = "Paid";
+        order.paymentMethod = verifiedMethod;
+        if (razorpayPaymentId) order.razorpayPaymentId = razorpayPaymentId;
+        order.paymentVerifiedAt = nowIso;
+        if (order.status === "Pending Payment") {
+          order.status = "Payment Confirmed";
+        }
+        order.timeline.push({
+          status: "Payment Confirmed",
+          timestamp: nowIso,
+          note: `Webhook verified ${verifiedMethod} payment (${razorpayPaymentId || order.razorpayPaymentId || "Gateway"})`
+        });
+        if (!state.adminNotifications.some(
+          (n) => n.orderId === order.id && n.type === "new_paid_order"
+        )) {
+          state.adminNotifications.unshift({
+            id: `notif-${crypto6.randomUUID().slice(0, 8)}`,
+            type: "new_paid_order",
+            title: "New Paid Order Received!",
+            message: `${order.orderNumber} from ${order.customerName} (\u20B9${order.totalAmount})`,
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            customerName: order.customerName,
+            amount: order.totalAmount,
+            read: false,
+            emailNotifiedTo: state.settings.emailNotificationsEnabled ? state.settings.orderNotificationEmail : void 0,
+            createdAt: nowIso
+          });
+        }
+        orderUpdated = true;
+      }
+    } else if (event === "payment.failed") {
+      if (order.paymentStatus === "Pending Payment") {
+        order.paymentStatus = "Failed";
+        order.timeline.push({
+          status: order.status,
+          timestamp: nowIso,
+          note: `Razorpay webhook reported payment failed (${razorpayPaymentId || "Gateway"})`
+        });
+        orderUpdated = true;
+      }
+    } else if (event === "refund.processed") {
+      if (order.paymentStatus !== "Refunded") {
+        const prevStatus = order.status;
+        order.paymentStatus = "Refunded";
+        order.status = "Refunded";
+        if (typeof refundEntity?.amount === "number" && refundEntity.amount > 0) {
+          order.refundAmount = Math.round(refundEntity.amount) / 100;
+        } else if (order.refundAmount === void 0) {
+          order.refundAmount = order.totalAmount;
+        }
+        if (prevStatus !== "Cancelled" && prevStatus !== "Refunded") {
+          for (const item of order.items) {
+            const prod = state.products.find((p) => p.id === item.productId);
+            if (prod) {
+              prod.stock += item.quantity;
+            }
+          }
+        }
+        order.timeline.push({
+          status: "Refunded",
+          timestamp: nowIso,
+          note: `Razorpay webhook confirmed refund (${refundEntity?.id || "Gateway"})`
+        });
+        orderUpdated = true;
+      }
+    }
+    if (orderUpdated) {
       storeRepo.commit();
     }
-    res.json({ received: true, matched: true, orderNumber: order.orderNumber });
+    res.json({
+      received: true,
+      matched: true,
+      intentReconciled,
+      orderUpdated,
+      orderNumber: order.orderNumber
+    });
   });
   app2.post("/api/orders", async (req, res) => {
+    const startedAt = Date.now();
     const {
       items,
       shippingAddress,
@@ -4594,24 +5842,45 @@ function createApiApp() {
         fieldErrors: validation.errors
       });
     }
-    const state = storeRepo.getState();
     const isOnline = paymentMethod !== "COD";
-    if (isOnline && razorpayPaymentId) {
-      const existingOrder = state.orders.find(
-        (o) => o.razorpayPaymentId && o.razorpayPaymentId === razorpayPaymentId
-      );
-      if (existingOrder) {
-        return res.status(200).json({
-          order: existingOrder,
-          updatedProducts: state.products.filter((p) => p.active),
-          idempotent: true
-        });
-      }
+    const isPostgres = storeRepo.isPostgresEnabled();
+    let ctx;
+    let contextMs = 0;
+    try {
+      const ctxStartedAt = Date.now();
+      ctx = await storeRepo.loadCheckoutContext({
+        razorpayOrderId: isOnline ? razorpayOrderId : void 0,
+        razorpayPaymentId: isOnline ? razorpayPaymentId : void 0,
+        includeOrderSequence: true
+      });
+      contextMs = Date.now() - ctxStartedAt;
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message = err instanceof Error && err.message ? err.message : "Unable to load checkout details right now. Please try again.";
+      return res.status(statusCode).json({ error: message, requestId: req.requestId });
+    }
+    if (isOnline && ctx.existingOrderByPayment) {
+      const totalMs = Date.now() - startedAt;
+      res.setHeader("Server-Timing", `context;dur=${contextMs}, total;dur=${totalMs}`);
+      logStructured("info", "orders", "create_order_timing", {
+        requestId: req.requestId,
+        orderNumber: ctx.existingOrderByPayment.orderNumber,
+        paymentMethod,
+        idempotent: true,
+        contextMs,
+        txMs: 0,
+        totalMs
+      });
+      return res.status(200).json({
+        order: ctx.existingOrderByPayment,
+        updatedProducts: ctx.products.filter((p) => p.active),
+        idempotent: true
+      });
     }
     const orderItems = [];
     const stockDecrements = [];
     for (const item of items) {
-      const product = state.products.find((p) => p.id === item.productId && p.active);
+      const product = ctx.products.find((p) => p.id === item.productId && p.active);
       if (!product) {
         return res.status(400).json({ error: `Product not found: ${item.productId}` });
       }
@@ -4634,62 +5903,42 @@ function createApiApp() {
       stockDecrements.push({ productId: product.id, quantity: item.quantity });
     }
     const nowMs = Date.now();
-    const calc = calculateCartTotals(items, state.products, state.settings, {
+    const calc = calculateCartTotals(items, ctx.products, ctx.settings, {
       shippingSpeed,
       paymentMethod,
       couponCode,
-      coupons: state.coupons,
-      promotions: state.promotions,
+      coupons: ctx.coupons,
+      promotions: ctx.promotions,
       nowMs
     });
     if (isOnline) {
-      const intent = razorpayOrderId ? state.paymentIntents[razorpayOrderId] : void 0;
-      if (!intent || !intent.verified || !razorpayPaymentId || intent.paymentId !== razorpayPaymentId || intent.amountPaise !== Math.round(calc.grandTotal * 100)) {
+      const intent = ctx.paymentIntent;
+      if (!intent || !intent.verified || !intent.signatureVerified || !razorpayOrderId || !razorpayPaymentId || intent.razorpayOrderId !== razorpayOrderId || intent.paymentId !== razorpayPaymentId || intent.amountPaise !== Math.round(calc.grandTotal * 100)) {
         return res.status(402).json({
           error: "Payment verification is required before confirming your order."
         });
       }
     }
-    const stockSnapshots = /* @__PURE__ */ new Map();
-    for (const dec of stockDecrements) {
-      const product = state.products.find((p) => p.id === dec.productId);
-      if (product) {
-        stockSnapshots.set(product.id, product.stock);
-        product.stock = Math.max(0, product.stock - dec.quantity);
-      }
-    }
-    const appliedPromo = calc.appliedPromotion ? state.promotions.find((p) => p.id === calc.appliedPromotion.id) : void 0;
-    const prevPromoUsage = appliedPromo?.usageCount;
-    const prevPromoRevenue = appliedPromo?.revenueGenerated;
-    if (appliedPromo) {
-      appliedPromo.usageCount += 1;
-      appliedPromo.revenueGenerated += calc.grandTotal;
-    }
+    const resolvedPaymentMethod = isOnline ? normalizeRazorpayPaymentMethod(ctx.paymentIntent?.method, paymentMethod) : "COD";
     const now = new Date(nowMs);
     const deliveryDays = shippingSpeed === "express" ? 2 : 5;
     const estDate = new Date(now.getTime() + deliveryDays * 864e5).toISOString().slice(0, 10);
-    let maxSeq = state.orders.length;
-    for (const existing of state.orders) {
-      const match = /^HIM-2026-(\d+)$/.exec(existing.orderNumber);
-      if (match) {
-        const seq = Number(match[1]);
-        if (seq > maxSeq) maxSeq = seq;
-      }
-    }
-    const orderNumber = `HIM-2026-${String(maxSeq + 1).padStart(4, "0")}`;
+    let nextOrderSeq = ctx.maxOrderSeq + 1;
+    const buildOrderNumber = (seq) => `HIM-2026-${String(seq).padStart(4, "0")}`;
+    const orderNumber = buildOrderNumber(nextOrderSeq);
     const initialStatus = isOnline ? "Payment Confirmed" : "Processing";
     const timeline = [
       {
         status: "Pending Payment",
         timestamp: now.toISOString(),
-        note: `Order created (${paymentMethod})`
+        note: `Order created (${resolvedPaymentMethod})`
       }
     ];
     if (isOnline) {
       timeline.push({
         status: "Payment Confirmed",
         timestamp: now.toISOString(),
-        note: `Server-verified payment (${razorpayPaymentId})`
+        note: `Server-verified ${resolvedPaymentMethod} payment (${razorpayPaymentId})`
       });
     } else {
       timeline.push({
@@ -4698,11 +5947,11 @@ function createApiApp() {
         note: "Cash on Delivery order queued for packing"
       });
     }
-    const gatewayFeePct = state.settings.gatewayFeePercent ?? 2;
+    const gatewayFeePct = ctx.settings.gatewayFeePercent ?? 2;
     const gatewayFeeAmount = isOnline ? Math.round(calc.grandTotal * (gatewayFeePct / 100) * 100) / 100 : 0;
-    const actualShippingCost = state.settings.defaultShippingCostPerOrder ?? 65;
+    const actualShippingCost = ctx.settings.defaultShippingCostPerOrder ?? 65;
     const newOrder = {
-      id: `ord-${crypto5.randomUUID().slice(0, 8)}`,
+      id: `ord-${crypto6.randomUUID().slice(0, 8)}`,
       orderNumber,
       userId: req.currentUser?.id,
       customerName: shippingAddress.fullName.trim(),
@@ -4732,7 +5981,7 @@ function createApiApp() {
       totalAmount: calc.grandTotal,
       gatewayFeeAmount,
       actualShippingCost,
-      paymentMethod,
+      paymentMethod: resolvedPaymentMethod,
       paymentStatus: isOnline ? "Paid" : "Pending COD",
       razorpayOrderId: isOnline ? razorpayOrderId : void 0,
       razorpayPaymentId: isOnline ? razorpayPaymentId : void 0,
@@ -4742,46 +5991,142 @@ function createApiApp() {
       timeline,
       createdAt: now.toISOString()
     };
-    state.orders.unshift(newOrder);
-    let addedNotifId = null;
-    if (isOnline) {
-      addedNotifId = `notif-${crypto5.randomUUID().slice(0, 8)}`;
-      const notif = {
-        id: addedNotifId,
-        type: "new_paid_order",
-        title: "New Paid Order Received!",
-        message: `${newOrder.orderNumber} from ${newOrder.customerName} (\u20B9${newOrder.totalAmount})`,
-        orderId: newOrder.id,
-        orderNumber: newOrder.orderNumber,
-        customerName: newOrder.customerName,
-        amount: newOrder.totalAmount,
-        read: false,
-        emailNotifiedTo: state.settings.emailNotificationsEnabled ? state.settings.orderNotificationEmail : void 0,
-        createdAt: now.toISOString()
-      };
-      state.adminNotifications.unshift(notif);
-    }
+    const promotionUpdate = calc.appliedPromotion ? { promotionId: calc.appliedPromotion.id, revenueDelta: calc.grandTotal } : void 0;
+    const adminNotification = isOnline ? {
+      id: `notif-${crypto6.randomUUID().slice(0, 8)}`,
+      type: "new_paid_order",
+      title: "New Paid Order Received!",
+      message: `${newOrder.orderNumber} from ${newOrder.customerName} (\u20B9${newOrder.totalAmount})`,
+      orderId: newOrder.id,
+      orderNumber: newOrder.orderNumber,
+      customerName: newOrder.customerName,
+      amount: newOrder.totalAmount,
+      read: false,
+      emailNotifiedTo: ctx.settings.emailNotificationsEnabled ? ctx.settings.orderNotificationEmail : void 0,
+      createdAt: now.toISOString()
+    } : void 0;
     const hadDefaultAddress = Boolean(req.currentUser?.defaultAddress);
-    if (req.currentUser && !hadDefaultAddress) {
-      req.currentUser.defaultAddress = newOrder.shippingAddress;
-    }
-    try {
-      await storeRepo.commitOrderAtomic(newOrder, stockDecrements);
-    } catch (err) {
-      state.orders = state.orders.filter((o) => o.id !== newOrder.id);
-      if (addedNotifId) {
-        state.adminNotifications = state.adminNotifications.filter((n) => n.id !== addedNotifId);
+    const userDefaultAddressUpdate = req.currentUser && !hadDefaultAddress ? { userId: req.currentUser.id, address: newOrder.shippingAddress } : void 0;
+    const state = storeRepo.getState();
+    const stockSnapshots = /* @__PURE__ */ new Map();
+    const appliedPromoInState = calc.appliedPromotion ? state.promotions.find((p) => p.id === calc.appliedPromotion.id) : void 0;
+    const prevPromoUsage = appliedPromoInState?.usageCount;
+    const prevPromoRevenue = appliedPromoInState?.revenueGenerated;
+    if (!isPostgres) {
+      for (const dec of stockDecrements) {
+        const product = state.products.find((p) => p.id === dec.productId);
+        if (product) {
+          stockSnapshots.set(product.id, product.stock);
+          product.stock = Math.max(0, product.stock - dec.quantity);
+        }
       }
-      for (const [prodId, prevStock] of stockSnapshots.entries()) {
-        const product = state.products.find((p) => p.id === prodId);
-        if (product) product.stock = prevStock;
+      if (appliedPromoInState) {
+        appliedPromoInState.usageCount += 1;
+        appliedPromoInState.revenueGenerated += calc.grandTotal;
       }
-      if (appliedPromo && prevPromoUsage !== void 0 && prevPromoRevenue !== void 0) {
-        appliedPromo.usageCount = prevPromoUsage;
-        appliedPromo.revenueGenerated = prevPromoRevenue;
+      state.orders.unshift(newOrder);
+      if (adminNotification) {
+        state.adminNotifications.unshift(adminNotification);
       }
       if (req.currentUser && !hadDefaultAddress) {
-        req.currentUser.defaultAddress = void 0;
+        req.currentUser.defaultAddress = newOrder.shippingAddress;
+      }
+    }
+    const txStartedAt = Date.now();
+    try {
+      let commitResult = {};
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          commitResult = await storeRepo.commitOrderAtomic(newOrder, stockDecrements, {
+            promotionUpdate,
+            adminNotification,
+            userDefaultAddressUpdate
+          });
+          break;
+        } catch (attemptErr) {
+          if (isPostgres && attempt < 2 && attemptErr instanceof StorePersistenceError && attemptErr.code === "ORDER_NUMBER_CONFLICT") {
+            nextOrderSeq += 1;
+            newOrder.orderNumber = buildOrderNumber(nextOrderSeq);
+            if (adminNotification) {
+              adminNotification.orderNumber = newOrder.orderNumber;
+              adminNotification.message = `${newOrder.orderNumber} from ${newOrder.customerName} (\u20B9${newOrder.totalAmount})`;
+            }
+            continue;
+          }
+          throw attemptErr;
+        }
+      }
+      const txMs = Date.now() - txStartedAt;
+      const totalMs = Date.now() - startedAt;
+      if (commitResult.existingOrder) {
+        res.setHeader(
+          "Server-Timing",
+          `context;dur=${contextMs}, tx;dur=${txMs}, total;dur=${totalMs}`
+        );
+        logStructured("info", "orders", "create_order_timing", {
+          requestId: req.requestId,
+          orderNumber: commitResult.existingOrder.orderNumber,
+          paymentMethod,
+          idempotent: true,
+          contextMs,
+          txMs,
+          totalMs
+        });
+        return res.status(200).json({
+          order: commitResult.existingOrder,
+          updatedProducts: ctx.products.filter((p) => p.active),
+          idempotent: true
+        });
+      }
+      if (isPostgres) {
+        if (commitResult.updatedProducts) {
+          for (const upd of commitResult.updatedProducts) {
+            const p = ctx.products.find((prod) => prod.id === upd.id);
+            if (p) p.stock = upd.stock;
+          }
+        }
+        if (appliedPromoInState) {
+          appliedPromoInState.usageCount += 1;
+          appliedPromoInState.revenueGenerated += calc.grandTotal;
+        }
+        if (req.currentUser && !hadDefaultAddress) {
+          req.currentUser.defaultAddress = newOrder.shippingAddress;
+        }
+      }
+      res.setHeader(
+        "Server-Timing",
+        `context;dur=${contextMs}, tx;dur=${txMs}, total;dur=${totalMs}`
+      );
+      logStructured("info", "orders", "create_order_timing", {
+        requestId: req.requestId,
+        orderNumber: newOrder.orderNumber,
+        paymentMethod,
+        idempotent: false,
+        contextMs,
+        txMs,
+        totalMs
+      });
+      const updatedProductsList = isPostgres ? ctx.products.filter((p) => p.active) : state.products.filter((p) => p.active);
+      return res.status(201).json({ order: newOrder, updatedProducts: updatedProductsList });
+    } catch (err) {
+      if (!isPostgres) {
+        state.orders = state.orders.filter((o) => o.id !== newOrder.id);
+        if (adminNotification) {
+          state.adminNotifications = state.adminNotifications.filter(
+            (n) => n.id !== adminNotification.id
+          );
+        }
+        for (const [prodId, prevStock] of stockSnapshots.entries()) {
+          const product = state.products.find((p) => p.id === prodId);
+          if (product) product.stock = prevStock;
+        }
+        if (appliedPromoInState && prevPromoUsage !== void 0 && prevPromoRevenue !== void 0) {
+          appliedPromoInState.usageCount = prevPromoUsage;
+          appliedPromoInState.revenueGenerated = prevPromoRevenue;
+        }
+        if (req.currentUser && !hadDefaultAddress) {
+          req.currentUser.defaultAddress = void 0;
+        }
       }
       const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
       const code = err instanceof StorePersistenceError ? err.code : "ORDER_COMMIT_FAILED";
@@ -4791,11 +6136,11 @@ function createApiApp() {
         orderNumber: newOrder.orderNumber,
         code,
         statusCode,
+        durationMs: Date.now() - startedAt,
         error: message
       });
       return res.status(statusCode).json({ error: message, code, requestId: req.requestId });
     }
-    res.status(201).json({ order: newOrder, updatedProducts: state.products.filter((p) => p.active) });
   });
   app2.get("/api/orders/mine", requireAuth, (req, res) => {
     const user = req.currentUser;
@@ -4814,10 +6159,19 @@ function createApiApp() {
     if (!order) {
       return res.status(404).json({ error: `No order found matching ${orderNumber}.` });
     }
-    if (contact) {
+    const isOwnerOrAdmin = Boolean(
+      req.currentUser && (isAuthorizedAdmin(req.currentUser, getAdminOwnerEmail()) || order.userId === req.currentUser.id || order.customerEmail.toLowerCase() === req.currentUser.email.toLowerCase())
+    );
+    if (!isOwnerOrAdmin) {
+      if (!contact) {
+        return res.status(400).json({
+          error: "Enter the email address or 10-digit mobile number used for this order."
+        });
+      }
       const cleanPhone = contact.replace(/\D/g, "");
+      const orderPhoneDigits = order.customerPhone.replace(/\D/g, "");
       const matchesEmail = order.customerEmail.toLowerCase() === contact;
-      const matchesPhone = cleanPhone.length >= 6 && order.customerPhone.includes(cleanPhone);
+      const matchesPhone = cleanPhone.length === 10 && orderPhoneDigits.length >= 10 && orderPhoneDigits.slice(-10) === cleanPhone;
       if (!matchesEmail && !matchesPhone) {
         return res.status(403).json({
           error: "The email or phone number does not match this order record."
@@ -4933,7 +6287,7 @@ function createApiApp() {
       return res.status(400).json({ error: "Please enter a brief message (at least 8 characters)." });
     }
     const inquiry = {
-      id: `inq-${crypto5.randomUUID().slice(0, 8)}`,
+      id: `inq-${crypto6.randomUUID().slice(0, 8)}`,
       name: name.trim(),
       email: email.trim().toLowerCase(),
       phone: phone?.trim(),
@@ -5086,7 +6440,7 @@ Concierge:` : message.trim();
     const batchNumber = body.batchNumber?.trim() || `HR-BATCH-${(/* @__PURE__ */ new Date()).getFullYear()}`;
     const gstRatePercent = Math.max(0, Math.min(28, Number(body.gstRatePercent ?? 12)));
     const slugBase = body.name.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-    const uniqueSuffix = crypto5.randomUUID().slice(0, 6);
+    const uniqueSuffix = crypto6.randomUUID().slice(0, 6);
     const id = `${slugBase || "himrudra-product"}-${uniqueSuffix}`;
     const sku = body.sku?.trim().toUpperCase() || `HR-${slugBase.replace(/-/g, "").slice(0, 6).toUpperCase() || "PRD"}-${uniqueSuffix.slice(0, 4).toUpperCase()}`;
     const customImages = Array.isArray(body.customImages) ? body.customImages.filter((u) => typeof u === "string" && u.trim().length > 0) : [];
@@ -5329,7 +6683,7 @@ Concierge:` : message.trim();
       if (paymentStatus === "Refund Requested") {
         order.refundRequestedAt = nowIso;
         state.adminNotifications.unshift({
-          id: `notif-${crypto5.randomUUID().slice(0, 8)}`,
+          id: `notif-${crypto6.randomUUID().slice(0, 8)}`,
           type: "refund_request",
           title: "Refund Request Logged",
           message: `${order.orderNumber} (${order.customerName}) marked for refund review`,
@@ -5347,7 +6701,17 @@ Concierge:` : message.trim();
       }
     }
     if (status && status !== order.status) {
+      const prevStatus = order.status;
       order.status = status;
+      const enteringRestockState = (status === "Cancelled" || status === "Refunded") && prevStatus !== "Cancelled" && prevStatus !== "Refunded";
+      if (enteringRestockState) {
+        for (const item of order.items) {
+          const prod = state.products.find((p) => p.id === item.productId);
+          if (prod) {
+            prod.stock += item.quantity;
+          }
+        }
+      }
       if (status === "Dispatched") {
         order.dispatchedAt = nowIso;
       }
@@ -5365,7 +6729,7 @@ Concierge:` : message.trim();
       order.timeline.push({
         status,
         timestamp: nowIso,
-        note: note?.trim() || (order.trackingNumber ? `Status updated to ${status} (${order.courierPartner || "Courier"}: ${order.trackingNumber})` : `Order marked as ${status} by store administrator`)
+        note: note?.trim() || (order.trackingNumber ? `Status updated to ${status} (${order.courierPartner || "Courier"}: ${order.trackingNumber})` : enteringRestockState ? `Order marked as ${status} by store administrator (inventory restored)` : `Order marked as ${status} by store administrator`)
       });
     }
     storeRepo.commit();
@@ -5395,7 +6759,7 @@ Concierge:` : message.trim();
     }
     const nowIso = (/* @__PURE__ */ new Date()).toISOString();
     const promo = {
-      id: `promo-${crypto5.randomUUID().slice(0, 8)}`,
+      id: `promo-${crypto6.randomUUID().slice(0, 8)}`,
       title: title.trim(),
       description: (description || "").trim(),
       bannerHeadline: (bannerHeadline || title).trim(),
@@ -5476,7 +6840,7 @@ Concierge:` : message.trim();
       });
     }
     const newReport = {
-      id: `lab-${crypto5.randomUUID().slice(0, 8)}`,
+      id: `lab-${crypto6.randomUUID().slice(0, 8)}`,
       laboratoryName: body.laboratoryName.trim(),
       reportNumber: body.reportNumber.trim(),
       testedBatchNumber: body.testedBatchNumber.trim(),
@@ -5615,7 +6979,7 @@ Concierge:` : message.trim();
     }
     const now = (/* @__PURE__ */ new Date()).toISOString();
     const newSection = {
-      id: `cms-${crypto5.randomUUID().slice(0, 8)}`,
+      id: `cms-${crypto6.randomUUID().slice(0, 8)}`,
       key: title.trim().toLowerCase().replace(/[^a-z0-9]+/g, "_"),
       title: title.trim(),
       category: category === "faq" ? "faq" : "product",
@@ -5650,7 +7014,7 @@ Concierge:` : message.trim();
       return res.status(400).json({ error: "Valid description and positive amount required." });
     }
     const expense = {
-      id: `exp-${crypto5.randomUUID().slice(0, 8)}`,
+      id: `exp-${crypto6.randomUUID().slice(0, 8)}`,
       date: date || (/* @__PURE__ */ new Date()).toISOString().slice(0, 10),
       category: category || "Operations",
       description: description.trim(),

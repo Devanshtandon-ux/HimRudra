@@ -138,7 +138,15 @@ export type OrderPaymentStatus =
   | 'Refund Requested'
   | 'Refunded';
 
-export type PaymentMethod = 'UPI' | 'Card' | 'NetBanking' | 'COD';
+export type PaymentMethod =
+  | 'UPI'
+  | 'Card'
+  | 'NetBanking'
+  | 'Wallet'
+  | 'EMI'
+  | 'PayLater'
+  | 'Online'
+  | 'COD';
 
 export interface OrderTimelineEvent {
   status: OrderStatus;
