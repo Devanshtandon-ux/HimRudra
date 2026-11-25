@@ -1,11 +1,6 @@
 import React from 'react';
-import { Compass, Download, FileCheck2, Gem, Sparkles } from 'lucide-react';
+import { Compass, FileCheck2, Gem, Sparkles } from 'lucide-react';
 import { motion } from 'motion/react';
-
-interface WhyHimRudraProps {
-  labDownloadUrl?: string;
-  onOpenLabReport: () => void;
-}
 
 const PILLARS = [
   {
@@ -27,7 +22,7 @@ const PILLARS = [
     title: 'Transparency First',
     icon: FileCheck2,
     description:
-      'Every production batch is lab certified with heavy metal and microbiological screening, and customers can download the official laboratory report directly from the top bar.',
+      'We prioritize clear batch documentation, transparent sourcing details, and straightforward product specifications that customers can review directly on the product page.',
   },
   {
     number: '04',
@@ -38,10 +33,7 @@ const PILLARS = [
   },
 ];
 
-export const WhyHimRudra: React.FC<WhyHimRudraProps> = ({
-  labDownloadUrl,
-  onOpenLabReport,
-}) => {
+export const WhyHimRudra: React.FC = () => {
   return (
     <section id="why-himrudra" className="scroll-mt-16 py-16 lg:py-24 bg-[#F3EDE5]/65 border-t border-[#281A15]/8">
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8">
@@ -89,26 +81,6 @@ export const WhyHimRudra: React.FC<WhyHimRudraProps> = ({
               </motion.article>
             );
           })}
-        </div>
-
-        <div className="mt-10 flex flex-wrap items-center gap-3 justify-start">
-          {labDownloadUrl ? (
-            <a
-              href={labDownloadUrl}
-              download
-              className="inline-flex items-center gap-2.5 rounded-lg bg-[#281A15] px-6 py-3.5 text-xs sm:text-sm font-semibold tracking-wide text-[#FAF8F4] hover:bg-[#3A2720] transition-colors whitespace-nowrap"
-            >
-              <Download className="h-4 w-4 text-[#C69B51]" />
-              <span>DOWNLOAD LAB CERTIFICATE</span>
-            </a>
-          ) : null}
-          <button
-            type="button"
-            onClick={onOpenLabReport}
-            className="inline-flex items-center gap-2 rounded-lg border border-[#79543D]/35 bg-[#FAF8F4] px-5 py-3.5 text-xs sm:text-sm font-semibold tracking-wide text-[#281A15] hover:bg-[#EAE1D4] transition-colors whitespace-nowrap"
-          >
-            <span>VIEW LAB REPORT</span>
-          </button>
         </div>
       </div>
     </section>

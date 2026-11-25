@@ -35,6 +35,15 @@ import type {
 import { StorePersistenceError } from '../../server/validation.ts';
 import { logStructured } from '../../server/logger.ts';
 
+export interface PublicBootstrapDbData {
+  products: Product[];
+  settings: StoreSettings | null;
+  coupons: Coupon[];
+  promotions: Promotion[];
+  labReports: LabReport[];
+  cmsSections: CmsSection[];
+}
+
 export interface PostgresCheckoutContext {
   empty: boolean;
   products: Product[];
@@ -44,15 +53,6 @@ export interface PostgresCheckoutContext {
   paymentIntent: PaymentIntentRecord | null;
   existingOrderByPayment: Order | null;
   maxOrderSeq: number;
-}
-
-export interface PublicBootstrapDbData {
-  products: Product[];
-  settings: StoreSettings | null;
-  coupons: Coupon[];
-  promotions: Promotion[];
-  labReports: LabReport[];
-  cmsSections: CmsSection[];
 }
 
 function getPgErrorCode(error: unknown): string {
@@ -359,7 +359,7 @@ export class PostgresStateAdapter {
   /**
    * Single-round-trip public storefront bootstrap query.
    * Fetches ONLY the 6 public tables (products, store_settings, coupons, promotions,
-   * lab_reports, cms_sections) using one SQL query over one pooled connection â€” avoiding
+   * lab_reports, cms_sections) using one SQL query over one pooled connection — avoiding
    * full 12-table hydration and private tables (users, orders, expenses, inquiries, etc.).
    */
   async loadPublicBootstrap(): Promise<{
@@ -465,7 +465,7 @@ export class PostgresStateAdapter {
         description: String(r.description),
         bannerHeadline: String(r.banner_headline),
         bannerSubtext: String(r.banner_subtext),
-        bannerTheme: String(r.banner_theme) as BannerTheme,
+        bannerTheme: r.banner_theme as BannerTheme,
         startsAt: String(r.starts_at),
         endsAt: String(r.ends_at),
         freeShipping: Boolean(r.free_shipping),
@@ -550,6 +550,308 @@ export class PostgresStateAdapter {
       wishlistProductIds: Array.isArray(row.wishlistProductIds) ? row.wishlistProductIds : [],
       createdAt: row.createdAt,
     };
+  }
+
+  private mapProductRow(row: typeof products.$inferSelect): Product {
+    return {
+      id: row.id,
+      slug: row.slug,
+      name: row.name,
+      subtitle: row.subtitle,
+      netQuantity: row.netQuantity,
+      sku: row.sku,
+      hsnCode: row.hsnCode,
+      mrp: row.mrp,
+      price: row.price,
+      costPerUnit: row.costPerUnit,
+      stock: row.stock,
+      lowStockThreshold: row.lowStockThreshold,
+      batchNumber: row.batchNumber,
+      gstRatePercent: row.gstRatePercent,
+      shortDescription: row.shortDescription,
+      usageGuidance: row.usageGuidance,
+      storageInstructions: row.storageInstructions,
+      shippingNote: row.shippingNote,
+      returnPolicy: row.returnPolicy,
+      specifications: Array.isArray(row.specifications) ? row.specifications : [],
+      galleryTypes: Array.isArray(row.galleryTypes) ? row.galleryTypes : [],
+      customImages: Array.isArray(row.customImages) ? row.customImages : undefined,
+      active: row.active,
+    };
+  }
+
+  private mapOrderRow(row: typeof orders.$inferSelect): Order {
+    return {
+      id: row.id,
+      orderNumber: row.orderNumber,
+      userId: row.userId ?? undefined,
+      customerName: row.customerName,
+      customerEmail: row.customerEmail,
+      customerPhone: row.customerPhone,
+      shippingAddress: row.shippingAddress,
+      deliveryInstructions: row.deliveryInstructions ?? undefined,
+      items: Array.isArray(row.items) ? row.items : [],
+      subtotal: row.subtotal,
+      mrpTotal: row.mrpTotal,
+      instantSavings: row.instantSavings,
+      couponCode: row.couponCode ?? undefined,
+      couponDiscount: row.couponDiscount,
+      promotionId: row.promotionId ?? undefined,
+      promotionTitle: row.promotionTitle ?? undefined,
+      shippingFee: row.shippingFee,
+      shippingSpeed: row.shippingSpeed === 'express' ? 'express' : 'standard',
+      codFee: row.codFee,
+      taxableValue: row.taxableValue,
+      gstAmount: row.gstAmount,
+      totalAmount: row.totalAmount,
+      gatewayFeeAmount: row.gatewayFeeAmount ?? undefined,
+      actualShippingCost: row.actualShippingCost ?? undefined,
+      paymentMethod: row.paymentMethod as PaymentMethod,
+      paymentStatus: row.paymentStatus as OrderPaymentStatus,
+      razorpayOrderId: row.razorpayOrderId ?? undefined,
+      razorpayPaymentId: row.razorpayPaymentId ?? undefined,
+      paymentVerifiedAt: row.paymentVerifiedAt ?? undefined,
+      status: row.status as OrderStatus,
+      courierPartner: row.courierName ?? undefined,
+      trackingNumber: row.trackingNumber ?? undefined,
+      trackingUrl: row.trackingUrl ?? undefined,
+      estimatedDelivery: row.estimatedDelivery ?? undefined,
+      dispatchedAt: row.dispatchedAt ?? undefined,
+      deliveredAt: row.deliveredAt ?? undefined,
+      refundAmount: row.refundAmount ?? undefined,
+      refundReason: row.refundReason ?? undefined,
+      refundRequestedAt: row.refundRequestedAt ?? undefined,
+      timeline: Array.isArray(row.timeline) ? row.timeline : [],
+      createdAt: row.createdAt,
+    };
+  }
+
+  private mapPaymentIntentRow(row: typeof paymentIntents.$inferSelect): PaymentIntentRecord {
+    return {
+      razorpayOrderId: row.razorpayOrderId,
+      amountPaise: row.amountPaise,
+      verified: row.verified,
+      paymentId: row.paymentId ?? undefined,
+      signatureVerified: row.signatureVerified,
+      method: row.method,
+      createdAt: row.createdAt,
+    };
+  }
+
+  /**
+   * Targeted single-row upsert for a Razorpay payment intent.
+   * Avoids rewriting all 12 tables during /api/payments/create-order and /api/payments/verify.
+   */
+  async upsertPaymentIntent(intent: PaymentIntentRecord): Promise<void> {
+    const startedAt = Date.now();
+    try {
+      await this.runWithRecovery(() =>
+        db
+          .insert(paymentIntents)
+          .values({
+            razorpayOrderId: intent.razorpayOrderId,
+            amountPaise: intent.amountPaise,
+            verified: intent.verified,
+            paymentId: intent.paymentId ?? null,
+            signatureVerified: intent.signatureVerified,
+            method: intent.method,
+            createdAt: intent.createdAt,
+          })
+          .onConflictDoUpdate({
+            target: paymentIntents.razorpayOrderId,
+            set: {
+              amountPaise: intent.amountPaise,
+              verified: intent.verified,
+              paymentId: intent.paymentId ?? null,
+              signatureVerified: intent.signatureVerified,
+              method: intent.method,
+            },
+          })
+      );
+      logStructured('info', 'cloud-sql', 'upsert_payment_intent_success', {
+        verified: intent.verified,
+        durationMs: Date.now() - startedAt,
+      });
+    } catch (error) {
+      logStructured('error', 'cloud-sql', 'upsert_payment_intent_failed', {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new StorePersistenceError('Unable to save payment session right now. Please try again.', {
+        code: 'POSTGRES_PAYMENT_INTENT_WRITE_FAILED',
+        statusCode: 503,
+        retryable: true,
+      });
+    }
+  }
+
+  /**
+   * Targeted single-row lookup for a Razorpay payment intent by razorpayOrderId.
+   */
+  async findPaymentIntent(razorpayOrderId: string): Promise<PaymentIntentRecord | null> {
+    const startedAt = Date.now();
+    try {
+      const rows = await this.runWithRecovery(() =>
+        db
+          .select()
+          .from(paymentIntents)
+          .where(eq(paymentIntents.razorpayOrderId, razorpayOrderId))
+          .limit(1)
+      );
+      logStructured('info', 'cloud-sql', 'find_payment_intent_success', {
+        found: rows.length > 0,
+        durationMs: Date.now() - startedAt,
+      });
+      return rows[0] ? this.mapPaymentIntentRow(rows[0]) : null;
+    } catch (error) {
+      logStructured('error', 'cloud-sql', 'find_payment_intent_failed', {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new StorePersistenceError('Unable to verify payment session right now. Please try again.', {
+        code: 'POSTGRES_PAYMENT_INTENT_READ_FAILED',
+        statusCode: 503,
+        retryable: true,
+      });
+    }
+  }
+
+  /**
+   * Loads only the minimal tables required for checkout pricing, stock validation,
+   * payment intent verification, order idempotency, and next order sequence numbering.
+   * Skips users, all historical orders, lab_reports, cms_sections, expenses, inquiries, and notifications.
+   */
+  async loadCheckoutContext(params?: {
+    razorpayOrderId?: string;
+    razorpayPaymentId?: string;
+    includeOrderSequence?: boolean;
+  }): Promise<PostgresCheckoutContext> {
+    const startedAt = Date.now();
+    try {
+      const [
+        productRows,
+        couponRows,
+        promotionRows,
+        settingsRows,
+        intentRows,
+        existingOrderRows,
+        seqResult,
+      ] = await this.runWithRecovery(() =>
+        Promise.all([
+          db.select().from(products).orderBy(asc(products.sortOrder)),
+          db.select().from(coupons).orderBy(asc(coupons.sortOrder)),
+          db.select().from(promotions).orderBy(asc(promotions.sortOrder)),
+          db.select().from(storeSettings).where(eq(storeSettings.id, 'default')).limit(1),
+          params?.razorpayOrderId
+            ? db
+                .select()
+                .from(paymentIntents)
+                .where(eq(paymentIntents.razorpayOrderId, params.razorpayOrderId))
+                .limit(1)
+            : Promise.resolve([]),
+          params?.razorpayPaymentId || params?.razorpayOrderId
+            ? db
+                .select()
+                .from(orders)
+                .where(
+                  params.razorpayPaymentId && params.razorpayOrderId
+                    ? or(
+                        eq(orders.razorpayPaymentId, params.razorpayPaymentId),
+                        eq(orders.razorpayOrderId, params.razorpayOrderId)
+                      )
+                    : params.razorpayPaymentId
+                    ? eq(orders.razorpayPaymentId, params.razorpayPaymentId)
+                    : eq(orders.razorpayOrderId, params.razorpayOrderId!)
+                )
+                .limit(1)
+            : Promise.resolve([]),
+          params?.includeOrderSequence
+            ? db.execute(
+                sql`SELECT
+                  GREATEST(
+                    COUNT(*)::int,
+                    COALESCE(
+                      MAX(
+                        CASE
+                          WHEN order_number ~ '^HIM-2026-[0-9]+$'
+                          THEN SUBSTRING(order_number FROM '^HIM-2026-([0-9]+)$')::int
+                          ELSE 0
+                        END
+                      ),
+                      0
+                    )
+                  ) AS max_seq
+                FROM orders`
+              )
+            : Promise.resolve(null),
+        ])
+      );
+
+      const rawSeqRow =
+        seqResult && Array.isArray((seqResult as { rows?: unknown[] }).rows)
+          ? ((seqResult as { rows: Array<{ max_seq?: number | string }> }).rows[0] ?? null)
+          : null;
+      const maxOrderSeq = Number(rawSeqRow?.max_seq ?? 0) || 0;
+
+      const mappedProducts = productRows.map((row) => this.mapProductRow(row));
+      const mappedCoupons: Coupon[] = couponRows.map((row) => ({
+        code: row.code,
+        discountType: row.type === 'flat' ? 'flat' : 'percent',
+        value: row.value,
+        minOrderAmount: row.minOrderValue,
+        active: row.active,
+        description: row.description,
+      }));
+      const mappedPromotions: Promotion[] = promotionRows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        description: row.description,
+        bannerHeadline: row.bannerHeadline,
+        bannerSubtext: row.bannerSubtext,
+        bannerTheme: row.bannerTheme as BannerTheme,
+        startsAt: row.startsAt,
+        endsAt: row.endsAt,
+        freeShipping: row.freeShipping,
+        freeShippingSpeed: row.freeShippingSpeed === 'all' ? 'all' : 'standard',
+        discountPercent: row.discountPercent,
+        promoCode: row.promoCode ?? undefined,
+        enabled: row.enabled,
+        usageCount: row.usageCount,
+        revenueGenerated: row.revenueGenerated,
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt,
+      }));
+
+      logStructured('info', 'cloud-sql', 'load_checkout_context_success', {
+        productCount: mappedProducts.length,
+        hasIntent: intentRows.length > 0,
+        hasExistingOrder: existingOrderRows.length > 0,
+        durationMs: Date.now() - startedAt,
+      });
+
+      return {
+        empty: mappedProducts.length === 0 && settingsRows.length === 0,
+        products: mappedProducts,
+        coupons: mappedCoupons,
+        promotions: mappedPromotions,
+        settings: settingsRows[0]?.payload ?? null,
+        paymentIntent: intentRows[0] ? this.mapPaymentIntentRow(intentRows[0]) : null,
+        existingOrderByPayment: existingOrderRows[0]
+          ? this.mapOrderRow(existingOrderRows[0])
+          : null,
+        maxOrderSeq,
+      };
+    } catch (error) {
+      logStructured('error', 'cloud-sql', 'load_checkout_context_failed', {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+      });
+      throw new StorePersistenceError('Database read failed during checkout. Please try again shortly.', {
+        code: 'POSTGRES_CHECKOUT_READ_FAILED',
+        statusCode: 503,
+        retryable: true,
+      });
+    }
   }
 
   async findUserByEmail(email: string): Promise<StoredUser | null> {
@@ -691,12 +993,14 @@ export class PostgresStateAdapter {
     }
   }
 
-  async loadState(getFallbackSeed: () => DatabaseState): Promise<{
+  async loadState(getFallbackSeed: DatabaseState | (() => DatabaseState)): Promise<{
     empty: boolean;
     state: DatabaseState;
     dbMs: number;
   }> {
     const startedAt = Date.now();
+    const resolveFallbackSeed = () =>
+      typeof getFallbackSeed === 'function' ? getFallbackSeed() : getFallbackSeed;
     try {
       const [
         userRows,
@@ -715,14 +1019,17 @@ export class PostgresStateAdapter {
         Promise.all([
           db.select().from(users).orderBy(asc(users.createdAt)),
           db.select().from(products).orderBy(asc(products.sortOrder)),
-          db.select().from(orders).orderBy(asc(orders.sortOrder)),
+          db.select().from(orders).orderBy(asc(orders.sortOrder), desc(orders.createdAt)),
           db.select().from(coupons).orderBy(asc(coupons.sortOrder)),
           db.select().from(promotions).orderBy(asc(promotions.sortOrder)),
           db.select().from(labReports).orderBy(asc(labReports.sortOrder)),
           db.select().from(cmsSections).orderBy(asc(cmsSections.sortOrder)),
           db.select().from(expenses).orderBy(asc(expenses.sortOrder)),
           db.select().from(inquiries).orderBy(asc(inquiries.sortOrder)),
-          db.select().from(adminNotifications).orderBy(asc(adminNotifications.sortOrder)),
+          db
+            .select()
+            .from(adminNotifications)
+            .orderBy(asc(adminNotifications.sortOrder), desc(adminNotifications.createdAt)),
           db.select().from(paymentIntents),
           db.select().from(storeSettings).where(eq(storeSettings.id, 'default')).limit(1),
         ])
@@ -735,7 +1042,7 @@ export class PostgresStateAdapter {
           settingsCount: settingsRows.length,
         })
       ) {
-        return { empty: true, state: getFallbackSeed(), dbMs: Date.now() - startedAt };
+        return { empty: true, state: resolveFallbackSeed(), dbMs: Date.now() - startedAt };
       }
 
       const mappedUsers: StoredUser[] = userRows.map((row) => ({
@@ -936,11 +1243,10 @@ export class PostgresStateAdapter {
 
       return {
         empty: false,
-        dbMs: Date.now() - startedAt,
         state: {
           users: mappedUsers,
           products: mappedProducts,
-          settings: settingsRows[0]?.payload ?? getFallbackSeed().settings,
+          settings: settingsRows[0]?.payload ?? resolveFallbackSeed().settings,
           coupons: mappedCoupons,
           promotions: mappedPromotions,
           orders: mappedOrders,
@@ -951,6 +1257,7 @@ export class PostgresStateAdapter {
           adminNotifications: mappedNotifs,
           paymentIntents: mappedIntents,
         },
+        dbMs: Date.now() - startedAt,
       };
     } catch (error) {
       logStructured('error', 'cloud-sql', 'load_state_failed', {
@@ -968,317 +1275,6 @@ export class PostgresStateAdapter {
    * Atomically verifies & decrements product stock and creates the order inside a single PostgreSQL ACID transaction.
    * Guarantees zero overselling even when 500 concurrent users check out at the exact same millisecond.
    */
-  /**
-   * Targeted single-row upsert for a Razorpay payment intent.
-   * Avoids rewriting all 12 tables during /api/payments/create-order and /api/payments/verify.
-   */
-  private mapProductRow(row: typeof products.$inferSelect): Product {
-    return {
-      id: row.id,
-      slug: row.slug,
-      name: row.name,
-      subtitle: row.subtitle,
-      netQuantity: row.netQuantity,
-      sku: row.sku,
-      hsnCode: row.hsnCode,
-      mrp: row.mrp,
-      price: row.price,
-      costPerUnit: row.costPerUnit,
-      stock: row.stock,
-      lowStockThreshold: row.lowStockThreshold,
-      batchNumber: row.batchNumber,
-      gstRatePercent: row.gstRatePercent,
-      shortDescription: row.shortDescription,
-      usageGuidance: row.usageGuidance,
-      storageInstructions: row.storageInstructions,
-      shippingNote: row.shippingNote,
-      returnPolicy: row.returnPolicy,
-      specifications: Array.isArray(row.specifications) ? row.specifications : [],
-      galleryTypes: Array.isArray(row.galleryTypes) ? row.galleryTypes : [],
-      customImages: Array.isArray(row.customImages) ? row.customImages : undefined,
-      active: row.active,
-    };
-  }
-
-  private mapOrderRow(row: typeof orders.$inferSelect): Order {
-    return {
-      id: row.id,
-      orderNumber: row.orderNumber,
-      userId: row.userId ?? undefined,
-      customerName: row.customerName,
-      customerEmail: row.customerEmail,
-      customerPhone: row.customerPhone,
-      shippingAddress: row.shippingAddress,
-      deliveryInstructions: row.deliveryInstructions ?? undefined,
-      items: Array.isArray(row.items) ? row.items : [],
-      subtotal: row.subtotal,
-      mrpTotal: row.mrpTotal,
-      instantSavings: row.instantSavings,
-      couponCode: row.couponCode ?? undefined,
-      couponDiscount: row.couponDiscount,
-      promotionId: row.promotionId ?? undefined,
-      promotionTitle: row.promotionTitle ?? undefined,
-      shippingFee: row.shippingFee,
-      shippingSpeed: row.shippingSpeed === 'express' ? 'express' : 'standard',
-      codFee: row.codFee,
-      taxableValue: row.taxableValue,
-      gstAmount: row.gstAmount,
-      totalAmount: row.totalAmount,
-      gatewayFeeAmount: row.gatewayFeeAmount ?? undefined,
-      actualShippingCost: row.actualShippingCost ?? undefined,
-      paymentMethod: row.paymentMethod as PaymentMethod,
-      paymentStatus: row.paymentStatus as OrderPaymentStatus,
-      razorpayOrderId: row.razorpayOrderId ?? undefined,
-      razorpayPaymentId: row.razorpayPaymentId ?? undefined,
-      paymentVerifiedAt: row.paymentVerifiedAt ?? undefined,
-      status: row.status as OrderStatus,
-      courierPartner: row.courierName ?? undefined,
-      trackingNumber: row.trackingNumber ?? undefined,
-      trackingUrl: row.trackingUrl ?? undefined,
-      estimatedDelivery: row.estimatedDelivery ?? undefined,
-      dispatchedAt: row.dispatchedAt ?? undefined,
-      deliveredAt: row.deliveredAt ?? undefined,
-      refundAmount: row.refundAmount ?? undefined,
-      refundReason: row.refundReason ?? undefined,
-      refundRequestedAt: row.refundRequestedAt ?? undefined,
-      timeline: Array.isArray(row.timeline) ? row.timeline : [],
-      createdAt: row.createdAt,
-    };
-  }
-
-  private mapPaymentIntentRow(row: typeof paymentIntents.$inferSelect): PaymentIntentRecord {
-    return {
-      razorpayOrderId: row.razorpayOrderId,
-      amountPaise: row.amountPaise,
-      verified: row.verified,
-      paymentId: row.paymentId ?? undefined,
-      signatureVerified: row.signatureVerified,
-      method: row.method,
-      createdAt: row.createdAt,
-    };
-  }
-
-  /**
-   * Targeted single-row upsert for a Razorpay payment intent.
-   * Avoids rewriting all 12 tables during /api/payments/create-order and /api/payments/verify.
-   */
-  async upsertPaymentIntent(intent: PaymentIntentRecord): Promise<void> {
-    const startedAt = Date.now();
-    try {
-      await this.ensureExternalSchemaIfNeeded();
-      await db
-        .insert(paymentIntents)
-        .values({
-          razorpayOrderId: intent.razorpayOrderId,
-          amountPaise: intent.amountPaise,
-          verified: intent.verified,
-          paymentId: intent.paymentId ?? null,
-          signatureVerified: intent.signatureVerified,
-          method: intent.method,
-          createdAt: intent.createdAt,
-        })
-        .onConflictDoUpdate({
-          target: paymentIntents.razorpayOrderId,
-          set: {
-            amountPaise: intent.amountPaise,
-            verified: intent.verified,
-            paymentId: intent.paymentId ?? null,
-            signatureVerified: intent.signatureVerified,
-            method: intent.method,
-          },
-        });
-      logStructured('info', 'cloud-sql', 'upsert_payment_intent_success', {
-        verified: intent.verified,
-        durationMs: Date.now() - startedAt,
-      });
-    } catch (error) {
-      logStructured('error', 'cloud-sql', 'upsert_payment_intent_failed', {
-        durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw new StorePersistenceError('Unable to save payment session right now. Please try again.', {
-        code: 'POSTGRES_PAYMENT_INTENT_WRITE_FAILED',
-        statusCode: 503,
-        retryable: true,
-      });
-    }
-  }
-
-  /**
-   * Targeted single-row lookup for a Razorpay payment intent by razorpayOrderId.
-   */
-  async findPaymentIntent(razorpayOrderId: string): Promise<PaymentIntentRecord | null> {
-    const startedAt = Date.now();
-    try {
-      await this.ensureExternalSchemaIfNeeded();
-      const rows = await db
-        .select()
-        .from(paymentIntents)
-        .where(eq(paymentIntents.razorpayOrderId, razorpayOrderId))
-        .limit(1);
-      logStructured('info', 'cloud-sql', 'find_payment_intent_success', {
-        found: rows.length > 0,
-        durationMs: Date.now() - startedAt,
-      });
-      return rows[0] ? this.mapPaymentIntentRow(rows[0]) : null;
-    } catch (error) {
-      logStructured('error', 'cloud-sql', 'find_payment_intent_failed', {
-        durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw new StorePersistenceError('Unable to verify payment session right now. Please try again.', {
-        code: 'POSTGRES_PAYMENT_INTENT_READ_FAILED',
-        statusCode: 503,
-        retryable: true,
-      });
-    }
-  }
-
-  /**
-   * Loads only the minimal tables required for checkout pricing, stock validation,
-   * payment intent verification, order idempotency, and next order sequence numbering.
-   * Skips users, all historical orders, lab_reports, cms_sections, expenses, inquiries, and notifications.
-   */
-  async loadCheckoutContext(params?: {
-    razorpayOrderId?: string;
-    razorpayPaymentId?: string;
-    includeOrderSequence?: boolean;
-  }): Promise<PostgresCheckoutContext> {
-    const startedAt = Date.now();
-    try {
-      await this.ensureExternalSchemaIfNeeded();
-
-      const intentLookupPromise = params?.razorpayOrderId
-        ? db
-            .select()
-            .from(paymentIntents)
-            .where(eq(paymentIntents.razorpayOrderId, params.razorpayOrderId))
-            .limit(1)
-        : Promise.resolve([]);
-
-      const idempotencyPromise =
-        params?.razorpayPaymentId || params?.razorpayOrderId
-          ? db
-              .select()
-              .from(orders)
-              .where(
-                params.razorpayPaymentId && params.razorpayOrderId
-                  ? or(
-                      eq(orders.razorpayPaymentId, params.razorpayPaymentId),
-                      eq(orders.razorpayOrderId, params.razorpayOrderId)
-                    )
-                  : params.razorpayPaymentId
-                  ? eq(orders.razorpayPaymentId, params.razorpayPaymentId)
-                  : eq(orders.razorpayOrderId, params.razorpayOrderId!)
-              )
-              .limit(1)
-          : Promise.resolve([]);
-
-      const maxOrderSeqPromise = params?.includeOrderSequence
-        ? db.execute(
-            sql`SELECT
-              GREATEST(
-                COUNT(*)::int,
-                COALESCE(
-                  MAX(
-                    CASE
-                      WHEN order_number ~ '^HIM-2026-[0-9]+$'
-                      THEN SUBSTRING(order_number FROM '^HIM-2026-([0-9]+)$')::int
-                      ELSE 0
-                    END
-                  ),
-                  0
-                )
-              ) AS max_seq
-            FROM orders`
-          )
-        : Promise.resolve(null);
-
-      const [
-        productRows,
-        couponRows,
-        promotionRows,
-        settingsRows,
-        intentRows,
-        existingOrderRows,
-        seqResult,
-      ] = await Promise.all([
-        db.select().from(products).orderBy(asc(products.sortOrder)),
-        db.select().from(coupons).orderBy(asc(coupons.sortOrder)),
-        db.select().from(promotions).orderBy(asc(promotions.sortOrder)),
-        db.select().from(storeSettings).where(eq(storeSettings.id, 'default')).limit(1),
-        intentLookupPromise,
-        idempotencyPromise,
-        maxOrderSeqPromise,
-      ]);
-
-      const rawSeqRow =
-        seqResult && Array.isArray((seqResult as { rows?: unknown[] }).rows)
-          ? ((seqResult as { rows: Array<{ max_seq?: number | string }> }).rows[0] ?? null)
-          : null;
-      const maxOrderSeq = Number(rawSeqRow?.max_seq ?? 0) || 0;
-
-      const mappedProducts = productRows.map((row) => this.mapProductRow(row));
-      const mappedCoupons: Coupon[] = couponRows.map((row) => ({
-        code: row.code,
-        discountType: row.type === 'flat' ? 'flat' : 'percent',
-        value: row.value,
-        minOrderAmount: row.minOrderValue,
-        active: row.active,
-        description: row.description,
-      }));
-      const mappedPromotions: Promotion[] = promotionRows.map((row) => ({
-        id: row.id,
-        title: row.title,
-        description: row.description,
-        bannerHeadline: row.bannerHeadline,
-        bannerSubtext: row.bannerSubtext,
-        bannerTheme: row.bannerTheme as BannerTheme,
-        startsAt: row.startsAt,
-        endsAt: row.endsAt,
-        freeShipping: row.freeShipping,
-        freeShippingSpeed: row.freeShippingSpeed === 'all' ? 'all' : 'standard',
-        discountPercent: row.discountPercent,
-        promoCode: row.promoCode ?? undefined,
-        enabled: row.enabled,
-        usageCount: row.usageCount,
-        revenueGenerated: row.revenueGenerated,
-        createdAt: row.createdAt,
-        updatedAt: row.updatedAt,
-      }));
-
-      logStructured('info', 'cloud-sql', 'load_checkout_context_success', {
-        productCount: mappedProducts.length,
-        hasIntent: intentRows.length > 0,
-        hasExistingOrder: existingOrderRows.length > 0,
-        durationMs: Date.now() - startedAt,
-      });
-
-      return {
-        empty: mappedProducts.length === 0 && settingsRows.length === 0,
-        products: mappedProducts,
-        coupons: mappedCoupons,
-        promotions: mappedPromotions,
-        settings: settingsRows[0]?.payload ?? null,
-        paymentIntent: intentRows[0] ? this.mapPaymentIntentRow(intentRows[0]) : null,
-        existingOrderByPayment: existingOrderRows[0]
-          ? this.mapOrderRow(existingOrderRows[0])
-          : null,
-        maxOrderSeq,
-      };
-    } catch (error) {
-      logStructured('error', 'cloud-sql', 'load_checkout_context_failed', {
-        durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      throw new StorePersistenceError('Database read failed during checkout. Please try again shortly.', {
-        code: 'POSTGRES_CHECKOUT_READ_FAILED',
-        statusCode: 503,
-        retryable: true,
-      });
-    }
-  }
-
   async transactCreateOrderAndDecrementStock(params: {
     order: Order;
     stockDecrements: Array<{ productId: string; quantity: number }>;
@@ -1288,8 +1284,8 @@ export class PostgresStateAdapter {
   }): Promise<{ existingOrder?: Order; updatedProducts: Array<{ id: string; stock: number }> }> {
     const startedAt = Date.now();
     try {
-      await this.ensureExternalSchemaIfNeeded();
-      const txResult = await db.transaction(async (tx) => {
+      const txResult = await this.runWithRecovery(() =>
+        db.transaction(async (tx) => {
         const o = params.order;
 
         // In-transaction idempotency guard: prevent duplicate orders or double stock decrement on parallel retries
@@ -1442,7 +1438,8 @@ export class PostgresStateAdapter {
         }
 
         return { existingOrder: undefined, updatedProducts };
-      });
+        })
+      );
 
       logStructured('info', 'cloud-sql', 'transact_order_success', {
         orderId: params.order.id,
@@ -1455,11 +1452,7 @@ export class PostgresStateAdapter {
       if (error instanceof StorePersistenceError) {
         throw error;
       }
-      const rawErr = error as { code?: unknown; cause?: { code?: unknown } } | null;
-      const pgCode =
-        typeof rawErr === 'object' && rawErr !== null
-          ? String(rawErr.code ?? rawErr.cause?.code ?? '')
-          : '';
+      const pgCode = getPgErrorCode(error);
       logStructured('error', 'cloud-sql', 'transact_order_failed', {
         orderId: params.order.id,
         pgCode: pgCode || undefined,

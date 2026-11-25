@@ -12,6 +12,7 @@ interface HeaderProps {
   onOpenAdmin: () => void;
   onOpenLabReport: () => void;
   onNavigateSection: (sectionId: string) => void;
+  labVerified?: boolean;
 }
 
 const NAV_LINKS = [
@@ -32,6 +33,7 @@ export const Header: React.FC<HeaderProps> = ({
   onOpenAdmin,
   onOpenLabReport,
   onNavigateSection,
+  labVerified = false,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
@@ -81,7 +83,7 @@ export const Header: React.FC<HeaderProps> = ({
             className="inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 py-1 font-semibold text-[#281A15] border-b border-transparent hover:border-[#C69B51] hover:text-[#79543D] transition-colors"
           >
             <ShieldCheck className="h-4 w-4 text-[#C69B51] shrink-0" strokeWidth={1.85} />
-            <span>Lab Certified</span>
+            <span>{labVerified ? 'Lab Certified' : 'Batch Docs'}</span>
           </button>
         </nav>
 
@@ -165,7 +167,7 @@ export const Header: React.FC<HeaderProps> = ({
               className="inline-flex items-center gap-2 py-2.5 px-3 rounded-lg text-left text-sm font-semibold text-[#281A15] hover:bg-[#F3EDE5]"
             >
               <ShieldCheck className="h-4 w-4 text-[#C69B51] shrink-0" strokeWidth={1.85} />
-              <span>Lab Certified</span>
+              <span>{labVerified ? 'Lab Certified' : 'Batch Docs'}</span>
             </button>
             {user?.role === 'admin' && (
               <button

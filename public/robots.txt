@@ -1,5 +1,6 @@
 User-agent: *
 Allow: /
 Disallow: /api/
+Disallow: /admin
 
-Sitemap: https://himrudra.com/sitemap.xml
+Sitemap: https://www.himrudra.com/sitemap.xml

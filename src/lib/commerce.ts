@@ -20,6 +20,36 @@ export function toIstDateString(isoOrMs: string | number): string {
   return new Date(ms + IST_OFFSET_MS).toISOString().slice(0, 10);
 }
 
+export function formatPaymentMethodLabel(method?: string | null): string {
+  const normalized = String(method ?? '')
+    .trim()
+    .toLowerCase();
+  switch (normalized) {
+    case 'netbanking':
+    case 'net_banking':
+    case 'bank_transfer':
+      return 'Netbanking';
+    case 'upi':
+      return 'UPI';
+    case 'card':
+      return 'Card';
+    case 'wallet':
+      return 'Wallet';
+    case 'emi':
+    case 'cardless_emi':
+      return 'EMI';
+    case 'paylater':
+    case 'pay_later':
+      return 'Pay Later';
+    case 'cod':
+      return 'COD';
+    case 'online':
+      return 'Online';
+    default:
+      return method?.trim() || 'Online';
+  }
+}
+
 export function isPromotionActive(promo: Promotion, nowMs: number = Date.now()): boolean {
   if (!promo.enabled) return false;
   const start = Date.parse(promo.startsAt);

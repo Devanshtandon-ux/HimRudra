@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Minus, Plus, ShoppingBag, Tag, Trash2, X } from 'lucide-react';
 import { calculateCartTotals, formatINR } from '../lib/commerce';
+import { resolveProductImageUrl } from '../lib/productImages';
 import { ProductArt } from './ProductArt';
 import type { CartItem, Coupon, Product, Promotion, StoreSettings } from '../types';
 
@@ -173,9 +174,11 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                     <li key={item.productId} className="py-4 flex gap-4">
                       <div className="h-20 w-20 shrink-0 rounded-xl overflow-hidden border border-[#79543D]/15 bg-[#F3EDE5]">
                         <ProductArt
+                          key={product.id}
                           kind={product.galleryTypes[0] ?? 'hero'}
-                          customImageUrl={product.customImages?.[0]}
+                          customImageUrl={resolveProductImageUrl(product)}
                           alt={product.name}
+                          compact
                         />
                       </div>
                       <div className="flex-1 min-w-0">

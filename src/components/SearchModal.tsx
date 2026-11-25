@@ -124,7 +124,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
           {results.reports.length > 0 && (
             <div>
               <h3 className="text-[11px] uppercase tracking-[0.18em] text-[#79543D] font-semibold mb-2">
-                Lab Certified Batch Reports
+                Batch Lab Documentation
               </h3>
               <div className="space-y-2">
                 {results.reports.map((rep) => (
@@ -143,7 +143,7 @@ export const SearchModal: React.FC<SearchModalProps> = ({
                       </div>
                       <div className="text-[11px] text-[#79543D]">{rep.laboratoryName}</div>
                     </div>
-                    <span className="text-[11px] text-[#79543D]">View / Download</span>
+                    <span className="text-[11px] text-[#79543D]">View Report</span>
                   </button>
                 ))}
               </div>

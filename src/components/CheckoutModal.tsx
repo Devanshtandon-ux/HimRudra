@@ -1,10 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Building2,
   CheckCircle2,
   CreditCard,
   Lock,
-  ShieldCheck,
   Smartphone,
   Truck,
   X,
@@ -12,9 +11,12 @@ import {
 import {
   calculateCartTotals,
   formatINR,
+  formatPaymentMethodLabel,
   validateCheckoutForm,
   type CheckoutValidationErrors,
 } from '../lib/commerce';
+import { resolveProductImageUrl } from '../lib/productImages';
+import { ProductArt } from './ProductArt';
 import type {
   CartItem,
   Coupon,
@@ -26,6 +28,103 @@ import type {
   StoreSettings,
   User,
 } from '../types';
+
+interface RazorpayHandlerResponse {
+  razorpay_order_id: string;
+  razorpay_payment_id: string;
+  razorpay_signature: string;
+}
+
+interface RazorpayFailureResponse {
+  error?: {
+    code?: string;
+    description?: string;
+    reason?: string;
+  };
+}
+
+interface RazorpayCheckoutInstance {
+  open: () => void;
+  on: (event: 'payment.failed', handler: (response: RazorpayFailureResponse) => void) => void;
+}
+
+interface RazorpayCheckoutOptions {
+  key: string;
+  amount: number;
+  currency: string;
+  name: string;
+  description: string;
+  order_id: string;
+  prefill?: {
+    name?: string;
+    email?: string;
+    contact?: string;
+  };
+  notes?: Record<string, string>;
+  theme?: {
+    color?: string;
+  };
+  handler: (response: RazorpayHandlerResponse) => void;
+  modal?: {
+    ondismiss?: () => void;
+    escape?: boolean;
+    confirm_close?: boolean;
+  };
+}
+
+interface RazorpayWindow extends Window {
+  Razorpay?: new (options: RazorpayCheckoutOptions) => RazorpayCheckoutInstance;
+}
+
+const RAZORPAY_SCRIPT_SRC = 'https://checkout.razorpay.com/v1/checkout.js';
+let razorpayScriptPromise: Promise<NonNullable<RazorpayWindow['Razorpay']>> | null = null;
+
+function loadRazorpayCheckoutScript(): Promise<NonNullable<RazorpayWindow['Razorpay']>> {
+  const win = window as RazorpayWindow;
+  if (win.Razorpay) {
+    return Promise.resolve(win.Razorpay);
+  }
+  if (razorpayScriptPromise) {
+    return razorpayScriptPromise;
+  }
+
+  razorpayScriptPromise = new Promise((resolve, reject) => {
+    const existing = document.querySelector<HTMLScriptElement>(
+      `script[src="${RAZORPAY_SCRIPT_SRC}"]`
+    );
+    const onReady = () => {
+      if (win.Razorpay) {
+        resolve(win.Razorpay);
+      } else {
+        razorpayScriptPromise = null;
+        reject(new Error('Razorpay Checkout failed to initialize. Please refresh and retry.'));
+      }
+    };
+    const onError = () => {
+      razorpayScriptPromise = null;
+      reject(
+        new Error(
+          'Unable to load Razorpay Checkout script. Please check your internet connection or ad blocker.'
+        )
+      );
+    };
+
+    if (existing) {
+      existing.addEventListener('load', onReady, { once: true });
+      existing.addEventListener('error', onError, { once: true });
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.src = RAZORPAY_SCRIPT_SRC;
+    script.async = true;
+    script.onload = onReady;
+    script.onerror = onError;
+    document.body.appendChild(script);
+  });
+
+  return razorpayScriptPromise;
+}
 
 interface CheckoutModalProps {
   open: boolean;
@@ -72,15 +171,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   }));
   const [deliveryInstructions, setDeliveryInstructions] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('UPI');
-  const [upiId, setUpiId] = useState('ritual@okicici');
-  const [selectedBank, setSelectedBank] = useState('HDFC Bank');
-  const [cardLast4, setCardLast4] = useState('4242');
   const [fieldErrors, setFieldErrors] = useState<CheckoutValidationErrors>({});
   const [serverError, setServerError] = useState('');
-  const [step, setStep] = useState<'details' | 'gateway' | 'confirmed'>('details');
-  const [razorpayOrderId, setRazorpayOrderId] = useState('');
+  const [step, setStep] = useState<'details' | 'confirmed'>('details');
   const [submitting, setSubmitting] = useState(false);
+  const [statusLabel, setStatusLabel] = useState('');
   const [confirmedOrder, setConfirmedOrder] = useState<Order | null>(null);
+  const paymentCallbackHandledRef = useRef(false);
 
   useEffect(() => {
     if (open) {
@@ -88,6 +185,9 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       setConfirmedOrder(null);
       setServerError('');
       setFieldErrors({});
+      setSubmitting(false);
+      setStatusLabel('');
+      paymentCallbackHandledRef.current = false;
       if (user) {
         setAddress((prev) => ({
           fullName: prev.fullName || user.defaultAddress?.fullName || user.name || '',
@@ -116,8 +216,77 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     nowMs: Date.now() + serverOffsetMs,
   });
 
+  const finalizeOrder = async (onlinePayment?: {
+    razorpayOrderId: string;
+    razorpayPaymentId: string;
+    razorpaySignature: string;
+  }) => {
+    setSubmitting(true);
+    setServerError('');
+    try {
+      if (paymentMethod !== 'COD') {
+        if (
+          !onlinePayment?.razorpayOrderId ||
+          !onlinePayment?.razorpayPaymentId ||
+          !onlinePayment?.razorpaySignature
+        ) {
+          setServerError('Payment authorization details were incomplete. Please try again.');
+          return;
+        }
+
+        setStatusLabel('Verifying Payment...');
+        const verifyRes = await fetch('/api/payments/verify', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            razorpayOrderId: onlinePayment.razorpayOrderId,
+            razorpayPaymentId: onlinePayment.razorpayPaymentId,
+            razorpaySignature: onlinePayment.razorpaySignature,
+          }),
+        });
+        const verifyData = await verifyRes.json().catch(() => ({}));
+        if (!verifyRes.ok || !verifyData.verified) {
+          setServerError(verifyData.error || 'Payment verification failed. Please retry.');
+          return;
+        }
+      }
+
+      setStatusLabel('Confirming Order...');
+      const res = await fetch('/api/orders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          items: cartItems,
+          shippingAddress: address,
+          deliveryInstructions,
+          shippingSpeed,
+          paymentMethod,
+          couponCode,
+          razorpayOrderId: onlinePayment?.razorpayOrderId,
+          razorpayPaymentId: onlinePayment?.razorpayPaymentId,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        if (data.fieldErrors) setFieldErrors(data.fieldErrors);
+        setServerError(data.error || 'Order submission failed.');
+        setStep('details');
+        return;
+      }
+      setConfirmedOrder(data.order);
+      setStep('confirmed');
+      onOrderSuccess(data.order, data.updatedProducts);
+    } catch {
+      setServerError('Unable to submit order. Please try again.');
+    } finally {
+      setSubmitting(false);
+      setStatusLabel('');
+    }
+  };
+
   const handleContinueToGateway = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (submitting) return;
     setServerError('');
     const validation = validateCheckoutForm(address);
     if (!validation.valid) {
@@ -132,7 +301,15 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     }
 
     setSubmitting(true);
+    setStatusLabel('Initializing Razorpay...');
+    paymentCallbackHandledRef.current = false;
+
     try {
+      const scriptPromise = loadRazorpayCheckoutScript().then(
+        (ctor) => ({ ok: true as const, ctor }),
+        (err: unknown) => ({ ok: false as const, err })
+      );
+
       const res = await fetch('/api/payments/create-order', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -143,68 +320,86 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           couponCode,
         }),
       });
-      const data = await res.json();
-      if (!res.ok) {
-        setServerError(data.error || 'Could not initialize payment gateway.');
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.razorpayOrderId || !data.keyId) {
+        setServerError(
+          data.error || 'Could not initialize Razorpay payment gateway. Please try again.'
+        );
+        setSubmitting(false);
+        setStatusLabel('');
         return;
       }
-      setRazorpayOrderId(data.razorpayOrderId);
-      setStep('gateway');
-    } catch {
-      setServerError('Network error while connecting to payment service.');
-    } finally {
-      setSubmitting(false);
-    }
-  };
 
-  const finalizeOrder = async (paymentId?: string) => {
-    setSubmitting(true);
-    setServerError('');
-    try {
-      if (paymentMethod !== 'COD') {
-        const verifyRes = await fetch('/api/payments/verify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            razorpayOrderId,
-            razorpayPaymentId: paymentId,
-          }),
-        });
-        const verifyData = await verifyRes.json();
-        if (!verifyRes.ok || !verifyData.verified) {
-          setServerError(verifyData.error || 'Payment verification failed. Please retry.');
-          return;
-        }
+      const scriptResult = await scriptPromise;
+      if (!scriptResult.ok) {
+        throw scriptResult.err;
       }
+      const RazorpayCtor = scriptResult.ctor;
 
-      const res = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          items: cartItems,
-          shippingAddress: address,
-          deliveryInstructions,
-          shippingSpeed,
-          paymentMethod,
-          couponCode,
-          razorpayOrderId,
-          razorpayPaymentId: paymentId,
-        }),
+      const rzp = new RazorpayCtor({
+        key: data.keyId,
+        amount: data.amountPaise,
+        currency: data.currency || 'INR',
+        name: 'HimRudra — Pure by Himalayas',
+        description: `Order (${calc.itemCount} item${calc.itemCount === 1 ? '' : 's'})`,
+        order_id: data.razorpayOrderId,
+        prefill: {
+          name: address.fullName.trim(),
+          email: address.email.trim(),
+          contact: address.phone.replace(/\D/g, ''),
+        },
+        notes: {
+          preferred_method: paymentMethod,
+        },
+        theme: {
+          color: '#281A15',
+        },
+        handler: (response: RazorpayHandlerResponse) => {
+          if (paymentCallbackHandledRef.current) return;
+          paymentCallbackHandledRef.current = true;
+          void finalizeOrder({
+            razorpayOrderId: response.razorpay_order_id,
+            razorpayPaymentId: response.razorpay_payment_id,
+            razorpaySignature: response.razorpay_signature,
+          });
+        },
+        modal: {
+          escape: true,
+          confirm_close: true,
+          ondismiss: () => {
+            if (paymentCallbackHandledRef.current) return;
+            paymentCallbackHandledRef.current = true;
+            setSubmitting(false);
+            setStatusLabel('');
+            setServerError(
+              'Payment was cancelled before completion. You can retry online payment or select Cash on Delivery.'
+            );
+          },
+        },
       });
-      const data = await res.json();
-      if (!res.ok) {
-        if (data.fieldErrors) setFieldErrors(data.fieldErrors);
-        setServerError(data.error || 'Order submission failed.');
-        setStep('details');
-        return;
-      }
-      setConfirmedOrder(data.order);
-      setStep('confirmed');
-      onOrderSuccess(data.order, data.updatedProducts);
-    } catch {
-      setServerError('Unable to submit order. Please try again.');
-    } finally {
+
+      rzp.on('payment.failed', (failure: RazorpayFailureResponse) => {
+        if (paymentCallbackHandledRef.current) return;
+        paymentCallbackHandledRef.current = true;
+        setSubmitting(false);
+        setStatusLabel('');
+        setServerError(
+          failure.error?.description ||
+            'Payment failed at Razorpay. Please try again or choose another payment method.'
+        );
+      });
+
+      setStatusLabel('Awaiting Razorpay Payment...');
+      rzp.open();
+    } catch (err) {
+      setServerError(
+        err instanceof Error && err.message
+          ? err.message
+          : 'Network error while connecting to Razorpay payment service.'
+      );
       setSubmitting(false);
+      setStatusLabel('');
     }
   };
 
@@ -221,11 +416,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           <div className="flex items-center gap-2.5">
             <Lock className="h-4 w-4 text-[#79543D]" />
             <h2 className="font-serif text-2xl font-semibold text-[#281A15]">
-              {step === 'confirmed'
-                ? 'Order Confirmed'
-                : step === 'gateway'
-                ? 'Razorpay Secure Payment'
-                : 'HimRudra Secure Checkout'}
+              {step === 'confirmed' ? 'Order Confirmed' : 'HimRudra Secure Checkout'}
             </h2>
           </div>
           <button
@@ -454,11 +645,41 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                 </div>
 
                 {/* Order Total Card */}
-                <div className="rounded-xl border border-[#79543D]/20 bg-[#F3EDE5]/75 p-4 space-y-2 text-xs tabular-nums">
+                <div className="rounded-xl border border-[#79543D]/20 bg-[#F3EDE5]/75 p-4 space-y-2.5 text-xs tabular-nums">
                   {calc.shippingFee === 0 && (
                     <div className="rounded-lg border border-emerald-700/25 bg-emerald-50/90 px-3 py-2 text-[11px] font-semibold text-emerald-900">
                       Congratulations! You got Free Delivery!
                     </div>
+                  )}
+                  {cartItems.length > 0 && (
+                    <ul className="divide-y divide-[#79543D]/12 border-b border-[#79543D]/15 pb-2 space-y-2">
+                      {cartItems.map((item) => {
+                        const product = products.find((p) => p.id === item.productId);
+                        if (!product) return null;
+                        return (
+                          <li key={product.id} className="flex items-center gap-2.5 pt-2 first:pt-0">
+                            <div className="h-11 w-11 shrink-0 rounded-lg overflow-hidden border border-[#79543D]/15 bg-[#FAF8F4]">
+                              <ProductArt
+                                key={product.id}
+                                kind={product.galleryTypes[0] ?? 'hero'}
+                                customImageUrl={resolveProductImageUrl(product)}
+                                alt={product.name}
+                                compact
+                              />
+                            </div>
+                            <div className="min-w-0 flex-1">
+                              <div className="font-medium text-[#281A15] truncate">{product.name}</div>
+                              <div className="text-[11px] text-[#79543D]">
+                                {product.netQuantity} × {item.quantity}
+                              </div>
+                            </div>
+                            <div className="font-mono font-medium text-[#281A15] shrink-0">
+                              {formatINR(product.price * item.quantity)}
+                            </div>
+                          </li>
+                        );
+                      })}
+                    </ul>
                   )}
                   <div className="flex justify-between">
                     <span>Items ({calc.itemCount})</span>
@@ -510,7 +731,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
                   className="w-full rounded-lg bg-[#281A15] py-3.5 text-sm font-semibold text-[#FAF8F4] hover:bg-[#3A2720] disabled:opacity-50 transition-colors"
                 >
                   {submitting
-                    ? 'Preparing Order...'
+                    ? statusLabel || 'Preparing Order...'
                     : paymentMethod === 'COD'
                     ? `Place COD Order — ${formatINR(calc.grandTotal)}`
                     : `Pay ${formatINR(calc.grandTotal)} via Razorpay`}
@@ -520,97 +741,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           </form>
         )}
 
-        {/* Step 2: Razorpay Payment Modal Simulation */}
-        {step === 'gateway' && (
-          <div className="p-6 sm:p-8 max-w-md mx-auto space-y-5">
-            <div className="rounded-xl bg-[#281A15] text-[#FAF8F4] p-5 flex items-center justify-between">
-              <div>
-                <p className="text-[11px] uppercase tracking-[0.18em] text-[#C69B51]">
-                  HimRudra Trusted Checkout
-                </p>
-                <p className="font-mono text-xs text-[#FAF8F4]/75 mt-1">{razorpayOrderId}</p>
-              </div>
-              <div className="text-right font-mono text-xl font-semibold tabular-nums">
-                {formatINR(calc.grandTotal)}
-              </div>
-            </div>
-
-            {paymentMethod === 'UPI' && (
-              <div className="space-y-2">
-                <label htmlFor="rzp-upi" className="block text-xs font-medium text-[#79543D]">
-                  UPI ID / VPA
-                </label>
-                <input
-                  id="rzp-upi"
-                  type="text"
-                  value={upiId}
-                  onChange={(e) => setUpiId(e.target.value)}
-                  className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 text-sm font-mono"
-                />
-              </div>
-            )}
-
-            {paymentMethod === 'Card' && (
-              <div className="space-y-2">
-                <label htmlFor="rzp-card" className="block text-xs font-medium text-[#79543D]">
-                  Card Ending Digits (Test Mode Ready)
-                </label>
-                <input
-                  id="rzp-card"
-                  type="text"
-                  maxLength={4}
-                  value={cardLast4}
-                  onChange={(e) => setCardLast4(e.target.value)}
-                  className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 text-sm font-mono"
-                />
-              </div>
-            )}
-
-            {paymentMethod === 'NetBanking' && (
-              <div className="space-y-2">
-                <label htmlFor="rzp-bank" className="block text-xs font-medium text-[#79543D]">
-                  Select Bank
-                </label>
-                <select
-                  id="rzp-bank"
-                  value={selectedBank}
-                  onChange={(e) => setSelectedBank(e.target.value)}
-                  className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 text-sm"
-                >
-                  <option>HDFC Bank</option>
-                  <option>ICICI Bank</option>
-                  <option>State Bank of India</option>
-                  <option>Axis Bank</option>
-                </select>
-              </div>
-            )}
-
-            <div className="flex items-center gap-2 text-xs text-[#79543D]">
-              <ShieldCheck className="h-4 w-4 shrink-0" />
-              <span>256-bit encrypted payment authorization via {paymentMethod}.</span>
-            </div>
-
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={() => setStep('details')}
-                className="rounded-lg border border-[#79543D]/35 px-4 py-3 text-xs font-semibold text-[#281A15]"
-              >
-                Back
-              </button>
-              <button
-                type="button"
-                disabled={submitting}
-                onClick={() => finalizeOrder(`pay_HR_${Date.now().toString(36)}`)}
-                className="flex-1 rounded-lg bg-[#281A15] py-3 text-sm font-semibold text-[#FAF8F4] hover:bg-[#3A2720] disabled:opacity-50"
-              >
-                {submitting ? 'Authorizing...' : `Authorize & Pay ${formatINR(calc.grandTotal)}`}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* Step 3: Confirmation Receipt */}
+        {/* Step 2: Confirmation Receipt */}
         {step === 'confirmed' && confirmedOrder && (
           <div className="p-6 sm:p-8 text-center space-y-5 max-w-lg mx-auto">
             <div className="mx-auto h-14 w-14 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-700">
@@ -637,7 +768,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
               <div className="flex justify-between">
                 <span className="text-[#79543D]">Payment</span>
                 <span className="font-medium text-[#281A15]">
-                  {confirmedOrder.paymentMethod} ({confirmedOrder.paymentStatus})
+                  {formatPaymentMethodLabel(confirmedOrder.paymentMethod)} ({confirmedOrder.paymentStatus})
                 </span>
               </div>
               <div className="flex justify-between">

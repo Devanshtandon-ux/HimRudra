@@ -282,14 +282,36 @@ export const AdminOrdersSection: React.FC<AdminOrdersSectionProps> = ({
             <option value="amountAsc">Amount: Low to High</option>
           </select>
 
-          <a
-            href="/api/admin/orders/export"
-            download="himrudra-orders.csv"
+          <button
+            type="button"
+            onClick={async () => {
+              let token: string | null = null;
+              try {
+                token = window.sessionStorage.getItem('himrudra_session_token');
+              } catch {
+                // ignore storage errors
+              }
+              const res = await fetch('/api/admin/orders/export', {
+                cache: 'no-store',
+                credentials: 'include',
+                headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+              });
+              if (!res.ok) return;
+              const blob = await res.blob();
+              const url = URL.createObjectURL(blob);
+              const link = document.createElement('a');
+              link.href = url;
+              link.download = 'himrudra-orders.csv';
+              document.body.appendChild(link);
+              link.click();
+              link.remove();
+              URL.revokeObjectURL(url);
+            }}
             className="inline-flex items-center gap-1.5 rounded-lg border border-[#79543D]/35 bg-[#FAF8F4] px-3 py-2 text-xs font-medium text-[#281A15] hover:bg-[#EAE1D4]"
           >
             <Download className="h-3.5 w-3.5 text-[#79543D]" />
             <span>CSV Export</span>
-          </a>
+          </button>
         </div>
 
         {datePreset === 'custom' && (
@@ -385,6 +407,7 @@ export const AdminOrdersSection: React.FC<AdminOrdersSectionProps> = ({
                     >
                       {ord.paymentStatus}
                     </span>
+                    <div className="text-[11px] text-[#79543D] mt-0.5">{ord.paymentMethod}</div>
                   </td>
                   <td className="py-3 px-3.5 whitespace-nowrap font-medium text-[#281A15]">
                     {ord.status}

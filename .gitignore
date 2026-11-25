@@ -7,3 +7,7 @@ coverage/
 .env*
 !.env.example
 .neon
+data/backups/
+data/himrudra-db.json
+.playwright-cli/
+.aistudio/

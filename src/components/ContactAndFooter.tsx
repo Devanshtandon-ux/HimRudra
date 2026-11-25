@@ -8,7 +8,6 @@ interface ContactAndFooterProps {
   onOpenTrackOrder: () => void;
   onNavigateSection: (id: string) => void;
   onNavigateLegal: (path: string) => void;
-  labDownloadUrl?: string;
   hideContactSection?: boolean;
 }
 
@@ -16,7 +15,6 @@ export const ContactAndFooter: React.FC<ContactAndFooterProps> = ({
   onOpenTrackOrder,
   onNavigateSection,
   onNavigateLegal,
-  labDownloadUrl,
   hideContactSection = false,
 }) => {
   const [name, setName] = useState('');
@@ -257,15 +255,6 @@ export const ContactAndFooter: React.FC<ContactAndFooterProps> = ({
               >
                 Track Your Order
               </button>
-              {labDownloadUrl && (
-                <a
-                  href={labDownloadUrl}
-                  download
-                  className="block text-[#FAF8F4]/75 hover:text-[#FAF8F4] transition-colors"
-                >
-                  Download Lab Certificate
-                </a>
-              )}
               <button
                 type="button"
                 onClick={() => onNavigateSection('contact')}
