@@ -80,7 +80,12 @@ export const AdminAnalyticsSection: React.FC<AdminAnalyticsSectionProps> = ({
     {
       label: 'Payment Gateway Fees',
       value: formatINR(analytics.gatewayFees),
-      sub: 'Configured fee deduction on online payments',
+      sub:
+        analytics.gatewayFeesActualCount > 0 && analytics.gatewayFeesEstimatedCount === 0
+          ? `Actual Razorpay fees (${analytics.gatewayFeesActualCount} online order${analytics.gatewayFeesActualCount === 1 ? '' : 's'})`
+          : analytics.gatewayFeesActualCount > 0
+          ? `${analytics.gatewayFeesActualCount} actual Razorpay · ${analytics.gatewayFeesEstimatedCount} estimated`
+          : 'Configured estimate (actual Razorpay fees sync on capture)',
     },
     {
       label: 'Refunds',

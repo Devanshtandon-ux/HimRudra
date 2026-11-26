@@ -115,6 +115,7 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
       }
       const res = await fetch('/api/orders/mine', {
         credentials: 'include',
+        cache: 'no-store',
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       });
       if (res.ok) {
@@ -144,6 +145,7 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
       }
       const res = await fetch(`/api/orders/track?${params.toString()}`, {
         credentials: 'include',
+        cache: 'no-store',
         headers: token ? { Authorization: `Bearer ${token}` } : undefined,
       });
       const data = await res.json();

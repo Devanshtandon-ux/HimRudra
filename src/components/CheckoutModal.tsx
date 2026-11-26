@@ -2,8 +2,10 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Building2,
   CheckCircle2,
+  Clock,
   CreditCard,
   Lock,
+  RefreshCw,
   Smartphone,
   Truck,
   X,
@@ -77,7 +79,95 @@ interface RazorpayWindow extends Window {
 }
 
 const RAZORPAY_SCRIPT_SRC = 'https://checkout.razorpay.com/v1/checkout.js';
+const PENDING_PAYMENT_STORAGE_KEY = 'himrudra_pending_razorpay_payment_v1';
+const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
 let razorpayScriptPromise: Promise<NonNullable<RazorpayWindow['Razorpay']>> | null = null;
+
+interface PendingOnlinePayment {
+  razorpayOrderId: string;
+  razorpayPaymentId: string;
+  razorpaySignature: string;
+  savedAt: number;
+}
+
+function getAuthHeaders(): Record<string, string> {
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+  try {
+    const token = window.sessionStorage.getItem('himrudra_session_token');
+    if (token) {
+      headers.Authorization = `Bearer ${token}`;
+    }
+  } catch {
+    // ignore storage errors
+  }
+  return headers;
+}
+
+function savePendingPayment(payment: PendingOnlinePayment) {
+  try {
+    window.sessionStorage.setItem(PENDING_PAYMENT_STORAGE_KEY, JSON.stringify(payment));
+  } catch {
+    // ignore storage errors
+  }
+}
+
+function readPendingPayment(): PendingOnlinePayment | null {
+  try {
+    const raw = window.sessionStorage.getItem(PENDING_PAYMENT_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as PendingOnlinePayment;
+    if (
+      !parsed?.razorpayOrderId ||
+      !parsed?.razorpayPaymentId ||
+      !parsed?.razorpaySignature ||
+      Date.now() - (parsed.savedAt || 0) > 1000 * 60 * 30
+    ) {
+      window.sessionStorage.removeItem(PENDING_PAYMENT_STORAGE_KEY);
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function clearPendingPayment() {
+  try {
+    window.sessionStorage.removeItem(PENDING_PAYMENT_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+}
+
+async function fetchJsonWithRetry(
+  url: string,
+  init: RequestInit,
+  retryDelaysMs: number[] = [800, 1800, 3000]
+): Promise<{ res: Response; data: Record<string, unknown> }> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    try {
+      const res = await fetch(url, {
+        ...init,
+        credentials: 'include',
+        cache: 'no-store',
+      });
+      const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+      if (RETRYABLE_HTTP_STATUSES.has(res.status) && attempt < retryDelaysMs.length) {
+        await new Promise((r) => window.setTimeout(r, retryDelaysMs[attempt]));
+        continue;
+      }
+      return { res, data };
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retryDelaysMs.length) {
+        await new Promise((r) => window.setTimeout(r, retryDelaysMs[attempt]));
+        continue;
+      }
+    }
+  }
+  throw lastErr ?? new Error('Network error while contacting server.');
+}
 
 function loadRazorpayCheckoutScript(): Promise<NonNullable<RazorpayWindow['Razorpay']>> {
   const win = window as RazorpayWindow;
@@ -173,21 +263,65 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('UPI');
   const [fieldErrors, setFieldErrors] = useState<CheckoutValidationErrors>({});
   const [serverError, setServerError] = useState('');
-  const [step, setStep] = useState<'details' | 'confirmed'>('details');
+  const [step, setStep] = useState<'details' | 'pending_confirmation' | 'confirmed'>('details');
   const [submitting, setSubmitting] = useState(false);
   const [statusLabel, setStatusLabel] = useState('');
   const [confirmedOrder, setConfirmedOrder] = useState<Order | null>(null);
+  const [pendingPayment, setPendingPayment] = useState<PendingOnlinePayment | null>(null);
   const paymentCallbackHandledRef = useRef(false);
+
+  const pollOrderStatus = async (payment: PendingOnlinePayment): Promise<boolean> => {
+    try {
+      const { res, data } = await fetchJsonWithRetry(
+        '/api/payments/order-status',
+        {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({
+            razorpayOrderId: payment.razorpayOrderId,
+            razorpayPaymentId: payment.razorpayPaymentId,
+            razorpaySignature: payment.razorpaySignature,
+          }),
+        },
+        [800, 1800]
+      );
+      if (res.ok && data.status === 'confirmed' && data.order) {
+        clearPendingPayment();
+        setPendingPayment(null);
+        const order = data.order as Order;
+        const nextProducts = Array.isArray(data.updatedProducts)
+          ? (data.updatedProducts as Product[])
+          : products;
+        setConfirmedOrder(order);
+        setStep('confirmed');
+        onOrderSuccess(order, nextProducts);
+        return true;
+      }
+    } catch {
+      // keep pending_confirmation screen so user can retry safely without paying again
+    }
+    return false;
+  };
 
   useEffect(() => {
     if (open) {
-      setStep('details');
       setConfirmedOrder(null);
       setServerError('');
       setFieldErrors({});
       setSubmitting(false);
       setStatusLabel('');
       paymentCallbackHandledRef.current = false;
+
+      const existingPending = readPendingPayment();
+      if (existingPending) {
+        setPendingPayment(existingPending);
+        setStep('pending_confirmation');
+        void pollOrderStatus(existingPending);
+      } else {
+        setPendingPayment(null);
+        setStep('details');
+      }
+
       if (user) {
         setAddress((prev) => ({
           fullName: prev.fullName || user.defaultAddress?.fullName || user.name || '',
@@ -223,8 +357,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   }) => {
     setSubmitting(true);
     setServerError('');
+
+    const isOnline = paymentMethod !== 'COD' || Boolean(onlinePayment);
+    let capturedPending: PendingOnlinePayment | null = null;
+
     try {
-      if (paymentMethod !== 'COD') {
+      if (isOnline) {
         if (
           !onlinePayment?.razorpayOrderId ||
           !onlinePayment?.razorpayPaymentId ||
@@ -234,27 +372,74 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           return;
         }
 
-        setStatusLabel('Verifying Payment...');
-        const verifyRes = await fetch('/api/payments/verify', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            razorpayOrderId: onlinePayment.razorpayOrderId,
-            razorpayPaymentId: onlinePayment.razorpayPaymentId,
-            razorpaySignature: onlinePayment.razorpaySignature,
-          }),
-        });
-        const verifyData = await verifyRes.json().catch(() => ({}));
+        capturedPending = {
+          razorpayOrderId: onlinePayment.razorpayOrderId,
+          razorpayPaymentId: onlinePayment.razorpayPaymentId,
+          razorpaySignature: onlinePayment.razorpaySignature,
+          savedAt: Date.now(),
+        };
+        savePendingPayment(capturedPending);
+        setPendingPayment(capturedPending);
+
+        setStatusLabel('Verifying Payment & Confirming Order...');
+        const { res: verifyRes, data: verifyData } = await fetchJsonWithRetry(
+          '/api/payments/verify',
+          {
+            method: 'POST',
+            headers: getAuthHeaders(),
+            body: JSON.stringify({
+              razorpayOrderId: onlinePayment.razorpayOrderId,
+              razorpayPaymentId: onlinePayment.razorpayPaymentId,
+              razorpaySignature: onlinePayment.razorpaySignature,
+              checkoutDraft: {
+                items: cartItems,
+                shippingAddress: address,
+                deliveryInstructions,
+                shippingSpeed,
+                paymentMethod,
+                couponCode,
+              },
+            }),
+          }
+        );
+
         if (!verifyRes.ok || !verifyData.verified) {
-          setServerError(verifyData.error || 'Payment verification failed. Please retry.');
+          if (verifyRes.status >= 400 && verifyRes.status < 500 && verifyRes.status !== 408 && verifyRes.status !== 429) {
+            clearPendingPayment();
+            setPendingPayment(null);
+            setServerError(
+              String(verifyData.error || 'Payment verification failed. Please retry.')
+            );
+            setStep('details');
+            return;
+          }
+          // Server/transient error after Razorpay capture: fall back to order-status recovery
+          const recovered = await pollOrderStatus(capturedPending);
+          if (!recovered) {
+            setStep('pending_confirmation');
+          }
+          return;
+        }
+
+        // Single round-trip confirmation when /api/payments/verify already created or matched the order
+        if (verifyData.order) {
+          clearPendingPayment();
+          setPendingPayment(null);
+          const order = verifyData.order as Order;
+          const nextProducts = Array.isArray(verifyData.updatedProducts)
+            ? (verifyData.updatedProducts as Product[])
+            : products;
+          setConfirmedOrder(order);
+          setStep('confirmed');
+          onOrderSuccess(order, nextProducts);
           return;
         }
       }
 
       setStatusLabel('Confirming Order...');
-      const res = await fetch('/api/orders', {
+      const { res, data } = await fetchJsonWithRetry('/api/orders', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           items: cartItems,
           shippingAddress: address,
@@ -266,18 +451,63 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           razorpayPaymentId: onlinePayment?.razorpayPaymentId,
         }),
       });
-      const data = await res.json().catch(() => ({}));
+
       if (!res.ok) {
-        if (data.fieldErrors) setFieldErrors(data.fieldErrors);
-        setServerError(data.error || 'Order submission failed.');
+        if (capturedPending) {
+          const recovered = await pollOrderStatus(capturedPending);
+          if (!recovered) {
+            setStep('pending_confirmation');
+            setServerError(
+              String(
+                data.error ||
+                  'Your payment was received, and we are still finalizing your order.'
+              )
+            );
+          }
+          return;
+        }
+        if (data.fieldErrors) setFieldErrors(data.fieldErrors as CheckoutValidationErrors);
+        setServerError(String(data.error || 'Order submission failed.'));
         setStep('details');
         return;
       }
-      setConfirmedOrder(data.order);
+
+      clearPendingPayment();
+      setPendingPayment(null);
+      const order = data.order as Order;
+      const nextProducts = Array.isArray(data.updatedProducts)
+        ? (data.updatedProducts as Product[])
+        : products;
+      setConfirmedOrder(order);
       setStep('confirmed');
-      onOrderSuccess(data.order, data.updatedProducts);
+      onOrderSuccess(order, nextProducts);
     } catch {
-      setServerError('Unable to submit order. Please try again.');
+      if (capturedPending) {
+        const recovered = await pollOrderStatus(capturedPending);
+        if (!recovered) {
+          setStep('pending_confirmation');
+        }
+      } else {
+        setServerError('Unable to submit order. Please check your connection and try again.');
+      }
+    } finally {
+      setSubmitting(false);
+      setStatusLabel('');
+    }
+  };
+
+  const handleCheckPendingOrder = async () => {
+    if (!pendingPayment || submitting) return;
+    setSubmitting(true);
+    setServerError('');
+    setStatusLabel('Checking Order Status...');
+    try {
+      const recovered = await pollOrderStatus(pendingPayment);
+      if (!recovered) {
+        setServerError(
+          'Your payment is safely recorded. Confirmation is still syncing — please tap Check Order Status again in a few seconds or contact support with your Payment ID.'
+        );
+      }
     } finally {
       setSubmitting(false);
       setStatusLabel('');
@@ -287,6 +517,16 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
   const handleContinueToGateway = async (e: React.FormEvent) => {
     e.preventDefault();
     if (submitting) return;
+
+    // Never initiate a second Razorpay payment if a captured payment is awaiting confirmation
+    const existingPending = pendingPayment ?? readPendingPayment();
+    if (existingPending) {
+      setPendingPayment(existingPending);
+      setStep('pending_confirmation');
+      void handleCheckPendingOrder();
+      return;
+    }
+
     setServerError('');
     const validation = validateCheckoutForm(address);
     if (!validation.valid) {
@@ -312,9 +552,13 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
       const res = await fetch('/api/payments/create-order', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        cache: 'no-store',
+        headers: getAuthHeaders(),
         body: JSON.stringify({
           items: cartItems,
+          shippingAddress: address,
+          deliveryInstructions,
           shippingSpeed,
           paymentMethod,
           couponCode,
@@ -323,6 +567,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.razorpayOrderId || !data.keyId) {
+        if (data.fieldErrors) setFieldErrors(data.fieldErrors);
         setServerError(
           data.error || 'Could not initialize Razorpay payment gateway. Please try again.'
         );
@@ -358,6 +603,14 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         handler: (response: RazorpayHandlerResponse) => {
           if (paymentCallbackHandledRef.current) return;
           paymentCallbackHandledRef.current = true;
+          const captured: PendingOnlinePayment = {
+            razorpayOrderId: response.razorpay_order_id,
+            razorpayPaymentId: response.razorpay_payment_id,
+            razorpaySignature: response.razorpay_signature,
+            savedAt: Date.now(),
+          };
+          savePendingPayment(captured);
+          setPendingPayment(captured);
           void finalizeOrder({
             razorpayOrderId: response.razorpay_order_id,
             razorpayPaymentId: response.razorpay_payment_id,
@@ -416,7 +669,11 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
           <div className="flex items-center gap-2.5">
             <Lock className="h-4 w-4 text-[#79543D]" />
             <h2 className="font-serif text-2xl font-semibold text-[#281A15]">
-              {step === 'confirmed' ? 'Order Confirmed' : 'HimRudra Secure Checkout'}
+              {step === 'confirmed'
+                ? 'Order Confirmed'
+                : step === 'pending_confirmation'
+                ? 'Payment Received — Confirming Your Order'
+                : 'HimRudra Secure Checkout'}
             </h2>
           </div>
           <button
@@ -739,6 +996,73 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
               </div>
             </div>
           </form>
+        )}
+
+        {/* Step 1.5: Payment Captured — Pending Confirmation Recovery (Never initiates duplicate charge) */}
+        {step === 'pending_confirmation' && pendingPayment && (
+          <div className="p-6 sm:p-8 text-center space-y-5 max-w-lg mx-auto">
+            <div className="mx-auto h-14 w-14 rounded-full bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-800">
+              <Clock className="h-7 w-7" />
+            </div>
+            <div>
+              <p className="text-xs uppercase tracking-[0.2em] text-[#79543D]">
+                Do Not Pay Again
+              </p>
+              <h3 className="font-serif text-2xl font-semibold text-[#281A15] mt-1">
+                Payment Received — Confirming Your Order
+              </h3>
+              <p className="text-sm text-[#241B17]/80 mt-2 leading-relaxed">
+                Your Razorpay payment was captured, and our server is finalizing your order record.
+                Please do not retry payment — tap below to check your confirmation status.
+              </p>
+            </div>
+
+            {serverError && (
+              <div className="rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-xs text-amber-950 text-left">
+                {serverError}
+              </div>
+            )}
+
+            <div className="rounded-xl border border-[#79543D]/20 bg-[#F3EDE5]/70 p-4 text-left text-xs space-y-2 tabular-nums">
+              <div className="flex justify-between gap-2">
+                <span className="text-[#79543D]">Razorpay Payment ID</span>
+                <span className="font-mono font-semibold text-[#281A15] break-all">
+                  {pendingPayment.razorpayPaymentId}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2">
+                <span className="text-[#79543D]">Razorpay Order ID</span>
+                <span className="font-mono text-[#281A15] break-all">
+                  {pendingPayment.razorpayOrderId}
+                </span>
+              </div>
+              <div className="flex justify-between gap-2 border-t border-[#79543D]/15 pt-2">
+                <span className="text-[#79543D]">Support</span>
+                <span className="font-mono text-[#281A15]">
+                  {settings.brandEmail} · {settings.brandPhone}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap justify-center gap-3">
+              <button
+                type="button"
+                disabled={submitting}
+                onClick={() => void handleCheckPendingOrder()}
+                className="inline-flex items-center gap-2 rounded-lg bg-[#281A15] px-6 py-3 text-xs font-semibold text-[#FAF8F4] hover:bg-[#3A2720] disabled:opacity-50"
+              >
+                <RefreshCw className={`h-3.5 w-3.5 ${submitting ? 'animate-spin' : ''}`} />
+                <span>{submitting ? statusLabel || 'Checking...' : 'Check Order Status'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={onClose}
+                className="rounded-lg border border-[#79543D]/35 px-5 py-3 text-xs font-semibold text-[#281A15]"
+              >
+                Close Window
+              </button>
+            </div>
+          </div>
         )}
 
         {/* Step 2: Confirmation Receipt */}

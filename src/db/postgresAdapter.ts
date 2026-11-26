@@ -27,6 +27,7 @@ import type {
   OrderPaymentStatus,
   OrderStatus,
   PaymentMethod,
+  PaymentSettlementStatus,
   Product,
   Promotion,
   ShippingAddress,
@@ -68,6 +69,12 @@ function isUndefinedTableError(error: unknown): boolean {
   if (getPgErrorCode(error) === '42P01') return true;
   const msg = error instanceof Error ? error.message : String(error);
   return /relation ["']?[a-z_]+["']? does not exist/i.test(msg);
+}
+
+function isUndefinedColumnError(error: unknown): boolean {
+  if (getPgErrorCode(error) === '42703') return true;
+  const msg = error instanceof Error ? error.message : String(error);
+  return /column ["']?[a-z0-9_.]+["']? does not exist/i.test(msg);
 }
 
 function isTransientConnectionError(error: unknown): boolean {
@@ -154,9 +161,14 @@ CREATE TABLE IF NOT EXISTS orders (
   gst_amount double precision NOT NULL,
   total_amount double precision NOT NULL,
   gateway_fee_amount double precision,
+  gateway_tax_amount double precision,
+  gateway_fee_source text,
   actual_shipping_cost double precision,
   payment_method text NOT NULL,
   payment_status text NOT NULL,
+  settlement_status text,
+  razorpay_settlement_id text,
+  settled_at text,
   razorpay_order_id text,
   razorpay_payment_id text,
   payment_verified_at text,
@@ -284,7 +296,12 @@ CREATE TABLE IF NOT EXISTS payment_intents (
   payment_id text,
   signature_verified boolean NOT NULL DEFAULT false,
   method text NOT NULL,
-  created_at text NOT NULL
+  checkout_payload jsonb,
+  order_id text,
+  gateway_fee_paise integer,
+  gateway_tax_paise integer,
+  created_at text NOT NULL,
+  updated_at text
 );
 CREATE TABLE IF NOT EXISTS store_settings (
   id text PRIMARY KEY,
@@ -292,6 +309,32 @@ CREATE TABLE IF NOT EXISTS store_settings (
   updated_at timestamp DEFAULT now()
 );
 `;
+
+const REQUIRED_SCHEMA_COLUMNS: Record<string, string[]> = {
+  orders: [
+    'gateway_fee_amount',
+    'gateway_tax_amount',
+    'gateway_fee_source',
+    'settlement_status',
+    'razorpay_settlement_id',
+    'settled_at',
+    'razorpay_order_id',
+    'razorpay_payment_id',
+  ],
+  payment_intents: [
+    'razorpay_order_id',
+    'checkout_payload',
+    'order_id',
+    'gateway_fee_paise',
+    'gateway_tax_paise',
+    'updated_at',
+  ],
+};
+
+const REQUIRED_SCHEMA_INDEXES = [
+  'orders_razorpay_payment_id_uidx',
+  'orders_razorpay_order_id_uidx',
+];
 
 function isTableEmpty(state: {
   userCount: number;
@@ -304,11 +347,16 @@ function isTableEmpty(state: {
 export class PostgresStateAdapter {
   private externalSchemaReady = false;
   private externalSchemaPromise: Promise<void> | null = null;
+  private schemaVerificationCache: {
+    ok: boolean;
+    missingColumns: string[];
+    missingIndexes: string[];
+    checkedAt: string;
+  } | null = null;
 
   /**
-   * Lazily provisions the 12 relational tables in a single SQL batch ONLY if an external
-   * Postgres database (e.g., fresh Neon DB via DATABASE_URL) reports undefined_table (42P01).
-   * Eliminates 12 sequential DDL round-trips from every Vercel cold start.
+   * Lazily provisions the 12 relational tables ONLY if a brand-new external Postgres database
+   * reports undefined_table (42P01). Never runs ALTER TABLE or CREATE INDEX during normal reads.
    */
   private async ensureExternalSchemaIfNeeded(): Promise<void> {
     if (this.externalSchemaReady || !isUsingExternalPostgresUrl()) return;
@@ -333,9 +381,60 @@ export class PostgresStateAdapter {
   }
 
   /**
-   * Executes a Postgres operation without upfront DDL round-trips.
-   * Automatically bootstraps external schema once on 42P01 and retries once on transient
-   * idle-socket resets (common when Neon compute wakes from scale-to-zero).
+   * Read-only verification of required columns and idempotency indexes via system catalogs.
+   * Safe for least-privilege application database roles — never executes DDL.
+   */
+  async verifyRequiredSchema(force = false): Promise<{
+    ok: boolean;
+    missingColumns: string[];
+    missingIndexes: string[];
+    checkedAt: string;
+  }> {
+    if (this.schemaVerificationCache && !force) {
+      return this.schemaVerificationCache;
+    }
+    const pool = createPool();
+    const [colRes, idxRes] = await Promise.all([
+      pool.query<{ table_name: string; column_name: string }>(
+        `SELECT table_name, column_name
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name IN ('orders', 'payment_intents')`
+      ),
+      pool.query<{ indexname: string }>(
+        `SELECT indexname
+         FROM pg_indexes
+         WHERE schemaname = 'public'
+           AND tablename = 'orders'`
+      ),
+    ]);
+
+    const existingCols = new Set(colRes.rows.map((r) => `${r.table_name}.${r.column_name}`));
+    const existingIdxs = new Set(idxRes.rows.map((r) => r.indexname));
+
+    const missingColumns: string[] = [];
+    for (const [table, cols] of Object.entries(REQUIRED_SCHEMA_COLUMNS)) {
+      for (const col of cols) {
+        if (!existingCols.has(`${table}.${col}`)) {
+          missingColumns.push(`${table}.${col}`);
+        }
+      }
+    }
+    const missingIndexes = REQUIRED_SCHEMA_INDEXES.filter((idx) => !existingIdxs.has(idx));
+
+    const summary = {
+      ok: missingColumns.length === 0 && missingIndexes.length === 0,
+      missingColumns,
+      missingIndexes,
+      checkedAt: new Date().toISOString(),
+    };
+    this.schemaVerificationCache = summary;
+    return summary;
+  }
+
+  /**
+   * Executes a Postgres operation without runtime ALTER TABLE / CREATE INDEX DDL.
+   * Retries once on transient idle-socket resets (common when Neon compute wakes from scale-to-zero).
    */
   private async runWithRecovery<T>(operation: () => Promise<T>): Promise<T> {
     try {
@@ -344,6 +443,14 @@ export class PostgresStateAdapter {
       if (isUsingExternalPostgresUrl() && isUndefinedTableError(error)) {
         await this.ensureExternalSchemaIfNeeded();
         return await operation();
+      }
+      if (isUndefinedColumnError(error)) {
+        logStructured('error', 'cloud-sql', 'schema_migration_required', {
+          code: getPgErrorCode(error) || '42703',
+          error: error instanceof Error ? error.message : String(error),
+          hint: 'Run database schema migration using the authorized database owner role.',
+        });
+        throw error;
       }
       if (isTransientConnectionError(error)) {
         logStructured('warn', 'cloud-sql', 'transient_connection_retry', {
@@ -605,9 +712,17 @@ export class PostgresStateAdapter {
       gstAmount: row.gstAmount,
       totalAmount: row.totalAmount,
       gatewayFeeAmount: row.gatewayFeeAmount ?? undefined,
+      gatewayTaxAmount: row.gatewayTaxAmount ?? undefined,
+      gatewayFeeSource:
+        row.gatewayFeeSource === 'razorpay_actual' || row.gatewayFeeSource === 'estimated'
+          ? row.gatewayFeeSource
+          : undefined,
       actualShippingCost: row.actualShippingCost ?? undefined,
       paymentMethod: row.paymentMethod as PaymentMethod,
       paymentStatus: row.paymentStatus as OrderPaymentStatus,
+      settlementStatus: (row.settlementStatus as PaymentSettlementStatus | null) ?? undefined,
+      razorpaySettlementId: row.razorpaySettlementId ?? undefined,
+      settledAt: row.settledAt ?? undefined,
       razorpayOrderId: row.razorpayOrderId ?? undefined,
       razorpayPaymentId: row.razorpayPaymentId ?? undefined,
       paymentVerifiedAt: row.paymentVerifiedAt ?? undefined,
@@ -634,16 +749,22 @@ export class PostgresStateAdapter {
       paymentId: row.paymentId ?? undefined,
       signatureVerified: row.signatureVerified,
       method: row.method,
+      checkoutPayload: row.checkoutPayload ?? undefined,
+      orderId: row.orderId ?? undefined,
+      gatewayFeePaise: row.gatewayFeePaise ?? undefined,
+      gatewayTaxPaise: row.gatewayTaxPaise ?? undefined,
       createdAt: row.createdAt,
+      updatedAt: row.updatedAt ?? undefined,
     };
   }
 
   /**
    * Targeted single-row upsert for a Razorpay payment intent.
-   * Avoids rewriting all 12 tables during /api/payments/create-order and /api/payments/verify.
+   * Preserves checkoutPayload & orderId across partial updates so webhook recovery always has checkout details.
    */
   async upsertPaymentIntent(intent: PaymentIntentRecord): Promise<void> {
     const startedAt = Date.now();
+    const updatedAt = intent.updatedAt ?? new Date().toISOString();
     try {
       await this.runWithRecovery(() =>
         db
@@ -655,7 +776,12 @@ export class PostgresStateAdapter {
             paymentId: intent.paymentId ?? null,
             signatureVerified: intent.signatureVerified,
             method: intent.method,
+            checkoutPayload: intent.checkoutPayload ?? null,
+            orderId: intent.orderId ?? null,
+            gatewayFeePaise: intent.gatewayFeePaise ?? null,
+            gatewayTaxPaise: intent.gatewayTaxPaise ?? null,
             createdAt: intent.createdAt,
+            updatedAt,
           })
           .onConflictDoUpdate({
             target: paymentIntents.razorpayOrderId,
@@ -665,11 +791,23 @@ export class PostgresStateAdapter {
               paymentId: intent.paymentId ?? null,
               signatureVerified: intent.signatureVerified,
               method: intent.method,
+              ...(intent.checkoutPayload !== undefined
+                ? { checkoutPayload: intent.checkoutPayload ?? null }
+                : {}),
+              ...(intent.orderId !== undefined ? { orderId: intent.orderId ?? null } : {}),
+              ...(intent.gatewayFeePaise !== undefined
+                ? { gatewayFeePaise: intent.gatewayFeePaise ?? null }
+                : {}),
+              ...(intent.gatewayTaxPaise !== undefined
+                ? { gatewayTaxPaise: intent.gatewayTaxPaise ?? null }
+                : {}),
+              updatedAt,
             },
           })
       );
       logStructured('info', 'cloud-sql', 'upsert_payment_intent_success', {
         verified: intent.verified,
+        hasCheckoutDraft: Boolean(intent.checkoutPayload),
         durationMs: Date.now() - startedAt,
       });
     } catch (error) {
@@ -714,6 +852,177 @@ export class PostgresStateAdapter {
         retryable: true,
       });
     }
+  }
+
+  async findOrderByRazorpayReference(params: {
+    razorpayOrderId?: string;
+    razorpayPaymentId?: string;
+  }): Promise<Order | null> {
+    if (!params.razorpayOrderId && !params.razorpayPaymentId) return null;
+    const rows = await this.runWithRecovery(() =>
+      db
+        .select()
+        .from(orders)
+        .where(
+          params.razorpayPaymentId && params.razorpayOrderId
+            ? or(
+                eq(orders.razorpayPaymentId, params.razorpayPaymentId),
+                eq(orders.razorpayOrderId, params.razorpayOrderId)
+              )
+            : params.razorpayPaymentId
+            ? eq(orders.razorpayPaymentId, params.razorpayPaymentId)
+            : eq(orders.razorpayOrderId, params.razorpayOrderId!)
+        )
+        .limit(1)
+    );
+    return rows[0] ? this.mapOrderRow(rows[0]) : null;
+  }
+
+  async findOrdersForUser(userId: string, email: string): Promise<Order[]> {
+    const normalizedEmail = email.trim().toLowerCase();
+    const rows = await this.runWithRecovery(() =>
+      db
+        .select()
+        .from(orders)
+        .where(
+          or(
+            eq(orders.userId, userId),
+            sql`lower(${orders.customerEmail}) = ${normalizedEmail}`
+          )
+        )
+        .orderBy(desc(orders.createdAt))
+    );
+    return rows.map((row) => this.mapOrderRow(row));
+  }
+
+  async listUnreconciledCapturedIntents(): Promise<PaymentIntentRecord[]> {
+    const [intentRows, orderRows] = await this.runWithRecovery(() =>
+      Promise.all([
+        db
+          .select()
+          .from(paymentIntents)
+          .where(
+            or(
+              eq(paymentIntents.verified, true),
+              sql`${paymentIntents.paymentId} IS NOT NULL`
+            )
+          )
+          .orderBy(desc(paymentIntents.createdAt)),
+        db
+          .select({
+            id: orders.id,
+            razorpayOrderId: orders.razorpayOrderId,
+            razorpayPaymentId: orders.razorpayPaymentId,
+          })
+          .from(orders),
+      ])
+    );
+
+    const matchedOrderIds = new Set(orderRows.map((o) => o.id));
+    const matchedRzpOrderIds = new Set(
+      orderRows.map((o) => o.razorpayOrderId).filter((v): v is string => Boolean(v))
+    );
+    const matchedRzpPaymentIds = new Set(
+      orderRows.map((o) => o.razorpayPaymentId).filter((v): v is string => Boolean(v))
+    );
+
+    return intentRows
+      .filter(
+        (intent) =>
+          !(intent.orderId && matchedOrderIds.has(intent.orderId)) &&
+          !matchedRzpOrderIds.has(intent.razorpayOrderId) &&
+          !(intent.paymentId && matchedRzpPaymentIds.has(intent.paymentId))
+      )
+      .map((row) => this.mapPaymentIntentRow(row));
+  }
+
+  async cleanupApprovedTestRecords(params: {
+    orderIds: string[];
+    paymentIntentIds: string[];
+    notificationIds: string[];
+    restoreInventory: boolean;
+  }): Promise<{
+    deletedOrderNumbers: string[];
+    deletedPaymentIntentIds: string[];
+    deletedNotificationIds: string[];
+    restoredStock: Array<{ productId: string; quantityRestored: number; newStock: number }>;
+  }> {
+    return this.runWithRecovery(() =>
+      db.transaction(async (tx) => {
+        const deletedOrderNumbers: string[] = [];
+        const restoredStock: Array<{ productId: string; quantityRestored: number; newStock: number }> =
+          [];
+        const stockRestoreMap = new Map<string, number>();
+
+        for (const orderId of params.orderIds) {
+          const found = await tx
+            .select()
+            .from(orders)
+            .where(eq(orders.id, orderId))
+            .limit(1);
+          if (!found[0]) continue;
+          const ord = this.mapOrderRow(found[0]);
+          if (
+            params.restoreInventory &&
+            ord.status !== 'Cancelled' &&
+            ord.status !== 'Refunded'
+          ) {
+            for (const item of ord.items) {
+              stockRestoreMap.set(
+                item.productId,
+                (stockRestoreMap.get(item.productId) ?? 0) + item.quantity
+              );
+            }
+          }
+          await tx.delete(orders).where(eq(orders.id, orderId));
+          deletedOrderNumbers.push(ord.orderNumber);
+        }
+
+        for (const [productId, qty] of stockRestoreMap.entries()) {
+          if (qty <= 0) continue;
+          const updated = await tx
+            .update(products)
+            .set({
+              stock: sql`${products.stock} + ${qty}`,
+              updatedAt: new Date(),
+            })
+            .where(eq(products.id, productId))
+            .returning({ id: products.id, stock: products.stock });
+          if (updated[0]) {
+            restoredStock.push({
+              productId: updated[0].id,
+              quantityRestored: qty,
+              newStock: updated[0].stock,
+            });
+          }
+        }
+
+        const deletedPaymentIntentIds: string[] = [];
+        for (const intentId of params.paymentIntentIds) {
+          const del = await tx
+            .delete(paymentIntents)
+            .where(eq(paymentIntents.razorpayOrderId, intentId))
+            .returning({ id: paymentIntents.razorpayOrderId });
+          if (del[0]) deletedPaymentIntentIds.push(del[0].id);
+        }
+
+        const deletedNotificationIds: string[] = [];
+        for (const notifId of params.notificationIds) {
+          const del = await tx
+            .delete(adminNotifications)
+            .where(eq(adminNotifications.id, notifId))
+            .returning({ id: adminNotifications.id });
+          if (del[0]) deletedNotificationIds.push(del[0].id);
+        }
+
+        return {
+          deletedOrderNumbers,
+          deletedPaymentIntentIds,
+          deletedNotificationIds,
+          restoredStock,
+        };
+      })
+    );
   }
 
   /**
@@ -1083,49 +1392,7 @@ export class PostgresStateAdapter {
         active: row.active,
       }));
 
-      const mappedOrders: Order[] = orderRows.map((row) => ({
-        id: row.id,
-        orderNumber: row.orderNumber,
-        userId: row.userId ?? undefined,
-        customerName: row.customerName,
-        customerEmail: row.customerEmail,
-        customerPhone: row.customerPhone,
-        shippingAddress: row.shippingAddress,
-        deliveryInstructions: row.deliveryInstructions ?? undefined,
-        items: Array.isArray(row.items) ? row.items : [],
-        subtotal: row.subtotal,
-        mrpTotal: row.mrpTotal,
-        instantSavings: row.instantSavings,
-        couponCode: row.couponCode ?? undefined,
-        couponDiscount: row.couponDiscount,
-        promotionId: row.promotionId ?? undefined,
-        promotionTitle: row.promotionTitle ?? undefined,
-        shippingFee: row.shippingFee,
-        shippingSpeed: row.shippingSpeed === 'express' ? 'express' : 'standard',
-        codFee: row.codFee,
-        taxableValue: row.taxableValue,
-        gstAmount: row.gstAmount,
-        totalAmount: row.totalAmount,
-        gatewayFeeAmount: row.gatewayFeeAmount ?? undefined,
-        actualShippingCost: row.actualShippingCost ?? undefined,
-        paymentMethod: row.paymentMethod as PaymentMethod,
-        paymentStatus: row.paymentStatus as OrderPaymentStatus,
-        razorpayOrderId: row.razorpayOrderId ?? undefined,
-        razorpayPaymentId: row.razorpayPaymentId ?? undefined,
-        paymentVerifiedAt: row.paymentVerifiedAt ?? undefined,
-        status: row.status as OrderStatus,
-        courierPartner: row.courierName ?? undefined,
-        trackingNumber: row.trackingNumber ?? undefined,
-        trackingUrl: row.trackingUrl ?? undefined,
-        estimatedDelivery: row.estimatedDelivery ?? undefined,
-        dispatchedAt: row.dispatchedAt ?? undefined,
-        deliveredAt: row.deliveredAt ?? undefined,
-        refundAmount: row.refundAmount ?? undefined,
-        refundReason: row.refundReason ?? undefined,
-        refundRequestedAt: row.refundRequestedAt ?? undefined,
-        timeline: Array.isArray(row.timeline) ? row.timeline : [],
-        createdAt: row.createdAt,
-      }));
+      const mappedOrders: Order[] = orderRows.map((row) => this.mapOrderRow(row));
 
       const mappedCoupons: Coupon[] = couponRows.map((row) => ({
         code: row.code,
@@ -1230,15 +1497,7 @@ export class PostgresStateAdapter {
 
       const mappedIntents: Record<string, PaymentIntentRecord> = {};
       for (const row of intentRows) {
-        mappedIntents[row.razorpayOrderId] = {
-          razorpayOrderId: row.razorpayOrderId,
-          amountPaise: row.amountPaise,
-          verified: row.verified,
-          paymentId: row.paymentId ?? undefined,
-          signatureVerified: row.signatureVerified,
-          method: row.method,
-          createdAt: row.createdAt,
-        };
+        mappedIntents[row.razorpayOrderId] = this.mapPaymentIntentRow(row);
       }
 
       return {
@@ -1374,9 +1633,14 @@ export class PostgresStateAdapter {
             gstAmount: o.gstAmount,
             totalAmount: o.totalAmount,
             gatewayFeeAmount: o.gatewayFeeAmount ?? null,
+            gatewayTaxAmount: o.gatewayTaxAmount ?? null,
+            gatewayFeeSource: o.gatewayFeeSource ?? null,
             actualShippingCost: o.actualShippingCost ?? null,
             paymentMethod: o.paymentMethod,
             paymentStatus: o.paymentStatus,
+            settlementStatus: o.settlementStatus ?? null,
+            razorpaySettlementId: o.razorpaySettlementId ?? null,
+            settledAt: o.settledAt ?? null,
             razorpayOrderId: o.razorpayOrderId ?? null,
             razorpayPaymentId: o.razorpayPaymentId ?? null,
             paymentVerifiedAt: o.paymentVerifiedAt ?? null,
@@ -1394,6 +1658,16 @@ export class PostgresStateAdapter {
             createdAt: o.createdAt,
           })
           .onConflictDoNothing({ target: orders.id });
+
+        if (o.razorpayOrderId) {
+          await tx
+            .update(paymentIntents)
+            .set({
+              orderId: o.id,
+              updatedAt: new Date().toISOString(),
+            })
+            .where(eq(paymentIntents.razorpayOrderId, o.razorpayOrderId));
+        }
 
         if (params.promotionUpdate) {
           await tx
@@ -1453,6 +1727,24 @@ export class PostgresStateAdapter {
         throw error;
       }
       const pgCode = getPgErrorCode(error);
+      // Handle concurrent unique-index race on razorpay_payment_id / razorpay_order_id idempotently
+      if (
+        pgCode === '23505' &&
+        params.order.paymentMethod !== 'COD' &&
+        (params.order.razorpayPaymentId || params.order.razorpayOrderId)
+      ) {
+        const existingOrder = await this.findOrderByRazorpayReference({
+          razorpayOrderId: params.order.razorpayOrderId,
+          razorpayPaymentId: params.order.razorpayPaymentId,
+        }).catch(() => null);
+        if (existingOrder) {
+          logStructured('info', 'cloud-sql', 'transact_order_idempotent_race_recovered', {
+            orderNumber: existingOrder.orderNumber,
+            durationMs: Date.now() - startedAt,
+          });
+          return { existingOrder, updatedProducts: [] };
+        }
+      }
       logStructured('error', 'cloud-sql', 'transact_order_failed', {
         orderId: params.order.id,
         pgCode: pgCode || undefined,
@@ -1628,9 +1920,14 @@ export class PostgresStateAdapter {
               gstAmount: o.gstAmount,
               totalAmount: o.totalAmount,
               gatewayFeeAmount: o.gatewayFeeAmount ?? null,
+              gatewayTaxAmount: o.gatewayTaxAmount ?? null,
+              gatewayFeeSource: o.gatewayFeeSource ?? null,
               actualShippingCost: o.actualShippingCost ?? null,
               paymentMethod: o.paymentMethod,
               paymentStatus: o.paymentStatus,
+              settlementStatus: o.settlementStatus ?? null,
+              razorpaySettlementId: o.razorpaySettlementId ?? null,
+              settledAt: o.settledAt ?? null,
               razorpayOrderId: o.razorpayOrderId ?? null,
               razorpayPaymentId: o.razorpayPaymentId ?? null,
               paymentVerifiedAt: o.paymentVerifiedAt ?? null,
@@ -1672,9 +1969,14 @@ export class PostgresStateAdapter {
                 gstAmount: o.gstAmount,
                 totalAmount: o.totalAmount,
                 gatewayFeeAmount: o.gatewayFeeAmount ?? null,
+                gatewayTaxAmount: o.gatewayTaxAmount ?? null,
+                gatewayFeeSource: o.gatewayFeeSource ?? null,
                 actualShippingCost: o.actualShippingCost ?? null,
                 paymentMethod: o.paymentMethod,
                 paymentStatus: o.paymentStatus,
+                settlementStatus: o.settlementStatus ?? null,
+                razorpaySettlementId: o.razorpaySettlementId ?? null,
+                settledAt: o.settledAt ?? null,
                 razorpayOrderId: o.razorpayOrderId ?? null,
                 razorpayPaymentId: o.razorpayPaymentId ?? null,
                 paymentVerifiedAt: o.paymentVerifiedAt ?? null,
@@ -2019,7 +2321,12 @@ export class PostgresStateAdapter {
               paymentId: rec.paymentId ?? null,
               signatureVerified: rec.signatureVerified,
               method: rec.method,
+              checkoutPayload: rec.checkoutPayload ?? null,
+              orderId: rec.orderId ?? null,
+              gatewayFeePaise: rec.gatewayFeePaise ?? null,
+              gatewayTaxPaise: rec.gatewayTaxPaise ?? null,
               createdAt: rec.createdAt,
+              updatedAt: rec.updatedAt ?? null,
             })
             .onConflictDoUpdate({
               target: paymentIntents.razorpayOrderId,
@@ -2029,6 +2336,11 @@ export class PostgresStateAdapter {
                 paymentId: rec.paymentId ?? null,
                 signatureVerified: rec.signatureVerified,
                 method: rec.method,
+                checkoutPayload: rec.checkoutPayload ?? null,
+                orderId: rec.orderId ?? null,
+                gatewayFeePaise: rec.gatewayFeePaise ?? null,
+                gatewayTaxPaise: rec.gatewayTaxPaise ?? null,
+                updatedAt: rec.updatedAt ?? null,
               },
             });
         }

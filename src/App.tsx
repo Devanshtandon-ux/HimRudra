@@ -17,6 +17,7 @@ import { SupportChatbot } from './components/SupportChatbot';
 import { WhatsAppButton } from './components/WhatsAppButton';
 import { WhyHimRudra } from './components/WhyHimRudra';
 import {
+  clearCachedBootstrap,
   fetchWithTimeout,
   loadBootstrapWithRetry,
   readCachedBootstrap,
@@ -265,7 +266,13 @@ export default function App() {
   const handleOrderSuccess = (_order: Order, updatedProducts: Product[]) => {
     setCartItems([]);
     setCouponCode('');
-    setBootstrap((prev) => (prev ? { ...prev, products: updatedProducts } : prev));
+    clearCachedBootstrap();
+    setBootstrap((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, products: updatedProducts };
+      writeCachedBootstrap(next);
+      return next;
+    });
   };
 
   const isLegalRoute =

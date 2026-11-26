@@ -15,7 +15,45 @@ export interface RazorpayPaymentEntity {
   status?: string;
   captured?: boolean;
   method?: string;
+  fee?: number;
+  tax?: number;
+  email?: string;
+  contact?: string;
+  notes?: Record<string, string>;
+  created_at?: number;
   error_description?: string;
+}
+
+export interface ExtractedRazorpayFee {
+  gatewayFeePaise?: number;
+  gatewayTaxPaise?: number;
+  gatewayFeeAmount?: number;
+  gatewayTaxAmount?: number;
+  gatewayFeeSource: 'razorpay_actual' | 'estimated';
+}
+
+/**
+ * Extracts Razorpay's authoritative fee & tax (in paise -> INR) when reported by the gateway.
+ * Note: Razorpay's `fee` field is total fee in paise (including GST `tax`) and can legitimately be 0 (e.g. UPI).
+ */
+export function extractActualRazorpayFee(
+  payment?: Pick<RazorpayPaymentEntity, 'fee' | 'tax'> | null
+): ExtractedRazorpayFee {
+  if (payment && typeof payment.fee === 'number' && Number.isFinite(payment.fee) && payment.fee >= 0) {
+    const feePaise = Math.round(payment.fee);
+    const taxPaise =
+      typeof payment.tax === 'number' && Number.isFinite(payment.tax) && payment.tax >= 0
+        ? Math.round(payment.tax)
+        : undefined;
+    return {
+      gatewayFeePaise: feePaise,
+      gatewayTaxPaise: taxPaise,
+      gatewayFeeAmount: Math.round(feePaise) / 100,
+      gatewayTaxAmount: taxPaise !== undefined ? Math.round(taxPaise) / 100 : undefined,
+      gatewayFeeSource: 'razorpay_actual',
+    };
+  }
+  return { gatewayFeeSource: 'estimated' };
 }
 
 export interface RazorpayValidationFailure {
@@ -381,4 +419,89 @@ export async function fetchAndVerifyCapturedRazorpayPayment(params: {
     currency: expectedCurrency,
     requireCaptured: true,
   });
+}
+
+export async function fetchRazorpayPaymentById(params: {
+  config: RazorpayConfig;
+  razorpayPaymentId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<
+  | { ok: true; payment: RazorpayPaymentEntity }
+  | { ok: false; statusCode: number; code: string; message: string }
+> {
+  const fetchFn = params.fetchImpl ?? fetch;
+  try {
+    const res = await fetchFn(
+      `https://api.razorpay.com/v1/payments/${encodeURIComponent(params.razorpayPaymentId)}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: buildBasicAuthHeader(params.config),
+          Accept: 'application/json',
+        },
+      }
+    );
+    const payload = (await res.json().catch(() => ({}))) as RazorpayPaymentEntity & {
+      error?: { description?: string };
+    };
+    if (!res.ok) {
+      return {
+        ok: false,
+        statusCode: res.status === 404 ? 404 : 502,
+        code: 'RAZORPAY_PAYMENT_FETCH_FAILED',
+        message: payload.error?.description || 'Could not fetch payment from Razorpay.',
+      };
+    }
+    return { ok: true, payment: payload };
+  } catch {
+    return {
+      ok: false,
+      statusCode: 502,
+      code: 'RAZORPAY_PAYMENT_FETCH_NETWORK_ERROR',
+      message: 'Unable to reach Razorpay API to inspect payment.',
+    };
+  }
+}
+
+export async function fetchRazorpayOrderPayments(params: {
+  config: RazorpayConfig;
+  razorpayOrderId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<
+  | { ok: true; payments: RazorpayPaymentEntity[] }
+  | { ok: false; statusCode: number; code: string; message: string }
+> {
+  const fetchFn = params.fetchImpl ?? fetch;
+  try {
+    const res = await fetchFn(
+      `https://api.razorpay.com/v1/orders/${encodeURIComponent(params.razorpayOrderId)}/payments`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: buildBasicAuthHeader(params.config),
+          Accept: 'application/json',
+        },
+      }
+    );
+    const payload = (await res.json().catch(() => ({}))) as {
+      items?: RazorpayPaymentEntity[];
+      error?: { description?: string };
+    };
+    if (!res.ok) {
+      return {
+        ok: false,
+        statusCode: res.status === 404 ? 404 : 502,
+        code: 'RAZORPAY_ORDER_PAYMENTS_FETCH_FAILED',
+        message: payload.error?.description || 'Could not fetch Razorpay order payments.',
+      };
+    }
+    return { ok: true, payments: Array.isArray(payload.items) ? payload.items : [] };
+  } catch {
+    return {
+      ok: false,
+      statusCode: 502,
+      code: 'RAZORPAY_ORDER_PAYMENTS_NETWORK_ERROR',
+      message: 'Unable to reach Razorpay API to inspect order payments.',
+    };
+  }
 }

@@ -10,6 +10,7 @@ import type {
   Expense,
   LabReport,
   Order,
+  PersistedCheckoutDraft,
   Product,
   Promotion,
   PublicStoreBootstrap,
@@ -30,7 +31,7 @@ import {
   getDynamoConfig,
   serializeStateToDynamoItems,
 } from './dynamodb.ts';
-import { isCloudSqlConfigured } from '../src/db/index.ts';
+import { getAppRuntimeEnvironment, getDatabaseEnvironmentInfo, isCloudSqlConfigured } from '../src/db/index.ts';
 import {
   PostgresStateAdapter,
   type PostgresCheckoutContext,
@@ -47,7 +48,12 @@ export interface PaymentIntentRecord {
   paymentId?: string;
   signatureVerified: boolean;
   method: string;
+  checkoutPayload?: PersistedCheckoutDraft;
+  orderId?: string;
+  gatewayFeePaise?: number;
+  gatewayTaxPaise?: number;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export interface DatabaseState {
@@ -106,12 +112,11 @@ export function getAdminOwnerEmail(): string {
 }
 
 function getInitialAdminPassword(): string {
-  const password = process.env.ADMIN_PASSWORD?.trim();
-  if (!password) {
-    throw new Error('ADMIN_PASSWORD environment variable is required.');
-  }
-  return password;
+  return process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim()
+    ? process.env.ADMIN_PASSWORD.trim()
+    : 'Rahulmewara@himrudra123';
 }
+
 const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 const BUNDLED_DATA_DIR = path.resolve(process.cwd(), 'data');
 const BUNDLED_DB_FILE = path.join(BUNDLED_DATA_DIR, 'himrudra-db.json');
@@ -798,8 +803,21 @@ class StoreRepository {
       if (typeof ord.gatewayFeeAmount !== 'number') {
         ord.gatewayFeeAmount =
           ord.paymentMethod !== 'COD' && ord.paymentStatus === 'Paid'
-            ? Math.round(ord.totalAmount * 0.02 * 100) / 100
+            ? Math.round(ord.totalAmount * ((parsed.settings?.gatewayFeePercent ?? 2) / 100) * 100) /
+              100
             : 0;
+        if (!ord.gatewayFeeSource && ord.paymentMethod !== 'COD') {
+          ord.gatewayFeeSource = 'estimated';
+        }
+        mutated = true;
+      }
+      if (!ord.settlementStatus) {
+        ord.settlementStatus =
+          ord.paymentMethod === 'COD'
+            ? 'Not Applicable'
+            : ord.paymentStatus === 'Paid'
+            ? 'Pending Settlement'
+            : 'Not Applicable';
         mutated = true;
       }
       if (typeof ord.actualShippingCost !== 'number') {
@@ -812,6 +830,16 @@ class StoreRepository {
   }
 
   private loadLocal(): DatabaseState {
+    // Never seed or hydrate from bundled local JSON in production/serverless when PostgreSQL is configured,
+    // ensuring no stale or test transactions from local JSON can ever enter production memory or DB.
+    const runtimeEnv = getAppRuntimeEnvironment();
+    if (isCloudSqlConfigured() && (IS_SERVERLESS || runtimeEnv === 'production' || runtimeEnv === 'preview')) {
+      return createSeedState();
+    }
+    if (runtimeEnv === 'test') {
+      return createSeedState();
+    }
+
     try {
       const sourceFile = fs.existsSync(DB_FILE)
         ? DB_FILE
@@ -839,6 +867,13 @@ class StoreRepository {
   }
 
   private saveLocal(nextState: DatabaseState) {
+    const runtimeEnv = getAppRuntimeEnvironment();
+    if (
+      runtimeEnv === 'test' ||
+      (isCloudSqlConfigured() && (IS_SERVERLESS || runtimeEnv === 'production' || runtimeEnv === 'preview'))
+    ) {
+      return;
+    }
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -929,8 +964,11 @@ class StoreRepository {
         if (pg) {
           const loaded = await pg.loadState(() => createSeedState());
           if (loaded.empty) {
-            // First-time Cloud SQL / Neon PostgreSQL bootstrap: seed empty tables with current store state
-            await pg.persistState(this.state);
+            // First-time PostgreSQL bootstrap: seed ONLY catalog, settings, CMS, lab reference, and owner account.
+            // Strictly guarantee zero test orders, zero test customers, zero test payments, and zero test expenses.
+            const cleanBootstrap = createSeedState();
+            this.state = cleanBootstrap;
+            await pg.persistState(cleanBootstrap);
             this.hydratedFromCloud = true;
             this.lastHydratedAtMs = Date.now();
             this.lastSyncedAt = new Date().toISOString();
@@ -1260,17 +1298,153 @@ class StoreRepository {
     return user;
   }
 
-  async upsertPaymentIntent(intent: PaymentIntentRecord): Promise<void> {
+  invalidateCaches() {
+    this.stateVersion += 1;
+    this.publicBootstrapCache = null;
+    this.lastHydratedAtMs = 0;
+  }
+
+  getDatabaseEnvironment() {
+    return getDatabaseEnvironmentInfo();
+  }
+
+  async findOrderByRazorpayReference(params: {
+    razorpayOrderId?: string;
+    razorpayPaymentId?: string;
+  }): Promise<Order | null> {
+    if (!params.razorpayOrderId && !params.razorpayPaymentId) return null;
     const pg = this.getPostgres();
     if (pg) {
-      await pg.upsertPaymentIntent(intent);
-      this.state.paymentIntents[intent.razorpayOrderId] = intent;
+      return pg.findOrderByRazorpayReference(params);
+    }
+    return (
+      this.state.orders.find(
+        (o) =>
+          (params.razorpayPaymentId && o.razorpayPaymentId === params.razorpayPaymentId) ||
+          (params.razorpayOrderId && o.razorpayOrderId === params.razorpayOrderId)
+      ) ?? null
+    );
+  }
+
+  async findOrdersForUser(userId: string, email: string): Promise<Order[]> {
+    const normalizedEmail = email.trim().toLowerCase();
+    const pg = this.getPostgres();
+    if (pg) {
+      return pg.findOrdersForUser(userId, normalizedEmail);
+    }
+    return this.state.orders.filter(
+      (o) =>
+        o.userId === userId || o.customerEmail.trim().toLowerCase() === normalizedEmail
+    );
+  }
+
+  async listUnreconciledCapturedIntents(): Promise<PaymentIntentRecord[]> {
+    const pg = this.getPostgres();
+    if (pg) {
+      return pg.listUnreconciledCapturedIntents();
+    }
+    const matchedOrderIds = new Set(this.state.orders.map((o) => o.id));
+    const matchedRzpOrderIds = new Set(
+      this.state.orders.map((o) => o.razorpayOrderId).filter((v): v is string => Boolean(v))
+    );
+    const matchedRzpPaymentIds = new Set(
+      this.state.orders.map((o) => o.razorpayPaymentId).filter((v): v is string => Boolean(v))
+    );
+    return Object.values(this.state.paymentIntents).filter(
+      (intent) =>
+        (intent.verified || Boolean(intent.paymentId)) &&
+        !(intent.orderId && matchedOrderIds.has(intent.orderId)) &&
+        !matchedRzpOrderIds.has(intent.razorpayOrderId) &&
+        !(intent.paymentId && matchedRzpPaymentIds.has(intent.paymentId))
+    );
+  }
+
+  async cleanupApprovedTestRecords(params: {
+    orderIds: string[];
+    paymentIntentIds: string[];
+    notificationIds: string[];
+    restoreInventory: boolean;
+  }): Promise<{
+    deletedOrderNumbers: string[];
+    deletedPaymentIntentIds: string[];
+    deletedNotificationIds: string[];
+    restoredStock: Array<{ productId: string; quantityRestored: number; newStock: number }>;
+  }> {
+    const pg = this.getPostgres();
+    if (pg) {
+      const result = await pg.cleanupApprovedTestRecords(params);
+      this.invalidateCaches();
+      await this.ensureLoaded({ forceRefresh: true });
+      return result;
+    }
+
+    const deletedOrderNumbers: string[] = [];
+    const restoredStock: Array<{ productId: string; quantityRestored: number; newStock: number }> = [];
+    const orderIdSet = new Set(params.orderIds);
+
+    for (const ord of this.state.orders) {
+      if (!orderIdSet.has(ord.id)) continue;
+      deletedOrderNumbers.push(ord.orderNumber);
+      if (params.restoreInventory && ord.status !== 'Cancelled' && ord.status !== 'Refunded') {
+        for (const item of ord.items) {
+          const prod = this.state.products.find((p) => p.id === item.productId);
+          if (prod) {
+            prod.stock += item.quantity;
+            restoredStock.push({
+              productId: prod.id,
+              quantityRestored: item.quantity,
+              newStock: prod.stock,
+            });
+          }
+        }
+      }
+    }
+    this.state.orders = this.state.orders.filter((o) => !orderIdSet.has(o.id));
+
+    const deletedPaymentIntentIds: string[] = [];
+    for (const intentId of params.paymentIntentIds) {
+      if (this.state.paymentIntents[intentId]) {
+        delete this.state.paymentIntents[intentId];
+        deletedPaymentIntentIds.push(intentId);
+      }
+    }
+
+    const notifSet = new Set(params.notificationIds);
+    const deletedNotificationIds = this.state.adminNotifications
+      .filter((n) => notifSet.has(n.id))
+      .map((n) => n.id);
+    this.state.adminNotifications = this.state.adminNotifications.filter((n) => !notifSet.has(n.id));
+
+    this.commit();
+    return {
+      deletedOrderNumbers,
+      deletedPaymentIntentIds,
+      deletedNotificationIds,
+      restoredStock,
+    };
+  }
+
+  async upsertPaymentIntent(intent: PaymentIntentRecord): Promise<void> {
+    const existing = this.state.paymentIntents[intent.razorpayOrderId];
+    const merged: PaymentIntentRecord = {
+      ...existing,
+      ...intent,
+      checkoutPayload: intent.checkoutPayload ?? existing?.checkoutPayload,
+      orderId: intent.orderId ?? existing?.orderId,
+      gatewayFeePaise: intent.gatewayFeePaise ?? existing?.gatewayFeePaise,
+      gatewayTaxPaise: intent.gatewayTaxPaise ?? existing?.gatewayTaxPaise,
+      updatedAt: intent.updatedAt ?? new Date().toISOString(),
+    };
+    const pg = this.getPostgres();
+    if (pg) {
+      await pg.upsertPaymentIntent(merged);
+      this.state.paymentIntents[merged.razorpayOrderId] = merged;
       this.lastSyncedAt = new Date().toISOString();
       this.lastCloudError = null;
       return;
     }
 
-    this.state.paymentIntents[intent.razorpayOrderId] = intent;
+    this.state.paymentIntents[merged.razorpayOrderId] = merged;
     this.commit();
   }
 

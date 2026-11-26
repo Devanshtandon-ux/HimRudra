@@ -35,13 +35,17 @@ import {
 } from './server/validation.ts';
 import {
   createRazorpayServerOrder,
+  extractActualRazorpayFee,
   fetchAndVerifyCapturedRazorpayPayment,
+  fetchRazorpayOrderPayments,
+  fetchRazorpayPaymentById,
   getRazorpayConfig,
   isValidRazorpayOrderId,
   isValidRazorpayPaymentId,
   normalizeRazorpayPaymentMethod,
   verifyRazorpaySignature,
   verifyRazorpayWebhookSignature,
+  type ExtractedRazorpayFee,
 } from './server/razorpay.ts';
 import type {
   AdminNotification,
@@ -54,6 +58,8 @@ import type {
   OrderPaymentStatus,
   OrderStatus,
   PaymentMethod,
+  PaymentSettlementStatus,
+  PersistedCheckoutDraft,
   Product,
   Promotion,
   ShippingAddress,
@@ -245,10 +251,18 @@ export function createApiApp(): express.Express {
           req.path === '/auth/wishlist' ||
           req.path === '/payments/create-order' ||
           req.path === '/payments/verify' ||
+          req.path === '/payments/order-status' ||
+          req.path === '/payments/webhook' ||
+          req.path === '/orders/mine' ||
           (req.method === 'POST' && req.path === '/orders'));
 
+      const requiresFreshAdminRead =
+        req.path === '/admin/overview' ||
+        req.path.startsWith('/admin/payments/') ||
+        req.path.startsWith('/admin/maintenance/');
+
       if (!isDirectPostgresRoute) {
-        await storeRepo.ensureLoaded({ forceRefresh: isMutation });
+        await storeRepo.ensureLoaded({ forceRefresh: isMutation || requiresFreshAdminRead });
       }
 
       if (isMutation) {
@@ -568,14 +582,476 @@ export function createApiApp(): express.Express {
     }
   });
 
+  type FinalizeOnlineOrderResult =
+    | {
+        ok: true;
+        statusCode: 200 | 201;
+        order: Order;
+        updatedProducts: Product[];
+        idempotent: boolean;
+      }
+    | {
+        ok: false;
+        statusCode: number;
+        code: string;
+        error: string;
+        fieldErrors?: Record<string, string>;
+      };
+
+  async function createOrReturnVerifiedOnlineOrder(params: {
+    draft: PersistedCheckoutDraft;
+    razorpayOrderId: string;
+    razorpayPaymentId: string;
+    verifiedMethod: PaymentMethod;
+    expectedAmountPaise: number;
+    actualFee?: ExtractedRazorpayFee;
+    source: 'verify' | 'orders_api' | 'webhook' | 'admin_reconcile' | 'order_status';
+    existingUser?: StoredUser | null;
+    requestId?: string;
+    createdAtOverride?: string;
+    allowLowStockRecovery?: boolean;
+  }): Promise<FinalizeOnlineOrderResult> {
+    const {
+      draft,
+      razorpayOrderId,
+      razorpayPaymentId,
+      verifiedMethod,
+      expectedAmountPaise,
+      actualFee,
+      source,
+      existingUser,
+      requestId,
+      createdAtOverride,
+      allowLowStockRecovery = false,
+    } = params;
+
+    if (!Array.isArray(draft.items) || draft.items.length === 0) {
+      return {
+        ok: false,
+        statusCode: 400,
+        code: 'EMPTY_CART',
+        error: 'Cannot place an empty order.',
+      };
+    }
+    if (!draft.shippingAddress) {
+      return {
+        ok: false,
+        statusCode: 400,
+        code: 'MISSING_ADDRESS',
+        error: 'Shipping address is required.',
+      };
+    }
+
+    const validation = validateCheckoutForm(draft.shippingAddress);
+    if (!validation.valid) {
+      return {
+        ok: false,
+        statusCode: 400,
+        code: 'INVALID_SHIPPING_ADDRESS',
+        error: 'Please check your shipping details.',
+        fieldErrors: validation.errors as Record<string, string>,
+      };
+    }
+
+    const isPostgres = storeRepo.isPostgresEnabled();
+    const ctx = await storeRepo.loadCheckoutContext({
+      razorpayOrderId,
+      razorpayPaymentId,
+      includeOrderSequence: true,
+    });
+
+    // Strict idempotency: if an order already exists for this payment/order reference, return it cleanly
+    if (ctx.existingOrderByPayment) {
+      return {
+        ok: true,
+        statusCode: 200,
+        order: ctx.existingOrderByPayment,
+        updatedProducts: ctx.products.filter((p) => p.active),
+        idempotent: true,
+      };
+    }
+
+    const orderItems: Order['items'] = [];
+    const stockDecrements: Array<{ productId: string; quantity: number }> = [];
+
+    for (const item of draft.items) {
+      const product = ctx.products.find((p) => p.id === item.productId && p.active);
+      if (!product) {
+        return {
+          ok: false,
+          statusCode: 400,
+          code: 'PRODUCT_NOT_FOUND',
+          error: `Product not found: ${item.productId}`,
+        };
+      }
+      if (item.quantity < 1) {
+        return {
+          ok: false,
+          statusCode: 400,
+          code: 'INVALID_QUANTITY',
+          error: `Invalid quantity for ${product.name}.`,
+        };
+      }
+      if (item.quantity > product.stock) {
+        if (!allowLowStockRecovery) {
+          return {
+            ok: false,
+            statusCode: 400,
+            code: 'INSUFFICIENT_INVENTORY',
+            error: `Insufficient inventory for ${product.name}. Remaining stock: ${product.stock}.`,
+          };
+        }
+        logStructured('warn', 'orders', 'captured_payment_low_stock_recovery', {
+          requestId,
+          source,
+          productId: product.id,
+          requestedQty: item.quantity,
+          availableStock: product.stock,
+          razorpayPaymentId,
+        });
+      }
+      orderItems.push({
+        productId: product.id,
+        name: product.name,
+        sku: product.sku,
+        netQuantity: product.netQuantity,
+        quantity: item.quantity,
+        unitPrice: product.price,
+        unitMrp: product.mrp,
+        unitCost: product.costPerUnit,
+        batchNumber: product.batchNumber,
+      });
+      const safeDec = allowLowStockRecovery
+        ? Math.min(product.stock, item.quantity)
+        : item.quantity;
+      if (safeDec > 0) {
+        stockDecrements.push({ productId: product.id, quantity: safeDec });
+      }
+    }
+
+    const nowMs = createdAtOverride ? Date.parse(createdAtOverride) || Date.now() : Date.now();
+    const calc = calculateCartTotals(draft.items, ctx.products, ctx.settings, {
+      shippingSpeed: draft.shippingSpeed || 'standard',
+      paymentMethod: verifiedMethod,
+      couponCode: draft.couponCode,
+      coupons: ctx.coupons,
+      promotions: ctx.promotions,
+      nowMs,
+    });
+
+    const calculatedPaise = Math.round(calc.grandTotal * 100);
+    if (calculatedPaise !== expectedAmountPaise) {
+      logStructured('warn', 'orders', 'verified_payment_amount_mismatch', {
+        requestId,
+        source,
+        razorpayOrderId,
+        razorpayPaymentId,
+        expectedAmountPaise,
+        calculatedPaise,
+      });
+      return {
+        ok: false,
+        statusCode: 400,
+        code: 'PAYMENT_AMOUNT_MISMATCH',
+        error: 'Verified payment amount does not match the calculated order total.',
+      };
+    }
+
+    const normalizedEmail = draft.shippingAddress.email.trim().toLowerCase();
+    let resolvedUserId = existingUser?.id || draft.userId;
+    if (!resolvedUserId && normalizedEmail) {
+      const matchedUser = await storeRepo.findUserByEmail(normalizedEmail).catch(() => null);
+      if (matchedUser) {
+        resolvedUserId = matchedUser.id;
+      }
+    }
+
+    const now = new Date(nowMs);
+    const createdIso = now.toISOString();
+    const deliveryDays = (draft.shippingSpeed || 'standard') === 'express' ? 2 : 5;
+    const estDate = new Date(now.getTime() + deliveryDays * 86400000).toISOString().slice(0, 10);
+
+    let nextOrderSeq = ctx.maxOrderSeq + 1;
+    const buildOrderNumber = (seq: number) => `HIM-2026-${String(seq).padStart(4, '0')}`;
+    const orderNumber = buildOrderNumber(nextOrderSeq);
+
+    const sourceNote =
+      source === 'webhook'
+        ? `Webhook auto-recovered verified ${verifiedMethod} payment (${razorpayPaymentId})`
+        : source === 'admin_reconcile'
+        ? `Admin-reconciled from live verified Razorpay ${verifiedMethod} payment (${razorpayPaymentId})`
+        : `Server-verified ${verifiedMethod} payment (${razorpayPaymentId})`;
+
+    const timeline: Order['timeline'] = [
+      {
+        status: 'Pending Payment',
+        timestamp: createdIso,
+        note: `Order created (${verifiedMethod})`,
+      },
+      {
+        status: 'Payment Confirmed',
+        timestamp: createdIso,
+        note: sourceNote,
+      },
+    ];
+
+    // Prefer actual Razorpay gateway fee (including 0 for zero-MDR UPI); otherwise use configured estimate
+    const intentFeePaise =
+      actualFee?.gatewayFeeSource === 'razorpay_actual'
+        ? actualFee.gatewayFeePaise
+        : ctx.paymentIntent?.gatewayFeePaise;
+    const intentTaxPaise =
+      actualFee?.gatewayFeeSource === 'razorpay_actual'
+        ? actualFee.gatewayTaxPaise
+        : ctx.paymentIntent?.gatewayTaxPaise;
+
+    const hasActualFee = typeof intentFeePaise === 'number' && Number.isFinite(intentFeePaise) && intentFeePaise >= 0;
+    const gatewayFeePct = ctx.settings.gatewayFeePercent ?? 2;
+    const gatewayFeeAmount = hasActualFee
+      ? Math.round(intentFeePaise!) / 100
+      : Math.round(calc.grandTotal * (gatewayFeePct / 100) * 100) / 100;
+    const gatewayTaxAmount =
+      typeof intentTaxPaise === 'number' && Number.isFinite(intentTaxPaise) && intentTaxPaise >= 0
+        ? Math.round(intentTaxPaise) / 100
+        : undefined;
+    const gatewayFeeSource: Order['gatewayFeeSource'] = hasActualFee
+      ? 'razorpay_actual'
+      : 'estimated';
+
+    const actualShippingCost = ctx.settings.defaultShippingCostPerOrder ?? 65;
+
+    const newOrder: Order = {
+      id: `ord-${crypto.randomUUID().slice(0, 8)}`,
+      orderNumber,
+      userId: resolvedUserId,
+      customerName: draft.shippingAddress.fullName.trim(),
+      customerEmail: normalizedEmail,
+      customerPhone: draft.shippingAddress.phone.replace(/\D/g, ''),
+      shippingAddress: {
+        ...draft.shippingAddress,
+        email: normalizedEmail,
+        houseFlatNumber: draft.shippingAddress.houseFlatNumber?.trim() || undefined,
+        landmark: draft.shippingAddress.landmark?.trim() || undefined,
+        phone: draft.shippingAddress.phone.replace(/\D/g, ''),
+        pincode: draft.shippingAddress.pincode.trim(),
+      },
+      deliveryInstructions: draft.deliveryInstructions?.trim() || undefined,
+      items: orderItems,
+      subtotal: calc.subtotal,
+      mrpTotal: calc.mrpTotal,
+      instantSavings: calc.instantSavings,
+      couponCode: calc.appliedCoupon?.code,
+      couponDiscount: calc.couponDiscount,
+      promotionId: calc.appliedPromotion?.id,
+      promotionTitle: calc.appliedPromotion?.title,
+      shippingFee: calc.shippingFee,
+      shippingSpeed: draft.shippingSpeed || 'standard',
+      codFee: calc.codFee,
+      taxableValue: calc.taxableValue,
+      gstAmount: calc.gstAmount,
+      totalAmount: calc.grandTotal,
+      gatewayFeeAmount,
+      gatewayTaxAmount,
+      gatewayFeeSource,
+      actualShippingCost,
+      paymentMethod: verifiedMethod,
+      paymentStatus: 'Paid',
+      settlementStatus: 'Pending Settlement',
+      razorpayOrderId,
+      razorpayPaymentId,
+      paymentVerifiedAt: createdIso,
+      status: 'Payment Confirmed',
+      estimatedDelivery: estDate,
+      timeline,
+      createdAt: createdIso,
+    };
+
+    const promotionUpdate = calc.appliedPromotion
+      ? { promotionId: calc.appliedPromotion.id, revenueDelta: calc.grandTotal }
+      : undefined;
+
+    const adminNotification: AdminNotification = {
+      id: `notif-${crypto.randomUUID().slice(0, 8)}`,
+      type: 'new_paid_order',
+      title:
+        source === 'webhook'
+          ? 'Paid Order Recovered via Webhook!'
+          : source === 'admin_reconcile'
+          ? 'Paid Order Reconciled'
+          : 'New Paid Order Received!',
+      message: `${newOrder.orderNumber} from ${newOrder.customerName} (₹${newOrder.totalAmount})`,
+      orderId: newOrder.id,
+      orderNumber: newOrder.orderNumber,
+      customerName: newOrder.customerName,
+      amount: newOrder.totalAmount,
+      read: false,
+      emailNotifiedTo: ctx.settings.emailNotificationsEnabled
+        ? ctx.settings.orderNotificationEmail
+        : undefined,
+      createdAt: new Date().toISOString(),
+    };
+
+    const hadDefaultAddress = Boolean(existingUser?.defaultAddress);
+    const userDefaultAddressUpdate =
+      existingUser && !hadDefaultAddress
+        ? { userId: existingUser.id, address: newOrder.shippingAddress }
+        : undefined;
+
+    const state = storeRepo.getState();
+    const stockSnapshots = new Map<string, number>();
+    const appliedPromoInState = calc.appliedPromotion
+      ? state.promotions.find((p) => p.id === calc.appliedPromotion!.id)
+      : undefined;
+    const prevPromoUsage = appliedPromoInState?.usageCount;
+    const prevPromoRevenue = appliedPromoInState?.revenueGenerated;
+
+    if (!isPostgres) {
+      for (const dec of stockDecrements) {
+        const product = state.products.find((p) => p.id === dec.productId);
+        if (product) {
+          stockSnapshots.set(product.id, product.stock);
+          product.stock = Math.max(0, product.stock - dec.quantity);
+        }
+      }
+      if (appliedPromoInState) {
+        appliedPromoInState.usageCount += 1;
+        appliedPromoInState.revenueGenerated += calc.grandTotal;
+      }
+      state.orders.unshift(newOrder);
+      state.adminNotifications.unshift(adminNotification);
+      if (existingUser && !hadDefaultAddress) {
+        existingUser.defaultAddress = newOrder.shippingAddress;
+      }
+      const existingIntent = state.paymentIntents[razorpayOrderId];
+      if (existingIntent) {
+        existingIntent.orderId = newOrder.id;
+      }
+    }
+
+    try {
+      let commitResult: {
+        existingOrder?: Order;
+        updatedProducts?: Array<{ id: string; stock: number }>;
+      } = {};
+
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          commitResult = await storeRepo.commitOrderAtomic(newOrder, stockDecrements, {
+            promotionUpdate,
+            adminNotification,
+            userDefaultAddressUpdate,
+          });
+          break;
+        } catch (attemptErr) {
+          if (
+            isPostgres &&
+            attempt < 2 &&
+            attemptErr instanceof StorePersistenceError &&
+            attemptErr.code === 'ORDER_NUMBER_CONFLICT'
+          ) {
+            nextOrderSeq += 1;
+            newOrder.orderNumber = buildOrderNumber(nextOrderSeq);
+            adminNotification.orderNumber = newOrder.orderNumber;
+            adminNotification.message = `${newOrder.orderNumber} from ${newOrder.customerName} (₹${newOrder.totalAmount})`;
+            continue;
+          }
+          throw attemptErr;
+        }
+      }
+
+      if (commitResult.existingOrder) {
+        return {
+          ok: true,
+          statusCode: 200,
+          order: commitResult.existingOrder,
+          updatedProducts: ctx.products.filter((p) => p.active),
+          idempotent: true,
+        };
+      }
+
+      if (isPostgres) {
+        if (commitResult.updatedProducts) {
+          for (const upd of commitResult.updatedProducts) {
+            const p = ctx.products.find((prod) => prod.id === upd.id);
+            if (p) p.stock = upd.stock;
+          }
+        }
+        if (appliedPromoInState) {
+          appliedPromoInState.usageCount += 1;
+          appliedPromoInState.revenueGenerated += calc.grandTotal;
+        }
+        if (existingUser && !hadDefaultAddress) {
+          existingUser.defaultAddress = newOrder.shippingAddress;
+        }
+      }
+
+      storeRepo.invalidateCaches();
+      bootstrapCache.invalidate();
+
+      const updatedProductsList = isPostgres
+        ? ctx.products.filter((p) => p.active)
+        : state.products.filter((p) => p.active);
+
+      return {
+        ok: true,
+        statusCode: 201,
+        order: newOrder,
+        updatedProducts: updatedProductsList,
+        idempotent: false,
+      };
+    } catch (err) {
+      if (!isPostgres) {
+        state.orders = state.orders.filter((o) => o.id !== newOrder.id);
+        state.adminNotifications = state.adminNotifications.filter(
+          (n) => n.id !== adminNotification.id
+        );
+        for (const [prodId, prevStock] of stockSnapshots.entries()) {
+          const product = state.products.find((p) => p.id === prodId);
+          if (product) product.stock = prevStock;
+        }
+        if (appliedPromoInState && prevPromoUsage !== undefined && prevPromoRevenue !== undefined) {
+          appliedPromoInState.usageCount = prevPromoUsage;
+          appliedPromoInState.revenueGenerated = prevPromoRevenue;
+        }
+        if (existingUser && !hadDefaultAddress) {
+          existingUser.defaultAddress = undefined;
+        }
+      }
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const code = err instanceof StorePersistenceError ? err.code : 'ORDER_COMMIT_FAILED';
+      const message =
+        err instanceof Error
+          ? err.message
+          : 'Unable to confirm your order right now. Please retry.';
+      logStructured('error', 'orders', 'atomic_commit_failed', {
+        requestId,
+        source,
+        orderNumber: newOrder.orderNumber,
+        code,
+        statusCode,
+        error: message,
+      });
+      return { ok: false, statusCode, code, error: message };
+    }
+  }
+
   // Razorpay Payment Order Initiation (strictly requires server-side Razorpay credentials)
   app.post('/api/payments/create-order', async (req: AuthRequest, res) => {
     const startedAt = Date.now();
-    const { items, shippingSpeed, paymentMethod, couponCode } = req.body as {
+    const {
+      items,
+      shippingSpeed = 'standard',
+      paymentMethod,
+      couponCode,
+      shippingAddress,
+      deliveryInstructions,
+    } = req.body as {
       items?: CartItem[];
       shippingSpeed?: 'standard' | 'express';
       paymentMethod?: PaymentMethod;
       couponCode?: string;
+      shippingAddress?: ShippingAddress;
+      deliveryInstructions?: string;
     };
 
     if (!Array.isArray(items) || items.length === 0) {
@@ -583,6 +1059,15 @@ export function createApiApp(): express.Express {
     }
     if (paymentMethod === 'COD') {
       return res.status(400).json({ error: 'Cash on Delivery does not require an online payment order.' });
+    }
+    if (shippingAddress) {
+      const validation = validateCheckoutForm(shippingAddress);
+      if (!validation.valid) {
+        return res.status(400).json({
+          error: 'Please check your shipping details before continuing to payment.',
+          fieldErrors: validation.errors,
+        });
+      }
     }
 
     const razorpayConfig = getRazorpayConfig();
@@ -653,6 +1138,27 @@ export function createApiApp(): express.Express {
 
       const razorpayOrderId = orderCreation.razorpayOrderId;
 
+      // Persist full server-side checkout draft so webhook/recovery can always create the exact order
+      const checkoutPayload: PersistedCheckoutDraft | undefined = shippingAddress
+        ? {
+            items,
+            shippingAddress: {
+              ...shippingAddress,
+              fullName: shippingAddress.fullName.trim(),
+              email: shippingAddress.email.trim().toLowerCase(),
+              phone: shippingAddress.phone.replace(/\D/g, ''),
+              pincode: shippingAddress.pincode.trim(),
+              houseFlatNumber: shippingAddress.houseFlatNumber?.trim() || undefined,
+              landmark: shippingAddress.landmark?.trim() || undefined,
+            },
+            deliveryInstructions: deliveryInstructions?.trim() || undefined,
+            shippingSpeed,
+            paymentMethod: paymentMethod || 'UPI',
+            couponCode: couponCode?.trim() || undefined,
+            userId: req.currentUser?.id,
+          }
+        : undefined;
+
       const dbWriteStartedAt = Date.now();
       await storeRepo.upsertPaymentIntent({
         razorpayOrderId,
@@ -660,7 +1166,9 @@ export function createApiApp(): express.Express {
         verified: false,
         signatureVerified: false,
         method: paymentMethod || 'UPI',
+        checkoutPayload,
         createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
       });
       const dbWriteMs = Date.now() - dbWriteStartedAt;
       const totalMs = Date.now() - startedAt;
@@ -672,6 +1180,7 @@ export function createApiApp(): express.Express {
       logStructured('info', 'payments', 'create_order_timing', {
         requestId: req.requestId,
         razorpayMode: razorpayConfig.mode,
+        hasCheckoutDraft: Boolean(checkoutPayload),
         contextMs,
         razorpayMs,
         dbWriteMs,
@@ -704,10 +1213,16 @@ export function createApiApp(): express.Express {
 
   app.post('/api/payments/verify', async (req: AuthRequest, res) => {
     const startedAt = Date.now();
-    const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body as {
+    const {
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+      checkoutDraft,
+    } = req.body as {
       razorpayOrderId?: string;
       razorpayPaymentId?: string;
       razorpaySignature?: string;
+      checkoutDraft?: PersistedCheckoutDraft;
     };
 
     const razorpayConfig = getRazorpayConfig();
@@ -781,8 +1296,30 @@ export function createApiApp(): express.Express {
         intent.verified && intent.signatureVerified && intent.paymentId === cleanPaymentId
       );
       let verifiedPaymentMethod: PaymentMethod = normalizeRazorpayPaymentMethod(intent.method);
+      let extractedFee: ExtractedRazorpayFee =
+        typeof intent.gatewayFeePaise === 'number'
+          ? {
+              gatewayFeePaise: intent.gatewayFeePaise,
+              gatewayTaxPaise: intent.gatewayTaxPaise,
+              gatewayFeeAmount: Math.round(intent.gatewayFeePaise) / 100,
+              gatewayTaxAmount:
+                typeof intent.gatewayTaxPaise === 'number'
+                  ? Math.round(intent.gatewayTaxPaise) / 100
+                  : undefined,
+              gatewayFeeSource: 'razorpay_actual',
+            }
+          : { gatewayFeeSource: 'estimated' };
       let razorpayApiMs = 0;
       let dbWriteMs = 0;
+
+      const effectiveDraft: PersistedCheckoutDraft | undefined =
+        intent.checkoutPayload ??
+        (checkoutDraft?.shippingAddress && Array.isArray(checkoutDraft.items)
+          ? {
+              ...checkoutDraft,
+              userId: req.currentUser?.id ?? checkoutDraft.userId,
+            }
+          : undefined);
 
       if (!idempotent) {
         const apiStartedAt = Date.now();
@@ -809,11 +1346,12 @@ export function createApiApp(): express.Express {
           });
         }
 
-        // Capture the actual payment method reported by Razorpay's API (e.g. netbanking, card, upi, wallet)
+        // Capture the actual payment method and fee reported by Razorpay's API
         verifiedPaymentMethod = normalizeRazorpayPaymentMethod(
           apiCheck.payment.method,
           intent.method
         );
+        extractedFee = extractActualRazorpayFee(apiCheck.payment);
 
         const dbWriteStartedAt = Date.now();
         await storeRepo.upsertPaymentIntent({
@@ -822,8 +1360,49 @@ export function createApiApp(): express.Express {
           verified: true,
           signatureVerified: true,
           paymentId: cleanPaymentId,
+          checkoutPayload: effectiveDraft,
+          gatewayFeePaise: extractedFee.gatewayFeePaise,
+          gatewayTaxPaise: extractedFee.gatewayTaxPaise,
+          updatedAt: new Date().toISOString(),
         });
         dbWriteMs = Date.now() - dbWriteStartedAt;
+      } else if (effectiveDraft && !intent.checkoutPayload) {
+        await storeRepo.upsertPaymentIntent({
+          ...intent,
+          checkoutPayload: effectiveDraft,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+
+      // Single round-trip order creation: if checkout draft is present, atomically create/return the order now
+      let confirmedOrder: Order | undefined;
+      let updatedProducts: Product[] | undefined;
+      let orderIdempotent = false;
+      if (effectiveDraft) {
+        const orderResult = await createOrReturnVerifiedOnlineOrder({
+          draft: effectiveDraft,
+          razorpayOrderId: cleanOrderId,
+          razorpayPaymentId: cleanPaymentId,
+          verifiedMethod: verifiedPaymentMethod,
+          expectedAmountPaise: intent.amountPaise,
+          actualFee: extractedFee,
+          source: 'verify',
+          existingUser: req.currentUser,
+          requestId: req.requestId,
+          allowLowStockRecovery: true,
+        });
+        if (orderResult.ok) {
+          confirmedOrder = orderResult.order;
+          updatedProducts = orderResult.updatedProducts;
+          orderIdempotent = orderResult.idempotent;
+        } else {
+          logStructured('warn', 'payments', 'verify_inline_order_creation_skipped', {
+            requestId: req.requestId,
+            razorpayOrderId: cleanOrderId,
+            code: orderResult.code,
+            error: orderResult.error,
+          });
+        }
       }
 
       const verifyMs = Date.now() - verifyStartedAt;
@@ -835,6 +1414,8 @@ export function createApiApp(): express.Express {
       logStructured('info', 'payments', 'verify_timing', {
         requestId: req.requestId,
         idempotent,
+        orderCreated: Boolean(confirmedOrder && !orderIdempotent),
+        orderNumber: confirmedOrder?.orderNumber,
         paymentMethod: verifiedPaymentMethod,
         dbReadMs,
         razorpayApiMs,
@@ -850,6 +1431,9 @@ export function createApiApp(): express.Express {
         razorpayOrderId: cleanOrderId,
         razorpayPaymentId: cleanPaymentId,
         verifiedAt: new Date().toISOString(),
+        order: confirmedOrder,
+        updatedProducts,
+        orderIdempotent,
       });
     } catch (err) {
       const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
@@ -864,6 +1448,155 @@ export function createApiApp(): express.Express {
       });
       return res.status(statusCode).json({ error: message, requestId: req.requestId });
     }
+  });
+
+  // Safe Checkout Fallback / Recovery Status Endpoint (requires valid Razorpay signature OR order owner/admin session)
+  app.post('/api/payments/order-status', async (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body as {
+      razorpayOrderId?: string;
+      razorpayPaymentId?: string;
+      razorpaySignature?: string;
+    };
+
+    if (!isValidRazorpayOrderId(razorpayOrderId)) {
+      return res.status(400).json({ error: 'Valid Razorpay order ID is required.' });
+    }
+    const cleanOrderId = razorpayOrderId.trim();
+    const cleanPaymentId = isValidRazorpayPaymentId(razorpayPaymentId)
+      ? razorpayPaymentId.trim()
+      : undefined;
+
+    const razorpayConfig = getRazorpayConfig();
+    const signatureValid = Boolean(
+      razorpayConfig &&
+        cleanPaymentId &&
+        typeof razorpaySignature === 'string' &&
+        razorpaySignature.trim() &&
+        verifyRazorpaySignature({
+          razorpayOrderId: cleanOrderId,
+          razorpayPaymentId: cleanPaymentId,
+          razorpaySignature: razorpaySignature.trim(),
+          keySecret: razorpayConfig.keySecret,
+        })
+    );
+
+    const existingOrder = await storeRepo.findOrderByRazorpayReference({
+      razorpayOrderId: cleanOrderId,
+      razorpayPaymentId: cleanPaymentId,
+    });
+
+    if (existingOrder) {
+      const isAuthorizedSession = Boolean(
+        req.currentUser &&
+          (isAuthorizedAdmin(req.currentUser, getAdminOwnerEmail()) ||
+            existingOrder.userId === req.currentUser.id ||
+            existingOrder.customerEmail.toLowerCase() === req.currentUser.email.toLowerCase())
+      );
+      if (!signatureValid && !isAuthorizedSession) {
+        return res.status(403).json({
+          error: 'Payment verification signature or matching account session is required.',
+        });
+      }
+      const ctx = await storeRepo.loadCheckoutContext();
+      return res.json({
+        status: 'confirmed',
+        order: existingOrder,
+        updatedProducts: ctx.products.filter((p) => p.active),
+      });
+    }
+
+    const intent = await storeRepo.findPaymentIntent(cleanOrderId);
+    if (!intent) {
+      return res.status(404).json({ status: 'not_found', error: 'Payment session not found.' });
+    }
+
+    const isDraftOwner = Boolean(
+      req.currentUser &&
+        (isAuthorizedAdmin(req.currentUser, getAdminOwnerEmail()) ||
+          (intent.checkoutPayload?.userId && intent.checkoutPayload.userId === req.currentUser.id) ||
+          (intent.checkoutPayload?.shippingAddress?.email &&
+            intent.checkoutPayload.shippingAddress.email.toLowerCase() ===
+              req.currentUser.email.toLowerCase()))
+    );
+    if (!signatureValid && !isDraftOwner) {
+      return res.status(403).json({
+        error: 'Payment verification signature or matching account session is required.',
+      });
+    }
+
+    // If intent is already verified (e.g. via webhook) or we have a valid signature, recover the order now
+    let activeIntent = intent;
+    let extractedFee: ExtractedRazorpayFee =
+      typeof intent.gatewayFeePaise === 'number'
+        ? {
+            gatewayFeePaise: intent.gatewayFeePaise,
+            gatewayTaxPaise: intent.gatewayTaxPaise,
+            gatewayFeeAmount: Math.round(intent.gatewayFeePaise) / 100,
+            gatewayTaxAmount:
+              typeof intent.gatewayTaxPaise === 'number'
+                ? Math.round(intent.gatewayTaxPaise) / 100
+                : undefined,
+            gatewayFeeSource: 'razorpay_actual',
+          }
+        : { gatewayFeeSource: 'estimated' };
+
+    if (!activeIntent.verified && signatureValid && razorpayConfig && cleanPaymentId) {
+      const apiCheck = await fetchAndVerifyCapturedRazorpayPayment({
+        config: razorpayConfig,
+        razorpayOrderId: cleanOrderId,
+        razorpayPaymentId: cleanPaymentId,
+        expectedAmountPaise: activeIntent.amountPaise,
+        expectedCurrency: 'INR',
+      });
+      if (apiCheck.ok) {
+        const verifiedMethod = normalizeRazorpayPaymentMethod(
+          apiCheck.payment.method,
+          activeIntent.method
+        );
+        extractedFee = extractActualRazorpayFee(apiCheck.payment);
+        activeIntent = {
+          ...activeIntent,
+          method: verifiedMethod,
+          verified: true,
+          signatureVerified: true,
+          paymentId: cleanPaymentId,
+          gatewayFeePaise: extractedFee.gatewayFeePaise,
+          gatewayTaxPaise: extractedFee.gatewayTaxPaise,
+          updatedAt: new Date().toISOString(),
+        };
+        await storeRepo.upsertPaymentIntent(activeIntent);
+      }
+    }
+
+    if (activeIntent.verified && activeIntent.paymentId && activeIntent.checkoutPayload) {
+      const recovered = await createOrReturnVerifiedOnlineOrder({
+        draft: activeIntent.checkoutPayload,
+        razorpayOrderId: cleanOrderId,
+        razorpayPaymentId: activeIntent.paymentId,
+        verifiedMethod: normalizeRazorpayPaymentMethod(activeIntent.method),
+        expectedAmountPaise: activeIntent.amountPaise,
+        actualFee: extractedFee,
+        source: 'order_status',
+        existingUser: req.currentUser,
+        requestId: req.requestId,
+        allowLowStockRecovery: true,
+      });
+      if (recovered.ok) {
+        return res.json({
+          status: 'confirmed',
+          order: recovered.order,
+          updatedProducts: recovered.updatedProducts,
+          recovered: true,
+        });
+      }
+    }
+
+    return res.json({
+      status: activeIntent.verified ? 'payment_captured_pending_order' : 'pending',
+      razorpayOrderId: cleanOrderId,
+      razorpayPaymentId: activeIntent.paymentId || cleanPaymentId,
+    });
   });
 
   // Idempotent Payment Gateway Webhook Endpoint (strictly verifies raw HTTP body HMAC signature)
@@ -907,6 +1640,17 @@ export function createApiApp(): express.Express {
             currency?: string;
             status?: string;
             method?: string;
+            fee?: number;
+            tax?: number;
+          };
+        };
+        order?: {
+          entity?: {
+            id?: string;
+            amount?: number;
+            amount_paid?: number;
+            currency?: string;
+            status?: string;
           };
         };
         refund?: {
@@ -917,60 +1661,154 @@ export function createApiApp(): express.Express {
             status?: string;
           };
         };
+        settlement?: {
+          entity?: {
+            id?: string;
+            status?: string;
+            created_at?: number;
+          };
+        };
       };
     };
 
     const event = String(body.event || '').trim();
     const paymentEntity = body.payload?.payment?.entity;
+    const orderEntity = body.payload?.order?.entity;
     const refundEntity = body.payload?.refund?.entity;
-    const razorpayOrderId = body.razorpayOrderId || paymentEntity?.order_id;
+    const settlementEntity = body.payload?.settlement?.entity;
+    const razorpayOrderId = body.razorpayOrderId || paymentEntity?.order_id || orderEntity?.id;
     const razorpayPaymentId =
       body.razorpayPaymentId || paymentEntity?.id || refundEntity?.payment_id;
     const entityAmountPaise =
-      typeof paymentEntity?.amount === 'number' ? paymentEntity.amount : undefined;
-    const entityCurrency = paymentEntity?.currency
-      ? String(paymentEntity.currency).toUpperCase()
+      typeof paymentEntity?.amount === 'number'
+        ? paymentEntity.amount
+        : typeof orderEntity?.amount_paid === 'number'
+        ? orderEntity.amount_paid
+        : undefined;
+    const entityCurrency = (paymentEntity?.currency || orderEntity?.currency)
+      ? String(paymentEntity?.currency || orderEntity?.currency).toUpperCase()
       : 'INR';
+    const extractedFee = extractActualRazorpayFee(paymentEntity);
 
-    const state = storeRepo.getState();
-
-    // 1. Reconcile payment_intents on payment.captured / order.paid (protects UPI QR / tab-close flows)
+    // 1. Reconcile payment_intents on payment.captured / order.paid (protects UPI QR / dropped browser callbacks)
     let intentReconciled = false;
+    let activeIntent = razorpayOrderId
+      ? await storeRepo.findPaymentIntent(razorpayOrderId).catch(() => null)
+      : null;
+
     if (
       (event === 'payment.captured' || event === 'order.paid') &&
       razorpayOrderId &&
       razorpayPaymentId &&
       entityCurrency === 'INR'
     ) {
-      const intent = await storeRepo.findPaymentIntent(razorpayOrderId).catch(() => null);
       if (
-        intent &&
-        (entityAmountPaise === undefined || entityAmountPaise === intent.amountPaise) &&
-        (!intent.paymentId || intent.paymentId === razorpayPaymentId)
+        activeIntent &&
+        (entityAmountPaise === undefined || entityAmountPaise === activeIntent.amountPaise) &&
+        (!activeIntent.paymentId || activeIntent.paymentId === razorpayPaymentId)
       ) {
         const reconciledMethod = normalizeRazorpayPaymentMethod(
           paymentEntity?.method,
-          intent.method
+          activeIntent.method
         );
-        if (!intent.verified || !intent.signatureVerified || intent.method !== reconciledMethod) {
-          await storeRepo.upsertPaymentIntent({
-            ...intent,
+        const shouldUpdateIntent =
+          !activeIntent.verified ||
+          !activeIntent.signatureVerified ||
+          activeIntent.method !== reconciledMethod ||
+          (extractedFee.gatewayFeeSource === 'razorpay_actual' &&
+            activeIntent.gatewayFeePaise !== extractedFee.gatewayFeePaise);
+
+        if (shouldUpdateIntent) {
+          activeIntent = {
+            ...activeIntent,
             method: reconciledMethod,
             verified: true,
             signatureVerified: true,
             paymentId: razorpayPaymentId,
-          });
+            gatewayFeePaise: extractedFee.gatewayFeePaise ?? activeIntent.gatewayFeePaise,
+            gatewayTaxPaise: extractedFee.gatewayTaxPaise ?? activeIntent.gatewayTaxPaise,
+            updatedAt: new Date().toISOString(),
+          };
+          await storeRepo.upsertPaymentIntent(activeIntent);
           intentReconciled = true;
         }
       }
     }
 
-    // 2. Reconcile existing order record idempotently
-    const order = state.orders.find(
-      (o) =>
-        (razorpayOrderId && o.razorpayOrderId === razorpayOrderId) ||
-        (razorpayPaymentId && o.razorpayPaymentId === razorpayPaymentId)
-    );
+    // 2. Direct live lookup of existing order (never relying on stale serverless memory cache)
+    const existingOrder = await storeRepo.findOrderByRazorpayReference({
+      razorpayOrderId,
+      razorpayPaymentId,
+    });
+
+    // 3. Auto-create missing order when payment is captured and server-side checkout draft was persisted
+    if (!existingOrder && (event === 'payment.captured' || event === 'order.paid')) {
+      if (
+        activeIntent &&
+        activeIntent.verified &&
+        activeIntent.checkoutPayload &&
+        razorpayOrderId &&
+        razorpayPaymentId &&
+        entityCurrency === 'INR' &&
+        (entityAmountPaise === undefined || entityAmountPaise === activeIntent.amountPaise)
+      ) {
+        const created = await createOrReturnVerifiedOnlineOrder({
+          draft: activeIntent.checkoutPayload,
+          razorpayOrderId,
+          razorpayPaymentId,
+          verifiedMethod: normalizeRazorpayPaymentMethod(
+            paymentEntity?.method,
+            activeIntent.method
+          ),
+          expectedAmountPaise: activeIntent.amountPaise,
+          actualFee: extractedFee,
+          source: 'webhook',
+          requestId: req.requestId,
+          allowLowStockRecovery: true,
+        });
+        if (created.ok) {
+          logStructured('info', 'payments', 'webhook_order_recovered', {
+            requestId: req.requestId,
+            orderNumber: created.order.orderNumber,
+            razorpayOrderId,
+            razorpayPaymentId,
+            idempotent: created.idempotent,
+          });
+          return res.json({
+            received: true,
+            matched: true,
+            intentReconciled,
+            orderCreatedByWebhook: !created.idempotent,
+            orderNumber: created.order.orderNumber,
+          });
+        }
+      } else {
+        logStructured('warn', 'payments', 'webhook_captured_without_checkout_draft', {
+          requestId: req.requestId,
+          razorpayOrderId,
+          razorpayPaymentId,
+          hasIntent: Boolean(activeIntent),
+          hasDraft: Boolean(activeIntent?.checkoutPayload),
+        });
+      }
+      return res.json({
+        received: true,
+        matched: false,
+        intentReconciled,
+        orderCreatedByWebhook: false,
+      });
+    }
+
+    if (!existingOrder) {
+      return res.json({ received: true, matched: false, intentReconciled });
+    }
+
+    // Load fresh full state before applying webhook mutations on existing orders
+    if (storeRepo.isPostgresEnabled()) {
+      await storeRepo.ensureLoaded({ forceRefresh: true });
+    }
+    const state = storeRepo.getState();
+    const order = state.orders.find((o) => o.id === existingOrder.id);
     if (!order) {
       return res.json({ received: true, matched: false, intentReconciled });
     }
@@ -991,6 +1829,16 @@ export function createApiApp(): express.Express {
         });
         return res.status(400).json({ error: 'Webhook payment amount or currency mismatch.' });
       }
+      if (
+        extractedFee.gatewayFeeSource === 'razorpay_actual' &&
+        (order.gatewayFeeSource !== 'razorpay_actual' ||
+          order.gatewayFeeAmount !== extractedFee.gatewayFeeAmount)
+      ) {
+        order.gatewayFeeAmount = extractedFee.gatewayFeeAmount;
+        order.gatewayTaxAmount = extractedFee.gatewayTaxAmount;
+        order.gatewayFeeSource = 'razorpay_actual';
+        orderUpdated = true;
+      }
       if (order.paymentStatus !== 'Paid') {
         const verifiedMethod = normalizeRazorpayPaymentMethod(
           paymentEntity?.method,
@@ -998,6 +1846,9 @@ export function createApiApp(): express.Express {
         );
         order.paymentStatus = 'Paid';
         order.paymentMethod = verifiedMethod;
+        if (!order.settlementStatus || order.settlementStatus === 'Not Applicable') {
+          order.settlementStatus = 'Pending Settlement';
+        }
         if (razorpayPaymentId) order.razorpayPaymentId = razorpayPaymentId;
         order.paymentVerifiedAt = nowIso;
         if (order.status === 'Pending Payment') {
@@ -1031,9 +1882,22 @@ export function createApiApp(): express.Express {
         }
         orderUpdated = true;
       }
+    } else if (event === 'settlement.processed') {
+      if (order.paymentStatus === 'Paid' && order.settlementStatus !== 'Settled') {
+        order.settlementStatus = 'Settled';
+        order.razorpaySettlementId = settlementEntity?.id || order.razorpaySettlementId;
+        order.settledAt = nowIso;
+        order.timeline.push({
+          status: order.status,
+          timestamp: nowIso,
+          note: `Bank settlement processed by Razorpay (${settlementEntity?.id || 'Settlement'})`,
+        });
+        orderUpdated = true;
+      }
     } else if (event === 'payment.failed') {
       if (order.paymentStatus === 'Pending Payment') {
         order.paymentStatus = 'Failed';
+        order.settlementStatus = 'Not Applicable';
         order.timeline.push({
           status: order.status,
           timestamp: nowIso,
@@ -1070,6 +1934,7 @@ export function createApiApp(): express.Express {
 
     if (orderUpdated) {
       storeRepo.commit();
+      bootstrapCache.invalidate();
     }
 
     res.json({
@@ -1122,13 +1987,103 @@ export function createApiApp(): express.Express {
     const isOnline = paymentMethod !== 'COD';
     const isPostgres = storeRepo.isPostgresEnabled();
 
+    if (isOnline) {
+      try {
+        const ctxStartedAt = Date.now();
+        const ctx = await storeRepo.loadCheckoutContext({
+          razorpayOrderId,
+          razorpayPaymentId,
+          includeOrderSequence: true,
+        });
+        const contextMs = Date.now() - ctxStartedAt;
+
+        if (ctx.existingOrderByPayment) {
+          const totalMs = Date.now() - startedAt;
+          res.setHeader('Server-Timing', `context;dur=${contextMs}, total;dur=${totalMs}`);
+          return res.status(200).json({
+            order: ctx.existingOrderByPayment,
+            updatedProducts: ctx.products.filter((p) => p.active),
+            idempotent: true,
+          });
+        }
+
+        const intent = ctx.paymentIntent;
+        if (
+          !intent ||
+          !intent.verified ||
+          !intent.signatureVerified ||
+          !razorpayOrderId ||
+          !razorpayPaymentId ||
+          intent.razorpayOrderId !== razorpayOrderId ||
+          intent.paymentId !== razorpayPaymentId
+        ) {
+          return res.status(402).json({
+            error: 'Payment verification is required before confirming your order.',
+          });
+        }
+
+        const resolvedMethod = normalizeRazorpayPaymentMethod(intent.method, paymentMethod);
+        const result = await createOrReturnVerifiedOnlineOrder({
+          draft: {
+            items,
+            shippingAddress,
+            deliveryInstructions,
+            shippingSpeed,
+            paymentMethod: resolvedMethod,
+            couponCode,
+            userId: req.currentUser?.id ?? intent.checkoutPayload?.userId,
+          },
+          razorpayOrderId,
+          razorpayPaymentId,
+          verifiedMethod: resolvedMethod,
+          expectedAmountPaise: intent.amountPaise,
+          source: 'orders_api',
+          existingUser: req.currentUser,
+          requestId: req.requestId,
+          allowLowStockRecovery: false,
+        });
+
+        if (!result.ok) {
+          return res.status(result.statusCode).json({
+            error: result.error,
+            code: result.code,
+            fieldErrors: result.fieldErrors,
+            requestId: req.requestId,
+          });
+        }
+
+        const totalMs = Date.now() - startedAt;
+        res.setHeader('Server-Timing', `context;dur=${contextMs}, total;dur=${totalMs}`);
+        logStructured('info', 'orders', 'create_order_timing', {
+          requestId: req.requestId,
+          orderNumber: result.order.orderNumber,
+          paymentMethod: result.order.paymentMethod,
+          idempotent: result.idempotent,
+          contextMs,
+          totalMs,
+        });
+
+        return res.status(result.statusCode).json({
+          order: result.order,
+          updatedProducts: result.updatedProducts,
+          idempotent: result.idempotent,
+        });
+      } catch (err) {
+        const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+        const message =
+          err instanceof Error && err.message
+            ? err.message
+            : 'Unable to confirm your order right now. Please retry.';
+        return res.status(statusCode).json({ error: message, requestId: req.requestId });
+      }
+    }
+
+    // Cash on Delivery (COD) flow — preserved intact
     let ctx;
     let contextMs = 0;
     try {
       const ctxStartedAt = Date.now();
       ctx = await storeRepo.loadCheckoutContext({
-        razorpayOrderId: isOnline ? razorpayOrderId : undefined,
-        razorpayPaymentId: isOnline ? razorpayPaymentId : undefined,
         includeOrderSequence: true,
       });
       contextMs = Date.now() - ctxStartedAt;
@@ -1139,26 +2094,6 @@ export function createApiApp(): express.Express {
           ? err.message
           : 'Unable to load checkout details right now. Please try again.';
       return res.status(statusCode).json({ error: message, requestId: req.requestId });
-    }
-
-    // Payment idempotency guard: prevent duplicate orders on retries or double-clicks
-    if (isOnline && ctx.existingOrderByPayment) {
-      const totalMs = Date.now() - startedAt;
-      res.setHeader('Server-Timing', `context;dur=${contextMs}, total;dur=${totalMs}`);
-      logStructured('info', 'orders', 'create_order_timing', {
-        requestId: req.requestId,
-        orderNumber: ctx.existingOrderByPayment.orderNumber,
-        paymentMethod,
-        idempotent: true,
-        contextMs,
-        txMs: 0,
-        totalMs,
-      });
-      return res.status(200).json({
-        order: ctx.existingOrderByPayment,
-        updatedProducts: ctx.products.filter((p) => p.active),
-        idempotent: true,
-      });
     }
 
     const orderItems: Order['items'] = [];
@@ -1191,34 +2126,12 @@ export function createApiApp(): express.Express {
     const nowMs = Date.now();
     const calc = calculateCartTotals(items, ctx.products, ctx.settings, {
       shippingSpeed,
-      paymentMethod,
+      paymentMethod: 'COD',
       couponCode,
       coupons: ctx.coupons,
       promotions: ctx.promotions,
       nowMs,
     });
-
-    if (isOnline) {
-      const intent = ctx.paymentIntent;
-      if (
-        !intent ||
-        !intent.verified ||
-        !intent.signatureVerified ||
-        !razorpayOrderId ||
-        !razorpayPaymentId ||
-        intent.razorpayOrderId !== razorpayOrderId ||
-        intent.paymentId !== razorpayPaymentId ||
-        intent.amountPaise !== Math.round(calc.grandTotal * 100)
-      ) {
-        return res.status(402).json({
-          error: 'Payment verification is required before confirming your order.',
-        });
-      }
-    }
-
-    const resolvedPaymentMethod: PaymentMethod = isOnline
-      ? normalizeRazorpayPaymentMethod(ctx.paymentIntent?.method, paymentMethod)
-      : 'COD';
 
     const now = new Date(nowMs);
     const deliveryDays = shippingSpeed === 'express' ? 2 : 5;
@@ -1228,43 +2141,38 @@ export function createApiApp(): express.Express {
     const buildOrderNumber = (seq: number) => `HIM-2026-${String(seq).padStart(4, '0')}`;
     const orderNumber = buildOrderNumber(nextOrderSeq);
 
-    const initialStatus: OrderStatus = isOnline ? 'Payment Confirmed' : 'Processing';
     const timeline: Order['timeline'] = [
       {
         status: 'Pending Payment',
         timestamp: now.toISOString(),
-        note: `Order created (${resolvedPaymentMethod})`,
+        note: 'Order created (COD)',
       },
-    ];
-    if (isOnline) {
-      timeline.push({
-        status: 'Payment Confirmed',
-        timestamp: now.toISOString(),
-        note: `Server-verified ${resolvedPaymentMethod} payment (${razorpayPaymentId})`,
-      });
-    } else {
-      timeline.push({
+      {
         status: 'Processing',
         timestamp: now.toISOString(),
         note: 'Cash on Delivery order queued for packing',
-      });
+      },
+    ];
+
+    const normalizedEmail = shippingAddress.email.trim().toLowerCase();
+    let resolvedUserId = req.currentUser?.id;
+    if (!resolvedUserId && normalizedEmail) {
+      const matchedUser = await storeRepo.findUserByEmail(normalizedEmail).catch(() => null);
+      if (matchedUser) resolvedUserId = matchedUser.id;
     }
 
-    const gatewayFeePct = ctx.settings.gatewayFeePercent ?? 2;
-    const gatewayFeeAmount = isOnline
-      ? Math.round(calc.grandTotal * (gatewayFeePct / 100) * 100) / 100
-      : 0;
     const actualShippingCost = ctx.settings.defaultShippingCostPerOrder ?? 65;
 
     const newOrder: Order = {
       id: `ord-${crypto.randomUUID().slice(0, 8)}`,
       orderNumber,
-      userId: req.currentUser?.id,
+      userId: resolvedUserId,
       customerName: shippingAddress.fullName.trim(),
-      customerEmail: shippingAddress.email.trim().toLowerCase(),
+      customerEmail: normalizedEmail,
       customerPhone: shippingAddress.phone.replace(/\D/g, ''),
       shippingAddress: {
         ...shippingAddress,
+        email: normalizedEmail,
         houseFlatNumber: shippingAddress.houseFlatNumber?.trim() || undefined,
         landmark: shippingAddress.landmark?.trim() || undefined,
         phone: shippingAddress.phone.replace(/\D/g, ''),
@@ -1285,14 +2193,13 @@ export function createApiApp(): express.Express {
       taxableValue: calc.taxableValue,
       gstAmount: calc.gstAmount,
       totalAmount: calc.grandTotal,
-      gatewayFeeAmount,
+      gatewayFeeAmount: 0,
+      gatewayFeeSource: 'razorpay_actual',
       actualShippingCost,
-      paymentMethod: resolvedPaymentMethod,
-      paymentStatus: isOnline ? 'Paid' : 'Pending COD',
-      razorpayOrderId: isOnline ? razorpayOrderId : undefined,
-      razorpayPaymentId: isOnline ? razorpayPaymentId : undefined,
-      paymentVerifiedAt: isOnline ? now.toISOString() : undefined,
-      status: initialStatus,
+      paymentMethod: 'COD',
+      paymentStatus: 'Pending COD',
+      settlementStatus: 'Not Applicable',
+      status: 'Processing',
       estimatedDelivery: estDate,
       timeline,
       createdAt: now.toISOString(),
@@ -1300,24 +2207,6 @@ export function createApiApp(): express.Express {
 
     const promotionUpdate = calc.appliedPromotion
       ? { promotionId: calc.appliedPromotion.id, revenueDelta: calc.grandTotal }
-      : undefined;
-
-    const adminNotification: AdminNotification | undefined = isOnline
-      ? {
-          id: `notif-${crypto.randomUUID().slice(0, 8)}`,
-          type: 'new_paid_order',
-          title: 'New Paid Order Received!',
-          message: `${newOrder.orderNumber} from ${newOrder.customerName} (₹${newOrder.totalAmount})`,
-          orderId: newOrder.id,
-          orderNumber: newOrder.orderNumber,
-          customerName: newOrder.customerName,
-          amount: newOrder.totalAmount,
-          read: false,
-          emailNotifiedTo: ctx.settings.emailNotificationsEnabled
-            ? ctx.settings.orderNotificationEmail
-            : undefined,
-          createdAt: now.toISOString(),
-        }
       : undefined;
 
     const hadDefaultAddress = Boolean(req.currentUser?.defaultAddress);
@@ -1334,7 +2223,6 @@ export function createApiApp(): express.Express {
     const prevPromoUsage = appliedPromoInState?.usageCount;
     const prevPromoRevenue = appliedPromoInState?.revenueGenerated;
 
-    // For non-Postgres backends (DynamoDB / local JSON), mutate in-memory state with snapshot rollback
     if (!isPostgres) {
       for (const dec of stockDecrements) {
         const product = state.products.find((p) => p.id === dec.productId);
@@ -1348,9 +2236,6 @@ export function createApiApp(): express.Express {
         appliedPromoInState.revenueGenerated += calc.grandTotal;
       }
       state.orders.unshift(newOrder);
-      if (adminNotification) {
-        state.adminNotifications.unshift(adminNotification);
-      }
       if (req.currentUser && !hadDefaultAddress) {
         req.currentUser.defaultAddress = newOrder.shippingAddress;
       }
@@ -1367,7 +2252,6 @@ export function createApiApp(): express.Express {
         try {
           commitResult = await storeRepo.commitOrderAtomic(newOrder, stockDecrements, {
             promotionUpdate,
-            adminNotification,
             userDefaultAddressUpdate,
           });
           break;
@@ -1380,10 +2264,6 @@ export function createApiApp(): express.Express {
           ) {
             nextOrderSeq += 1;
             newOrder.orderNumber = buildOrderNumber(nextOrderSeq);
-            if (adminNotification) {
-              adminNotification.orderNumber = newOrder.orderNumber;
-              adminNotification.message = `${newOrder.orderNumber} from ${newOrder.customerName} (₹${newOrder.totalAmount})`;
-            }
             continue;
           }
           throw attemptErr;
@@ -1392,27 +2272,6 @@ export function createApiApp(): express.Express {
 
       const txMs = Date.now() - txStartedAt;
       const totalMs = Date.now() - startedAt;
-
-      if (commitResult.existingOrder) {
-        res.setHeader(
-          'Server-Timing',
-          `context;dur=${contextMs}, tx;dur=${txMs}, total;dur=${totalMs}`
-        );
-        logStructured('info', 'orders', 'create_order_timing', {
-          requestId: req.requestId,
-          orderNumber: commitResult.existingOrder.orderNumber,
-          paymentMethod,
-          idempotent: true,
-          contextMs,
-          txMs,
-          totalMs,
-        });
-        return res.status(200).json({
-          order: commitResult.existingOrder,
-          updatedProducts: ctx.products.filter((p) => p.active),
-          idempotent: true,
-        });
-      }
 
       if (isPostgres) {
         if (commitResult.updatedProducts) {
@@ -1430,6 +2289,9 @@ export function createApiApp(): express.Express {
         }
       }
 
+      storeRepo.invalidateCaches();
+      bootstrapCache.invalidate();
+
       res.setHeader(
         'Server-Timing',
         `context;dur=${contextMs}, tx;dur=${txMs}, total;dur=${totalMs}`
@@ -1437,7 +2299,7 @@ export function createApiApp(): express.Express {
       logStructured('info', 'orders', 'create_order_timing', {
         requestId: req.requestId,
         orderNumber: newOrder.orderNumber,
-        paymentMethod,
+        paymentMethod: 'COD',
         idempotent: false,
         contextMs,
         txMs,
@@ -1451,13 +2313,7 @@ export function createApiApp(): express.Express {
       return res.status(201).json({ order: newOrder, updatedProducts: updatedProductsList });
     } catch (err) {
       if (!isPostgres) {
-        // Roll back in-memory mutations cleanly if DynamoDB atomic transaction failed or rejected stock race
         state.orders = state.orders.filter((o) => o.id !== newOrder.id);
-        if (adminNotification) {
-          state.adminNotifications = state.adminNotifications.filter(
-            (n) => n.id !== adminNotification.id
-          );
-        }
         for (const [prodId, prevStock] of stockSnapshots.entries()) {
           const product = state.products.find((p) => p.id === prodId);
           if (product) product.stock = prevStock;
@@ -1489,16 +2345,18 @@ export function createApiApp(): express.Express {
     }
   });
 
-  app.get('/api/orders/mine', requireAuth, (req: AuthRequest, res) => {
+  app.get('/api/orders/mine', requireAuth, async (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const user = req.currentUser!;
-    const orders = storeRepo
-      .getState()
-      .orders.filter(
-        (o) =>
-          o.userId === user.id ||
-          o.customerEmail.toLowerCase() === user.email.toLowerCase()
-      );
-    res.json({ orders });
+    try {
+      const orders = await storeRepo.findOrdersForUser(user.id, user.email);
+      res.json({ orders });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message =
+        err instanceof Error ? err.message : 'Unable to fetch your orders right now.';
+      res.status(statusCode).json({ error: message });
+    }
   });
 
   app.get('/api/orders/track', (req: AuthRequest, res) => {
@@ -1839,7 +2697,7 @@ ${labContext}`;
   });
 
   // PRIVATE ADMIN ROUTES
-  app.get('/api/admin/overview', requireAdmin, (_req, res) => {
+  app.get('/api/admin/overview', requireAdmin, async (_req, res) => {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
     const state = storeRepo.getState();
     const nowMs = Date.now();
@@ -1848,6 +2706,7 @@ ${labContext}`;
       defaultShippingCostPerOrder: state.settings.defaultShippingCostPerOrder,
       nowMs,
     });
+    const unreconciledPayments = await storeRepo.listUnreconciledCapturedIntents().catch(() => []);
     res.json({
       products: state.products,
       settings: state.settings,
@@ -1861,7 +2720,565 @@ ${labContext}`;
       notifications: state.adminNotifications,
       customers: state.users.map((u) => storeRepo.sanitizeUser(u)),
       analytics,
+      unreconciledPayments,
+      databaseEnvironment: storeRepo.getDatabaseEnvironment(),
       serverNow: new Date(nowMs).toISOString(),
+    });
+  });
+
+  // Admin: List captured Razorpay payment intents with no matching customer order
+  app.get('/api/admin/payments/unreconciled', requireAdmin, async (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const unreconciled = await storeRepo.listUnreconciledCapturedIntents();
+    res.json({
+      count: unreconciled.length,
+      unreconciledPayments: unreconciled,
+      databaseEnvironment: storeRepo.getDatabaseEnvironment(),
+    });
+  });
+
+  // Admin: Safely reconcile a verified captured Razorpay payment into a legitimate customer order (never charges again, never auto-refunds)
+  app.post('/api/admin/payments/reconcile', requireAdmin, async (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const {
+      razorpayOrderId,
+      razorpayPaymentId,
+      shippingAddress,
+      items,
+      deliveryInstructions,
+      shippingSpeed = 'standard',
+      couponCode,
+      createdAtOverride,
+      verifyOnly = false,
+    } = req.body as {
+      razorpayOrderId?: string;
+      razorpayPaymentId?: string;
+      shippingAddress?: ShippingAddress;
+      items?: CartItem[];
+      deliveryInstructions?: string;
+      shippingSpeed?: 'standard' | 'express';
+      couponCode?: string;
+      createdAtOverride?: string;
+      verifyOnly?: boolean;
+    };
+
+    const razorpayConfig = getRazorpayConfig();
+    if (!razorpayConfig) {
+      return res.status(503).json({
+        error: 'Razorpay API credentials are required to verify captured payments.',
+        code: 'RAZORPAY_NOT_CONFIGURED',
+      });
+    }
+
+    const cleanOrderId = isValidRazorpayOrderId(razorpayOrderId) ? razorpayOrderId.trim() : undefined;
+    const cleanPaymentId = isValidRazorpayPaymentId(razorpayPaymentId)
+      ? razorpayPaymentId.trim()
+      : undefined;
+
+    if (!cleanOrderId && !cleanPaymentId) {
+      return res.status(400).json({
+        error: 'Provide a valid razorpayOrderId (order_...) or razorpayPaymentId (pay_...).',
+      });
+    }
+
+    // 1. Check idempotently if an order already exists
+    const existingOrder = await storeRepo.findOrderByRazorpayReference({
+      razorpayOrderId: cleanOrderId,
+      razorpayPaymentId: cleanPaymentId,
+    });
+    if (existingOrder) {
+      return res.json({
+        reconciled: true,
+        verified: true,
+        alreadyExisted: true,
+        order: existingOrder,
+      });
+    }
+
+    // 2. Live verification directly against Razorpay API (never fabricate an order without captured payment proof)
+    let livePayment;
+    if (cleanPaymentId) {
+      const paymentRes = await fetchRazorpayPaymentById({
+        config: razorpayConfig,
+        razorpayPaymentId: cleanPaymentId,
+      });
+      if (!paymentRes.ok) {
+        return res.status(paymentRes.statusCode).json({
+          error: paymentRes.message,
+          code: paymentRes.code,
+        });
+      }
+      livePayment = paymentRes.payment;
+    } else if (cleanOrderId) {
+      const orderPaymentsRes = await fetchRazorpayOrderPayments({
+        config: razorpayConfig,
+        razorpayOrderId: cleanOrderId,
+      });
+      if (!orderPaymentsRes.ok) {
+        return res.status(orderPaymentsRes.statusCode).json({
+          error: orderPaymentsRes.message,
+          code: orderPaymentsRes.code,
+        });
+      }
+      livePayment = orderPaymentsRes.payments.find((p) => p.status === 'captured');
+      if (!livePayment) {
+        return res.status(402).json({
+          error: 'No captured payment was found on Razorpay for this order ID.',
+          code: 'RAZORPAY_PAYMENT_NOT_CAPTURED',
+        });
+      }
+    }
+
+    if (
+      !livePayment ||
+      livePayment.status !== 'captured' ||
+      String(livePayment.currency || '').toUpperCase() !== 'INR' ||
+      typeof livePayment.amount !== 'number' ||
+      livePayment.amount < 100
+    ) {
+      return res.status(402).json({
+        error: `Razorpay payment is not in captured INR state (status: ${livePayment?.status || 'unknown'}).`,
+        code: 'RAZORPAY_PAYMENT_NOT_CAPTURED',
+      });
+    }
+
+    if (cleanOrderId && livePayment.order_id && livePayment.order_id !== cleanOrderId) {
+      return res.status(400).json({
+        error: `Razorpay Payment ID (${livePayment.id}) belongs to order ${livePayment.order_id}, not ${cleanOrderId}.`,
+        code: 'RAZORPAY_ORDER_PAYMENT_MISMATCH',
+      });
+    }
+
+    const verifiedPaymentId = String(livePayment.id || cleanPaymentId || '');
+    const verifiedOrderId = String(livePayment.order_id || cleanOrderId || '');
+    if (!isValidRazorpayPaymentId(verifiedPaymentId) || !isValidRazorpayOrderId(verifiedOrderId)) {
+      return res.status(400).json({
+        error: 'Razorpay payment record is missing a valid order_id or payment_id.',
+      });
+    }
+
+    // Re-check idempotency with both resolved Razorpay IDs
+    const existingAfterResolve = await storeRepo.findOrderByRazorpayReference({
+      razorpayOrderId: verifiedOrderId,
+      razorpayPaymentId: verifiedPaymentId,
+    });
+    if (existingAfterResolve) {
+      return res.json({
+        reconciled: true,
+        verified: true,
+        alreadyExisted: true,
+        order: existingAfterResolve,
+      });
+    }
+
+    const storedIntent = await storeRepo.findPaymentIntent(verifiedOrderId).catch(() => null);
+    const verifiedMethod = normalizeRazorpayPaymentMethod(livePayment.method, storedIntent?.method);
+    const extractedFee = extractActualRazorpayFee(livePayment);
+    const capturedPaymentSummary = {
+      razorpayPaymentId: verifiedPaymentId,
+      razorpayOrderId: verifiedOrderId,
+      status: livePayment.status,
+      currency: String(livePayment.currency || 'INR').toUpperCase(),
+      amountPaise: livePayment.amount,
+      amountInr: livePayment.amount / 100,
+      method: verifiedMethod,
+      email: livePayment.email,
+      contact: livePayment.contact,
+      feeInr: extractedFee.gatewayFeeAmount,
+      taxInr: extractedFee.gatewayTaxAmount,
+      feeSource: extractedFee.gatewayFeeSource,
+      createdAt: livePayment.created_at
+        ? new Date(livePayment.created_at * 1000).toISOString()
+        : storedIntent?.createdAt,
+    };
+
+    if (verifyOnly) {
+      return res.json({
+        verified: true,
+        reconciled: false,
+        alreadyExisted: false,
+        capturedPayment: capturedPaymentSummary,
+        persistedDraft: storedIntent?.checkoutPayload ?? null,
+      });
+    }
+
+    // Resolve checkout draft: prefer persisted draft, allow admin-verified details for historical payments without draft
+    const draft: PersistedCheckoutDraft | null = storedIntent?.checkoutPayload
+      ? {
+          ...storedIntent.checkoutPayload,
+          shippingAddress: shippingAddress ?? storedIntent.checkoutPayload.shippingAddress,
+          items: items?.length ? items : storedIntent.checkoutPayload.items,
+          deliveryInstructions:
+            deliveryInstructions ?? storedIntent.checkoutPayload.deliveryInstructions,
+          shippingSpeed: shippingSpeed || storedIntent.checkoutPayload.shippingSpeed,
+          couponCode: couponCode !== undefined ? couponCode || undefined : storedIntent.checkoutPayload.couponCode,
+        }
+      : shippingAddress && Array.isArray(items) && items.length > 0
+      ? {
+          items,
+          shippingAddress,
+          deliveryInstructions,
+          shippingSpeed,
+          paymentMethod: verifiedMethod,
+          couponCode: couponCode || undefined,
+        }
+      : null;
+
+    if (!draft) {
+      return res.status(400).json({
+        error:
+          'No persisted checkout draft exists for this historical payment. Provide verified customer shippingAddress and items matching the exact captured amount.',
+        code: 'RECONCILE_CUSTOMER_DETAILS_REQUIRED',
+        capturedPayment: capturedPaymentSummary,
+      });
+    }
+
+    // Ensure payment_intent exists and is marked verified before atomic order creation
+    await storeRepo.upsertPaymentIntent({
+      razorpayOrderId: verifiedOrderId,
+      amountPaise: livePayment.amount,
+      verified: true,
+      signatureVerified: true,
+      paymentId: verifiedPaymentId,
+      method: verifiedMethod,
+      checkoutPayload: draft,
+      gatewayFeePaise: extractedFee.gatewayFeePaise,
+      gatewayTaxPaise: extractedFee.gatewayTaxPaise,
+      createdAt:
+        storedIntent?.createdAt ||
+        (livePayment.created_at
+          ? new Date(livePayment.created_at * 1000).toISOString()
+          : new Date().toISOString()),
+      updatedAt: new Date().toISOString(),
+    });
+
+    const createdAtIso =
+      createdAtOverride ||
+      (livePayment.created_at ? new Date(livePayment.created_at * 1000).toISOString() : undefined);
+
+    const reconciled = await createOrReturnVerifiedOnlineOrder({
+      draft,
+      razorpayOrderId: verifiedOrderId,
+      razorpayPaymentId: verifiedPaymentId,
+      verifiedMethod,
+      expectedAmountPaise: livePayment.amount,
+      actualFee: extractedFee,
+      source: 'admin_reconcile',
+      requestId: req.requestId,
+      createdAtOverride: createdAtIso,
+      allowLowStockRecovery: true,
+    });
+
+    if (!reconciled.ok) {
+      return res.status(reconciled.statusCode).json({
+        error: reconciled.error,
+        code: reconciled.code,
+        fieldErrors: reconciled.fieldErrors,
+      });
+    }
+
+    logStructured('info', 'admin', 'payment_reconciled_to_order', {
+      requestId: req.requestId,
+      orderNumber: reconciled.order.orderNumber,
+      razorpayOrderId: verifiedOrderId,
+      razorpayPaymentId: verifiedPaymentId,
+      amount: reconciled.order.totalAmount,
+      gatewayFeeAmount: reconciled.order.gatewayFeeAmount,
+      gatewayFeeSource: reconciled.order.gatewayFeeSource,
+    });
+
+    res.status(reconciled.statusCode).json({
+      reconciled: true,
+      alreadyExisted: reconciled.idempotent,
+      order: reconciled.order,
+      updatedProducts: reconciled.updatedProducts,
+    });
+  });
+
+  // Admin Maintenance: Read-Only Dry-Run Preview of Candidate Test Records (NEVER deletes data)
+  app.get('/api/admin/maintenance/test-data-preview', requireAdmin, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const state = storeRepo.getState();
+    const beforeIso = typeof req.query.beforeIso === 'string' ? req.query.beforeIso.trim() : '';
+    const explicitOrderIdsParam =
+      typeof req.query.orderIds === 'string'
+        ? req.query.orderIds
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean)
+        : [];
+    const ownerEmail = getAdminOwnerEmail();
+
+    const matchedWithReason: Array<{ order: Order; matchReason: string }> = [];
+    for (const ord of state.orders) {
+      if (explicitOrderIdsParam.length > 0) {
+        if (
+          explicitOrderIdsParam.includes(ord.id) ||
+          explicitOrderIdsParam.includes(ord.orderNumber)
+        ) {
+          matchedWithReason.push({ order: ord, matchReason: 'Explicitly selected by Order ID/Number' });
+        }
+        continue;
+      }
+      const lowerEmail = ord.customerEmail.toLowerCase();
+      const lowerName = ord.customerName.toLowerCase();
+      const reasons: string[] = [];
+      if (beforeIso && ord.createdAt < beforeIso) reasons.push(`Created before ${beforeIso}`);
+      if (lowerEmail === ownerEmail) reasons.push('Store owner email');
+      if (lowerEmail.includes('test') || lowerEmail.endsWith('@example.com')) {
+        reasons.push('Test/example email');
+      }
+      if (lowerName.includes('test')) reasons.push('Test customer name');
+      if (ord.razorpayOrderId?.startsWith('order_test') || ord.razorpayPaymentId?.startsWith('pay_test')) {
+        reasons.push('Test Razorpay ID');
+      }
+      if (reasons.length > 0) {
+        matchedWithReason.push({ order: ord, matchReason: reasons.join(' · ') });
+      }
+    }
+
+    const candidateOrders = matchedWithReason.map((m) => m.order);
+    const candidateOrderIds = new Set(candidateOrders.map((o) => o.id));
+    const candidateRzpOrders = new Set(
+      candidateOrders.map((o) => o.razorpayOrderId).filter((v): v is string => Boolean(v))
+    );
+
+    const candidatePaymentIntents = Object.values(state.paymentIntents).filter(
+      (pi) =>
+        (pi.orderId && candidateOrderIds.has(pi.orderId)) ||
+        candidateRzpOrders.has(pi.razorpayOrderId)
+    );
+    const candidateNotifications = state.adminNotifications.filter(
+      (n) => n.orderId && candidateOrderIds.has(n.orderId)
+    );
+    const unreconciledCapturedIntents = await storeRepo
+      .listUnreconciledCapturedIntents()
+      .catch(() => []);
+
+    const stockToRestoreMap = new Map<string, number>();
+    for (const ord of candidateOrders) {
+      if (ord.status === 'Cancelled' || ord.status === 'Refunded') continue;
+      for (const item of ord.items) {
+        stockToRestoreMap.set(
+          item.productId,
+          (stockToRestoreMap.get(item.productId) ?? 0) + item.quantity
+        );
+      }
+    }
+
+    const stockRestorationPreview = Array.from(stockToRestoreMap.entries()).map(
+      ([productId, quantityToRestore]) => {
+        const product = state.products.find((p) => p.id === productId);
+        return {
+          productId,
+          productName: product?.name || productId,
+          currentStock: product?.stock ?? 0,
+          quantityToRestore,
+          projectedStock: (product?.stock ?? 0) + quantityToRestore,
+        };
+      }
+    );
+
+    const remainingOrders = state.orders.filter((o) => !candidateOrderIds.has(o.id));
+    const currentAnalytics = calculateProfitMetrics(state.orders, state.expenses, {
+      gatewayFeePercent: state.settings.gatewayFeePercent,
+      defaultShippingCostPerOrder: state.settings.defaultShippingCostPerOrder,
+    });
+    const projectedAnalytics = calculateProfitMetrics(remainingOrders, state.expenses, {
+      gatewayFeePercent: state.settings.gatewayFeePercent,
+      defaultShippingCostPerOrder: state.settings.defaultShippingCostPerOrder,
+    });
+
+    res.json({
+      dryRun: true,
+      databaseEnvironment: storeRepo.getDatabaseEnvironment(),
+      currentOrdersCount: state.orders.length,
+      candidateOrders: matchedWithReason.map(({ order: o, matchReason }) => ({
+        id: o.id,
+        orderNumber: o.orderNumber,
+        createdAt: o.createdAt,
+        customerName: o.customerName,
+        customerEmail: o.customerEmail,
+        totalAmount: o.totalAmount,
+        paymentMethod: o.paymentMethod,
+        paymentStatus: o.paymentStatus,
+        status: o.status,
+        razorpayOrderId: o.razorpayOrderId,
+        razorpayPaymentId: o.razorpayPaymentId,
+        matchReason,
+        items: o.items.map((i) => ({ productId: i.productId, name: i.name, quantity: i.quantity })),
+      })),
+      candidatePaymentIntentIds: candidatePaymentIntents.map((pi) => pi.razorpayOrderId),
+      candidatePaymentIntents: candidatePaymentIntents.map((pi) => ({
+        razorpayOrderId: pi.razorpayOrderId,
+        paymentId: pi.paymentId,
+        orderId: pi.orderId,
+        amountPaise: pi.amountPaise,
+        method: pi.method,
+      })),
+      candidateNotificationIds: candidateNotifications.map((n) => n.id),
+      candidateNotifications: candidateNotifications.map((n) => ({
+        id: n.id,
+        orderId: n.orderId,
+        orderNumber: n.orderNumber,
+      })),
+      stockRestorationPreview,
+      preservedSummary: {
+        remainingOrdersCount: remainingOrders.length,
+        productsCount: state.products.length,
+        customersCount: state.users.filter((u) => u.role !== 'admin').length,
+        adminAccountsCount: state.users.filter((u) => u.role === 'admin').length,
+        couponsCount: state.coupons.length,
+        labReportsCount: state.labReports.length,
+        cmsSectionsCount: state.cmsSections.length,
+        protectedUnreconciledCapturedIntentsCount: unreconciledCapturedIntents.length,
+      },
+      currentAnalytics: {
+        grossRevenue: currentAnalytics.grossRevenue,
+        totalPaidOrders: currentAnalytics.totalPaidOrders,
+        totalCogs: currentAnalytics.totalCogs,
+        shippingExpenses: currentAnalytics.shippingExpenses,
+        gatewayFees: currentAnalytics.gatewayFees,
+        netProfit: currentAnalytics.netProfit,
+      },
+      projectedAnalytics: {
+        grossRevenue: projectedAnalytics.grossRevenue,
+        totalPaidOrders: projectedAnalytics.totalPaidOrders,
+        totalCogs: projectedAnalytics.totalCogs,
+        shippingExpenses: projectedAnalytics.shippingExpenses,
+        gatewayFees: projectedAnalytics.gatewayFees,
+        netProfit: projectedAnalytics.netProfit,
+      },
+    });
+  });
+
+  // Admin Maintenance: Export timestamped JSON backup snapshot prior to any approved cleanup
+  app.post('/api/admin/maintenance/backup-export', requireAdmin, (_req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const state = storeRepo.getState();
+    const exportedAt = new Date().toISOString();
+    res.json({
+      exportedAt,
+      databaseEnvironment: storeRepo.getDatabaseEnvironment(),
+      snapshot: {
+        orders: state.orders,
+        paymentIntents: state.paymentIntents,
+        products: state.products,
+        promotions: state.promotions,
+        adminNotifications: state.adminNotifications,
+        expenses: state.expenses,
+      },
+    });
+  });
+
+  // Admin Maintenance: Execute ONLY explicitly owner-approved test record cleanup in a single atomic transaction
+  app.post('/api/admin/maintenance/cleanup-approved', requireAdmin, async (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    const {
+      confirmOwnerApproval,
+      backupTaken,
+      orderIds = [],
+      paymentIntentIds = [],
+      notificationIds = [],
+      restoreInventory = true,
+    } = req.body as {
+      confirmOwnerApproval?: boolean;
+      backupTaken?: boolean;
+      orderIds?: string[];
+      paymentIntentIds?: string[];
+      notificationIds?: string[];
+      restoreInventory?: boolean;
+    };
+
+    if (confirmOwnerApproval !== true || backupTaken !== true) {
+      return res.status(400).json({
+        error:
+          'Cleanup blocked: explicit confirmOwnerApproval=true and backupTaken=true are required before deleting approved test records.',
+        code: 'CLEANUP_APPROVAL_REQUIRED',
+      });
+    }
+
+    const cleanOrderIds = Array.isArray(orderIds)
+      ? Array.from(new Set(orderIds.filter((s): s is string => typeof s === 'string' && s.trim().length > 0)))
+      : [];
+    const cleanPaymentIntentIds = Array.isArray(paymentIntentIds)
+      ? Array.from(
+          new Set(paymentIntentIds.filter((s): s is string => typeof s === 'string' && s.trim().length > 0))
+        )
+      : [];
+    const cleanNotificationIds = Array.isArray(notificationIds)
+      ? Array.from(
+          new Set(notificationIds.filter((s): s is string => typeof s === 'string' && s.trim().length > 0))
+        )
+      : [];
+
+    if (
+      cleanOrderIds.length === 0 &&
+      cleanPaymentIntentIds.length === 0 &&
+      cleanNotificationIds.length === 0
+    ) {
+      return res.status(400).json({
+        error: 'Provide at least one explicit orderId, paymentIntentId, or notificationId to clean up.',
+      });
+    }
+
+    // Safety guard: never delete a verified captured payment intent unless it belongs to an explicitly approved test order being removed
+    const currentState = storeRepo.getState();
+    const approvedOrderSet = new Set(cleanOrderIds);
+    const approvedRzpOrderIds = new Set(
+      currentState.orders
+        .filter((o) => approvedOrderSet.has(o.id) && o.razorpayOrderId)
+        .map((o) => o.razorpayOrderId as string)
+    );
+    for (const piId of cleanPaymentIntentIds) {
+      const intent = currentState.paymentIntents[piId];
+      if (!intent) continue;
+      const linkedToApprovedOrder =
+        (intent.orderId && approvedOrderSet.has(intent.orderId)) ||
+        approvedRzpOrderIds.has(intent.razorpayOrderId);
+      if (intent.verified && !linkedToApprovedOrder) {
+        return res.status(400).json({
+          error: `Cleanup blocked: verified captured payment intent (${piId}) is not linked to an approved test order and is protected from deletion.`,
+          code: 'PROTECTED_CAPTURED_PAYMENT',
+        });
+      }
+    }
+
+    const result = await storeRepo.cleanupApprovedTestRecords({
+      orderIds: cleanOrderIds,
+      paymentIntentIds: cleanPaymentIntentIds,
+      notificationIds: cleanNotificationIds,
+      restoreInventory: restoreInventory !== false,
+    });
+    bootstrapCache.invalidate();
+
+    logStructured('info', 'admin', 'approved_test_cleanup_executed', {
+      requestId: req.requestId,
+      deletedOrderNumbers: result.deletedOrderNumbers,
+      deletedPaymentIntentCount: result.deletedPaymentIntentIds.length,
+      deletedNotificationCount: result.deletedNotificationIds.length,
+      restoredStock: result.restoredStock,
+    });
+
+    const refreshedState = storeRepo.getState();
+    const analytics = calculateProfitMetrics(refreshedState.orders, refreshedState.expenses, {
+      gatewayFeePercent: refreshedState.settings.gatewayFeePercent,
+      defaultShippingCostPerOrder: refreshedState.settings.defaultShippingCostPerOrder,
+    });
+
+    res.json({
+      ok: true,
+      ...result,
+      updatedProducts: refreshedState.products,
+      postCleanupAnalytics: {
+        grossRevenue: analytics.grossRevenue,
+        totalPaidOrders: analytics.totalPaidOrders,
+        totalCogs: analytics.totalCogs,
+        shippingExpenses: analytics.shippingExpenses,
+        gatewayFees: analytics.gatewayFees,
+        netProfit: analytics.netProfit,
+        totalInventory: refreshedState.products.reduce((s, p) => s + p.stock, 0),
+      },
     });
   });
 
@@ -2154,6 +3571,8 @@ ${labContext}`;
       estimatedDelivery,
       actualShippingCost,
       paymentStatus,
+      settlementStatus,
+      razorpaySettlementId,
       refundAmount,
       refundReason,
       note,
@@ -2165,6 +3584,8 @@ ${labContext}`;
       estimatedDelivery?: string;
       actualShippingCost?: number;
       paymentStatus?: OrderPaymentStatus;
+      settlementStatus?: PaymentSettlementStatus;
+      razorpaySettlementId?: string;
       refundAmount?: number;
       refundReason?: string;
       note?: string;
@@ -2179,8 +3600,34 @@ ${labContext}`;
       order.actualShippingCost = actualShippingCost;
     }
 
+    if (
+      settlementStatus &&
+      (['Not Applicable', 'Pending Settlement', 'Settled', 'On Hold'] as PaymentSettlementStatus[]).includes(
+        settlementStatus
+      ) &&
+      settlementStatus !== order.settlementStatus
+    ) {
+      order.settlementStatus = settlementStatus;
+      if (settlementStatus === 'Settled') {
+        order.settledAt = nowIso;
+        if (razorpaySettlementId?.trim()) {
+          order.razorpaySettlementId = razorpaySettlementId.trim();
+        }
+      }
+      order.timeline.push({
+        status: order.status,
+        timestamp: nowIso,
+        note: `Bank settlement status updated to ${settlementStatus}${
+          order.razorpaySettlementId ? ` (${order.razorpaySettlementId})` : ''
+        }`,
+      });
+    }
+
     if (paymentStatus && paymentStatus !== order.paymentStatus) {
       order.paymentStatus = paymentStatus;
+      if (paymentStatus === 'Paid' && (!order.settlementStatus || order.settlementStatus === 'Not Applicable') && order.paymentMethod !== 'COD') {
+        order.settlementStatus = 'Pending Settlement';
+      }
       if (paymentStatus === 'Refund Requested') {
         order.refundRequestedAt = nowIso;
         state.adminNotifications.unshift({

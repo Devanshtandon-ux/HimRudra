@@ -88,6 +88,21 @@ export function writeCachedBootstrap(
   }
 }
 
+export function clearCachedBootstrap(storage?: StorageLike | null): void {
+  const target =
+    storage !== undefined
+      ? storage
+      : typeof window !== 'undefined'
+      ? window.localStorage
+      : null;
+  if (!target || typeof target.removeItem !== 'function') return;
+  try {
+    target.removeItem(BOOTSTRAP_CACHE_STORAGE_KEY);
+  } catch {
+    // Ignore storage errors
+  }
+}
+
 export async function fetchWithTimeout(
   url: string,
   options: RequestInit = {},

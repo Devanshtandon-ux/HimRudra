@@ -391,6 +391,8 @@ export interface ProfitSummary {
   totalShippingCollected: number;
   shippingExpenses: number;
   gatewayFees: number;
+  gatewayFeesActualCount: number;
+  gatewayFeesEstimatedCount: number;
   refundsTotal: number;
   operatingExpenses: number;
   netProfit: number;
@@ -463,6 +465,8 @@ export function calculateProfitMetrics(
   let totalShippingCollected = 0;
   let orderShippingExpenses = 0;
   let gatewayFees = 0;
+  let gatewayFeesActualCount = 0;
+  let gatewayFeesEstimatedCount = 0;
   let refundsTotal = 0;
 
   for (const rOrd of refundedOrders) {
@@ -505,12 +509,20 @@ export function calculateProfitMetrics(
         : defaultShippingCost;
     orderShippingExpenses += shipCost;
 
-    const gwFee =
-      typeof order.gatewayFeeAmount === 'number'
-        ? order.gatewayFeeAmount
-        : order.paymentMethod !== 'COD' && order.paymentStatus === 'Paid'
-        ? Math.round(order.totalAmount * (gatewayFeePercent / 100) * 100) / 100
-        : 0;
+    let gwFee = 0;
+    if (order.paymentMethod !== 'COD' && order.paymentStatus === 'Paid') {
+      if (typeof order.gatewayFeeAmount === 'number' && Number.isFinite(order.gatewayFeeAmount)) {
+        gwFee = Math.max(0, order.gatewayFeeAmount);
+        if (order.gatewayFeeSource === 'razorpay_actual') {
+          gatewayFeesActualCount += 1;
+        } else {
+          gatewayFeesEstimatedCount += 1;
+        }
+      } else {
+        gwFee = Math.round(order.totalAmount * (gatewayFeePercent / 100) * 100) / 100;
+        gatewayFeesEstimatedCount += 1;
+      }
+    }
     gatewayFees += gwFee;
 
     // Daily bucket
@@ -671,6 +683,8 @@ export function calculateProfitMetrics(
     totalShippingCollected,
     shippingExpenses,
     gatewayFees: roundedGatewayFees,
+    gatewayFeesActualCount,
+    gatewayFeesEstimatedCount,
     refundsTotal: Math.round(refundsTotal * 100) / 100,
     operatingExpenses,
     netProfit,

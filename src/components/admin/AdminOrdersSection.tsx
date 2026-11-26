@@ -15,7 +15,7 @@ import {
   formatINR,
   toIstDateString,
 } from '../../lib/commerce';
-import type { Order, OrderPaymentStatus, OrderStatus } from '../../types';
+import type { Order, OrderPaymentStatus, OrderStatus, PaymentSettlementStatus } from '../../types';
 
 interface AdminOrdersSectionProps {
   orders: Order[];
@@ -30,6 +30,7 @@ interface AdminOrdersSectionProps {
       estimatedDelivery?: string;
       actualShippingCost?: number;
       paymentStatus?: OrderPaymentStatus;
+      settlementStatus?: PaymentSettlementStatus;
       refundAmount?: number;
       refundReason?: string;
       note?: string;
@@ -408,6 +409,11 @@ export const AdminOrdersSection: React.FC<AdminOrdersSectionProps> = ({
                       {ord.paymentStatus}
                     </span>
                     <div className="text-[11px] text-[#79543D] mt-0.5">{ord.paymentMethod}</div>
+                    {ord.paymentMethod !== 'COD' && ord.settlementStatus && (
+                      <div className="text-[10px] text-[#241B17]/65 mt-0.5">
+                        Bank: {ord.settlementStatus}
+                      </div>
+                    )}
                   </td>
                   <td className="py-3 px-3.5 whitespace-nowrap font-medium text-[#281A15]">
                     {ord.status}
@@ -493,12 +499,21 @@ const OrderDetailModal: React.FC<{
     estimatedDelivery?: string;
     actualShippingCost?: number;
     paymentStatus?: OrderPaymentStatus;
+    settlementStatus?: PaymentSettlementStatus;
     refundAmount?: number;
     refundReason?: string;
     note?: string;
   }) => Promise<void>;
 }> = ({ order, brandAddress, onClose, onCopyAddress, copied, onSave }) => {
   const [status, setStatus] = useState<OrderStatus>(order.status);
+  const [settlementStatus, setSettlementStatus] = useState<PaymentSettlementStatus>(
+    order.settlementStatus ??
+      (order.paymentMethod === 'COD'
+        ? 'Not Applicable'
+        : order.paymentStatus === 'Paid'
+        ? 'Pending Settlement'
+        : 'Not Applicable')
+  );
   const [courierPartner, setCourierPartner] = useState(
     order.courierPartner || 'BlueDart Express'
   );
@@ -590,6 +605,7 @@ const OrderDetailModal: React.FC<{
         estimatedDelivery,
         actualShippingCost: Number(actualShippingCost || 0),
         paymentStatus: extra?.paymentStatus,
+        settlementStatus,
         refundAmount: extra?.refundAmount,
         refundReason: refundReason.trim() || undefined,
         note: note.trim() || undefined,
@@ -705,9 +721,34 @@ const OrderDetailModal: React.FC<{
                 <span className="font-mono font-semibold text-sm text-[#281A15]">
                   {formatINR(order.totalAmount)}
                 </span>
-                <span className="text-[#79543D]">Payment Method / Status:</span>
+                <span className="text-[#79543D]">Payment Capture Status:</span>
                 <span>
                   {order.paymentMethod} · <strong>{order.paymentStatus}</strong>
+                </span>
+                <span className="text-[#79543D]">Bank Settlement Status:</span>
+                <span>
+                  <strong>
+                    {order.settlementStatus ??
+                      (order.paymentMethod === 'COD'
+                        ? 'Not Applicable'
+                        : order.paymentStatus === 'Paid'
+                        ? 'Pending Settlement'
+                        : 'Not Applicable')}
+                  </strong>
+                  {order.razorpaySettlementId ? ` (${order.razorpaySettlementId})` : ''}
+                </span>
+                <span className="text-[#79543D]">Gateway Fee:</span>
+                <span className="font-mono">
+                  {formatINR(order.gatewayFeeAmount ?? 0)}{' '}
+                  <span className="text-[11px] text-[#79543D]">
+                    (
+                    {order.paymentMethod === 'COD'
+                      ? 'COD'
+                      : order.gatewayFeeSource === 'razorpay_actual'
+                      ? 'Actual Razorpay'
+                      : 'Estimated'}
+                    )
+                  </span>
                 </span>
                 <span className="text-[#79543D]">Gateway Transaction Ref:</span>
                 <span className="font-mono break-all">
@@ -839,7 +880,29 @@ const OrderDetailModal: React.FC<{
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-[#79543D] mb-1">Bank Settlement Status</label>
+                <select
+                  aria-label="Bank settlement status"
+                  value={settlementStatus}
+                  onChange={(e) => setSettlementStatus(e.target.value as PaymentSettlementStatus)}
+                  className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2"
+                >
+                  {(
+                    [
+                      'Not Applicable',
+                      'Pending Settlement',
+                      'Settled',
+                      'On Hold',
+                    ] as PaymentSettlementStatus[]
+                  ).map((st) => (
+                    <option key={st} value={st}>
+                      {st}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="block text-[#79543D] mb-1">Dispatch / Status Note (Optional)</label>
                 <input

@@ -231,6 +231,8 @@ function calculateProfitMetrics(orders2, expenses2, options) {
   let totalShippingCollected = 0;
   let orderShippingExpenses = 0;
   let gatewayFees = 0;
+  let gatewayFeesActualCount = 0;
+  let gatewayFeesEstimatedCount = 0;
   let refundsTotal = 0;
   for (const rOrd of refundedOrders) {
     refundsTotal += rOrd.refundAmount ?? rOrd.totalAmount;
@@ -256,7 +258,20 @@ function calculateProfitMetrics(orders2, expenses2, options) {
     totalCogs += orderCogs;
     const shipCost = typeof order.actualShippingCost === "number" ? order.actualShippingCost : defaultShippingCost;
     orderShippingExpenses += shipCost;
-    const gwFee = typeof order.gatewayFeeAmount === "number" ? order.gatewayFeeAmount : order.paymentMethod !== "COD" && order.paymentStatus === "Paid" ? Math.round(order.totalAmount * (gatewayFeePercent / 100) * 100) / 100 : 0;
+    let gwFee = 0;
+    if (order.paymentMethod !== "COD" && order.paymentStatus === "Paid") {
+      if (typeof order.gatewayFeeAmount === "number" && Number.isFinite(order.gatewayFeeAmount)) {
+        gwFee = Math.max(0, order.gatewayFeeAmount);
+        if (order.gatewayFeeSource === "razorpay_actual") {
+          gatewayFeesActualCount += 1;
+        } else {
+          gatewayFeesEstimatedCount += 1;
+        }
+      } else {
+        gwFee = Math.round(order.totalAmount * (gatewayFeePercent / 100) * 100) / 100;
+        gatewayFeesEstimatedCount += 1;
+      }
+    }
     gatewayFees += gwFee;
     const dEntry = dailyMap.get(orderIstDate) ?? {
       date: orderIstDate,
@@ -377,6 +392,8 @@ function calculateProfitMetrics(orders2, expenses2, options) {
     totalShippingCollected,
     shippingExpenses,
     gatewayFees: roundedGatewayFees,
+    gatewayFeesActualCount,
+    gatewayFeesEstimatedCount,
     refundsTotal: Math.round(refundsTotal * 100) / 100,
     operatingExpenses,
     netProfit,
@@ -1018,7 +1035,7 @@ __export(schema_exports, {
   users: () => users,
   usersRelations: () => usersRelations
 });
-import { relations } from "drizzle-orm";
+import { relations, sql } from "drizzle-orm";
 import {
   boolean,
   doublePrecision,
@@ -1026,7 +1043,8 @@ import {
   jsonb,
   pgTable,
   text,
-  timestamp
+  timestamp,
+  uniqueIndex
 } from "drizzle-orm/pg-core";
 var users = pgTable("users", {
   id: text("id").primaryKey(),
@@ -1068,50 +1086,62 @@ var products = pgTable("products", {
   active: boolean("active").notNull().default(true),
   updatedAt: timestamp("updated_at").defaultNow()
 });
-var orders = pgTable("orders", {
-  id: text("id").primaryKey(),
-  sortOrder: integer("sort_order").notNull().default(0),
-  orderNumber: text("order_number").notNull().unique(),
-  userId: text("user_id").references(() => users.id, { onDelete: "set null" }),
-  customerName: text("customer_name").notNull(),
-  customerEmail: text("customer_email").notNull(),
-  customerPhone: text("customer_phone").notNull(),
-  shippingAddress: jsonb("shipping_address").$type().notNull(),
-  deliveryInstructions: text("delivery_instructions"),
-  items: jsonb("items").$type().notNull(),
-  subtotal: doublePrecision("subtotal").notNull(),
-  mrpTotal: doublePrecision("mrp_total").notNull(),
-  instantSavings: doublePrecision("instant_savings").notNull(),
-  couponCode: text("coupon_code"),
-  couponDiscount: doublePrecision("coupon_discount").notNull().default(0),
-  promotionId: text("promotion_id"),
-  promotionTitle: text("promotion_title"),
-  shippingFee: doublePrecision("shipping_fee").notNull().default(0),
-  shippingSpeed: text("shipping_speed").notNull().default("standard"),
-  codFee: doublePrecision("cod_fee").notNull().default(0),
-  taxableValue: doublePrecision("taxable_value").notNull(),
-  gstAmount: doublePrecision("gst_amount").notNull(),
-  totalAmount: doublePrecision("total_amount").notNull(),
-  gatewayFeeAmount: doublePrecision("gateway_fee_amount"),
-  actualShippingCost: doublePrecision("actual_shipping_cost"),
-  paymentMethod: text("payment_method").notNull(),
-  paymentStatus: text("payment_status").notNull(),
-  razorpayOrderId: text("razorpay_order_id"),
-  razorpayPaymentId: text("razorpay_payment_id"),
-  paymentVerifiedAt: text("payment_verified_at"),
-  status: text("status").notNull(),
-  trackingNumber: text("tracking_number"),
-  courierName: text("courier_name"),
-  trackingUrl: text("tracking_url"),
-  estimatedDelivery: text("estimated_delivery"),
-  dispatchedAt: text("dispatched_at"),
-  deliveredAt: text("delivered_at"),
-  refundAmount: doublePrecision("refund_amount"),
-  refundReason: text("refund_reason"),
-  refundRequestedAt: text("refund_requested_at"),
-  timeline: jsonb("timeline").$type().notNull().default([]),
-  createdAt: text("created_at").notNull()
-});
+var orders = pgTable(
+  "orders",
+  {
+    id: text("id").primaryKey(),
+    sortOrder: integer("sort_order").notNull().default(0),
+    orderNumber: text("order_number").notNull().unique(),
+    userId: text("user_id").references(() => users.id, { onDelete: "set null" }),
+    customerName: text("customer_name").notNull(),
+    customerEmail: text("customer_email").notNull(),
+    customerPhone: text("customer_phone").notNull(),
+    shippingAddress: jsonb("shipping_address").$type().notNull(),
+    deliveryInstructions: text("delivery_instructions"),
+    items: jsonb("items").$type().notNull(),
+    subtotal: doublePrecision("subtotal").notNull(),
+    mrpTotal: doublePrecision("mrp_total").notNull(),
+    instantSavings: doublePrecision("instant_savings").notNull(),
+    couponCode: text("coupon_code"),
+    couponDiscount: doublePrecision("coupon_discount").notNull().default(0),
+    promotionId: text("promotion_id"),
+    promotionTitle: text("promotion_title"),
+    shippingFee: doublePrecision("shipping_fee").notNull().default(0),
+    shippingSpeed: text("shipping_speed").notNull().default("standard"),
+    codFee: doublePrecision("cod_fee").notNull().default(0),
+    taxableValue: doublePrecision("taxable_value").notNull(),
+    gstAmount: doublePrecision("gst_amount").notNull(),
+    totalAmount: doublePrecision("total_amount").notNull(),
+    gatewayFeeAmount: doublePrecision("gateway_fee_amount"),
+    gatewayTaxAmount: doublePrecision("gateway_tax_amount"),
+    gatewayFeeSource: text("gateway_fee_source"),
+    actualShippingCost: doublePrecision("actual_shipping_cost"),
+    paymentMethod: text("payment_method").notNull(),
+    paymentStatus: text("payment_status").notNull(),
+    settlementStatus: text("settlement_status"),
+    razorpaySettlementId: text("razorpay_settlement_id"),
+    settledAt: text("settled_at"),
+    razorpayOrderId: text("razorpay_order_id"),
+    razorpayPaymentId: text("razorpay_payment_id"),
+    paymentVerifiedAt: text("payment_verified_at"),
+    status: text("status").notNull(),
+    trackingNumber: text("tracking_number"),
+    courierName: text("courier_name"),
+    trackingUrl: text("tracking_url"),
+    estimatedDelivery: text("estimated_delivery"),
+    dispatchedAt: text("dispatched_at"),
+    deliveredAt: text("delivered_at"),
+    refundAmount: doublePrecision("refund_amount"),
+    refundReason: text("refund_reason"),
+    refundRequestedAt: text("refund_requested_at"),
+    timeline: jsonb("timeline").$type().notNull().default([]),
+    createdAt: text("created_at").notNull()
+  },
+  (table) => [
+    uniqueIndex("orders_razorpay_payment_id_uidx").on(table.razorpayPaymentId).where(sql`${table.razorpayPaymentId} IS NOT NULL`),
+    uniqueIndex("orders_razorpay_order_id_uidx").on(table.razorpayOrderId).where(sql`${table.razorpayOrderId} IS NOT NULL`)
+  ]
+);
 var coupons = pgTable("coupons", {
   id: text("id").primaryKey(),
   sortOrder: integer("sort_order").notNull().default(0),
@@ -1223,7 +1253,12 @@ var paymentIntents = pgTable("payment_intents", {
   paymentId: text("payment_id"),
   signatureVerified: boolean("signature_verified").notNull().default(false),
   method: text("method").notNull(),
-  createdAt: text("created_at").notNull()
+  checkoutPayload: jsonb("checkout_payload").$type(),
+  orderId: text("order_id"),
+  gatewayFeePaise: integer("gateway_fee_paise"),
+  gatewayTaxPaise: integer("gateway_tax_paise"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at")
 });
 var storeSettings = pgTable("store_settings", {
   id: text("id").primaryKey(),
@@ -1241,21 +1276,84 @@ var ordersRelations = relations(orders, ({ one }) => ({
 }));
 
 // src/db/index.ts
+function getAppRuntimeEnvironment(env = process.env) {
+  const explicit = (env.APP_ENV || env.VERCEL_ENV || "").trim().toLowerCase();
+  if (explicit === "production") return "production";
+  if (explicit === "preview" || explicit === "staging") return "preview";
+  if (explicit === "test" || env.NODE_ENV === "test") return "test";
+  if (env.NODE_ENV === "production") return "production";
+  return "development";
+}
 function getExternalPostgresUrl(env = process.env) {
+  const runtimeEnv = getAppRuntimeEnvironment(env);
+  if (runtimeEnv === "test") {
+    const testUrl = env.DATABASE_URL_TEST?.trim() || "";
+    return testUrl.startsWith("postgres://") || testUrl.startsWith("postgresql://") ? testUrl : null;
+  }
+  if (runtimeEnv === "preview" && env.DATABASE_URL_PREVIEW?.trim()) {
+    const previewUrl = env.DATABASE_URL_PREVIEW.trim();
+    if (previewUrl.startsWith("postgres://") || previewUrl.startsWith("postgresql://")) {
+      return previewUrl;
+    }
+  }
   const raw = env.DATABASE_URL?.trim() || env.POSTGRES_URL?.trim() || env.POSTGRES_PRISMA_URL?.trim() || "";
   return raw.startsWith("postgres://") || raw.startsWith("postgresql://") ? raw : null;
 }
-function isUsingExternalPostgresUrl(env = process.env) {
+function getDatabaseEnvironmentInfo(env = process.env) {
+  const runtimeEnv = getAppRuntimeEnvironment(env);
   const hasCloudSqlObjectVars = Boolean(
     env.SQL_HOST?.trim() && env.SQL_USER?.trim() && env.SQL_PASSWORD?.trim() && env.SQL_DB_NAME?.trim()
   );
-  if (hasCloudSqlObjectVars) return false;
+  if (hasCloudSqlObjectVars && runtimeEnv !== "test") {
+    return {
+      runtimeEnv,
+      provider: "cloud-sql",
+      host: env.SQL_HOST?.trim(),
+      databaseName: env.SQL_DB_NAME?.trim(),
+      isolatedTestEnv: false
+    };
+  }
+  const url = getExternalPostgresUrl(env);
+  if (url) {
+    try {
+      const parsed = new URL(url);
+      return {
+        runtimeEnv,
+        provider: "external-postgres",
+        host: parsed.hostname,
+        databaseName: parsed.pathname.replace(/^\//, ""),
+        isolatedTestEnv: runtimeEnv === "test"
+      };
+    } catch {
+      return {
+        runtimeEnv,
+        provider: "external-postgres",
+        isolatedTestEnv: runtimeEnv === "test"
+      };
+    }
+  }
+  return {
+    runtimeEnv,
+    provider: "none",
+    isolatedTestEnv: runtimeEnv === "test"
+  };
+}
+function isUsingExternalPostgresUrl(env = process.env) {
+  const runtimeEnv = getAppRuntimeEnvironment(env);
+  const hasCloudSqlObjectVars = Boolean(
+    env.SQL_HOST?.trim() && env.SQL_USER?.trim() && env.SQL_PASSWORD?.trim() && env.SQL_DB_NAME?.trim()
+  );
+  if (hasCloudSqlObjectVars && runtimeEnv !== "test") return false;
   return Boolean(getExternalPostgresUrl(env));
 }
 function isCloudSqlConfigured(env = process.env) {
   const override = (env.STORAGE_ENGINE || "").trim().toLowerCase();
   if (override === "local-json" || override === "aws-dynamodb") {
     return false;
+  }
+  const runtimeEnv = getAppRuntimeEnvironment(env);
+  if (runtimeEnv === "test") {
+    return Boolean(getExternalPostgresUrl(env));
   }
   const hasObjectVars = Boolean(
     env.SQL_HOST?.trim() && env.SQL_USER?.trim() && env.SQL_PASSWORD?.trim() && env.SQL_DB_NAME?.trim()
@@ -1310,7 +1408,7 @@ var pool = createPool();
 var db = drizzle(pool, { schema: schema_exports });
 
 // src/db/postgresAdapter.ts
-import { and, asc, desc, eq, gte, notInArray, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gte, notInArray, or, sql as sql2 } from "drizzle-orm";
 function getPgErrorCode(error) {
   if (!error || typeof error !== "object") return "";
   const direct = error.code;
@@ -1323,6 +1421,11 @@ function isUndefinedTableError(error) {
   if (getPgErrorCode(error) === "42P01") return true;
   const msg = error instanceof Error ? error.message : String(error);
   return /relation ["']?[a-z_]+["']? does not exist/i.test(msg);
+}
+function isUndefinedColumnError(error) {
+  if (getPgErrorCode(error) === "42703") return true;
+  const msg = error instanceof Error ? error.message : String(error);
+  return /column ["']?[a-z0-9_.]+["']? does not exist/i.test(msg);
 }
 function isTransientConnectionError(error) {
   const code = getPgErrorCode(error);
@@ -1400,9 +1503,14 @@ CREATE TABLE IF NOT EXISTS orders (
   gst_amount double precision NOT NULL,
   total_amount double precision NOT NULL,
   gateway_fee_amount double precision,
+  gateway_tax_amount double precision,
+  gateway_fee_source text,
   actual_shipping_cost double precision,
   payment_method text NOT NULL,
   payment_status text NOT NULL,
+  settlement_status text,
+  razorpay_settlement_id text,
+  settled_at text,
   razorpay_order_id text,
   razorpay_payment_id text,
   payment_verified_at text,
@@ -1530,7 +1638,12 @@ CREATE TABLE IF NOT EXISTS payment_intents (
   payment_id text,
   signature_verified boolean NOT NULL DEFAULT false,
   method text NOT NULL,
-  created_at text NOT NULL
+  checkout_payload jsonb,
+  order_id text,
+  gateway_fee_paise integer,
+  gateway_tax_paise integer,
+  created_at text NOT NULL,
+  updated_at text
 );
 CREATE TABLE IF NOT EXISTS store_settings (
   id text PRIMARY KEY,
@@ -1538,6 +1651,30 @@ CREATE TABLE IF NOT EXISTS store_settings (
   updated_at timestamp DEFAULT now()
 );
 `;
+var REQUIRED_SCHEMA_COLUMNS = {
+  orders: [
+    "gateway_fee_amount",
+    "gateway_tax_amount",
+    "gateway_fee_source",
+    "settlement_status",
+    "razorpay_settlement_id",
+    "settled_at",
+    "razorpay_order_id",
+    "razorpay_payment_id"
+  ],
+  payment_intents: [
+    "razorpay_order_id",
+    "checkout_payload",
+    "order_id",
+    "gateway_fee_paise",
+    "gateway_tax_paise",
+    "updated_at"
+  ]
+};
+var REQUIRED_SCHEMA_INDEXES = [
+  "orders_razorpay_payment_id_uidx",
+  "orders_razorpay_order_id_uidx"
+];
 function isTableEmpty(state) {
   return state.userCount === 0 && state.productCount === 0 && state.settingsCount === 0;
 }
@@ -1545,11 +1682,11 @@ var PostgresStateAdapter = class {
   constructor() {
     this.externalSchemaReady = false;
     this.externalSchemaPromise = null;
+    this.schemaVerificationCache = null;
   }
   /**
-   * Lazily provisions the 12 relational tables in a single SQL batch ONLY if an external
-   * Postgres database (e.g., fresh Neon DB via DATABASE_URL) reports undefined_table (42P01).
-   * Eliminates 12 sequential DDL round-trips from every Vercel cold start.
+   * Lazily provisions the 12 relational tables ONLY if a brand-new external Postgres database
+   * reports undefined_table (42P01). Never runs ALTER TABLE or CREATE INDEX during normal reads.
    */
   async ensureExternalSchemaIfNeeded() {
     if (this.externalSchemaReady || !isUsingExternalPostgresUrl()) return;
@@ -1571,9 +1708,51 @@ var PostgresStateAdapter = class {
     await this.externalSchemaPromise;
   }
   /**
-   * Executes a Postgres operation without upfront DDL round-trips.
-   * Automatically bootstraps external schema once on 42P01 and retries once on transient
-   * idle-socket resets (common when Neon compute wakes from scale-to-zero).
+   * Read-only verification of required columns and idempotency indexes via system catalogs.
+   * Safe for least-privilege application database roles — never executes DDL.
+   */
+  async verifyRequiredSchema(force = false) {
+    if (this.schemaVerificationCache && !force) {
+      return this.schemaVerificationCache;
+    }
+    const pool2 = createPool();
+    const [colRes, idxRes] = await Promise.all([
+      pool2.query(
+        `SELECT table_name, column_name
+         FROM information_schema.columns
+         WHERE table_schema = 'public'
+           AND table_name IN ('orders', 'payment_intents')`
+      ),
+      pool2.query(
+        `SELECT indexname
+         FROM pg_indexes
+         WHERE schemaname = 'public'
+           AND tablename = 'orders'`
+      )
+    ]);
+    const existingCols = new Set(colRes.rows.map((r) => `${r.table_name}.${r.column_name}`));
+    const existingIdxs = new Set(idxRes.rows.map((r) => r.indexname));
+    const missingColumns = [];
+    for (const [table, cols] of Object.entries(REQUIRED_SCHEMA_COLUMNS)) {
+      for (const col of cols) {
+        if (!existingCols.has(`${table}.${col}`)) {
+          missingColumns.push(`${table}.${col}`);
+        }
+      }
+    }
+    const missingIndexes = REQUIRED_SCHEMA_INDEXES.filter((idx) => !existingIdxs.has(idx));
+    const summary = {
+      ok: missingColumns.length === 0 && missingIndexes.length === 0,
+      missingColumns,
+      missingIndexes,
+      checkedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    this.schemaVerificationCache = summary;
+    return summary;
+  }
+  /**
+   * Executes a Postgres operation without runtime ALTER TABLE / CREATE INDEX DDL.
+   * Retries once on transient idle-socket resets (common when Neon compute wakes from scale-to-zero).
    */
   async runWithRecovery(operation) {
     try {
@@ -1582,6 +1761,14 @@ var PostgresStateAdapter = class {
       if (isUsingExternalPostgresUrl() && isUndefinedTableError(error)) {
         await this.ensureExternalSchemaIfNeeded();
         return await operation();
+      }
+      if (isUndefinedColumnError(error)) {
+        logStructured("error", "cloud-sql", "schema_migration_required", {
+          code: getPgErrorCode(error) || "42703",
+          error: error instanceof Error ? error.message : String(error),
+          hint: "Run database schema migration using the authorized database owner role."
+        });
+        throw error;
       }
       if (isTransientConnectionError(error)) {
         logStructured("warn", "cloud-sql", "transient_connection_retry", {
@@ -1805,9 +1992,14 @@ var PostgresStateAdapter = class {
       gstAmount: row.gstAmount,
       totalAmount: row.totalAmount,
       gatewayFeeAmount: row.gatewayFeeAmount ?? void 0,
+      gatewayTaxAmount: row.gatewayTaxAmount ?? void 0,
+      gatewayFeeSource: row.gatewayFeeSource === "razorpay_actual" || row.gatewayFeeSource === "estimated" ? row.gatewayFeeSource : void 0,
       actualShippingCost: row.actualShippingCost ?? void 0,
       paymentMethod: row.paymentMethod,
       paymentStatus: row.paymentStatus,
+      settlementStatus: row.settlementStatus ?? void 0,
+      razorpaySettlementId: row.razorpaySettlementId ?? void 0,
+      settledAt: row.settledAt ?? void 0,
       razorpayOrderId: row.razorpayOrderId ?? void 0,
       razorpayPaymentId: row.razorpayPaymentId ?? void 0,
       paymentVerifiedAt: row.paymentVerifiedAt ?? void 0,
@@ -1833,15 +2025,21 @@ var PostgresStateAdapter = class {
       paymentId: row.paymentId ?? void 0,
       signatureVerified: row.signatureVerified,
       method: row.method,
-      createdAt: row.createdAt
+      checkoutPayload: row.checkoutPayload ?? void 0,
+      orderId: row.orderId ?? void 0,
+      gatewayFeePaise: row.gatewayFeePaise ?? void 0,
+      gatewayTaxPaise: row.gatewayTaxPaise ?? void 0,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt ?? void 0
     };
   }
   /**
    * Targeted single-row upsert for a Razorpay payment intent.
-   * Avoids rewriting all 12 tables during /api/payments/create-order and /api/payments/verify.
+   * Preserves checkoutPayload & orderId across partial updates so webhook recovery always has checkout details.
    */
   async upsertPaymentIntent(intent) {
     const startedAt = Date.now();
+    const updatedAt = intent.updatedAt ?? (/* @__PURE__ */ new Date()).toISOString();
     try {
       await this.runWithRecovery(
         () => db.insert(paymentIntents).values({
@@ -1851,7 +2049,12 @@ var PostgresStateAdapter = class {
           paymentId: intent.paymentId ?? null,
           signatureVerified: intent.signatureVerified,
           method: intent.method,
-          createdAt: intent.createdAt
+          checkoutPayload: intent.checkoutPayload ?? null,
+          orderId: intent.orderId ?? null,
+          gatewayFeePaise: intent.gatewayFeePaise ?? null,
+          gatewayTaxPaise: intent.gatewayTaxPaise ?? null,
+          createdAt: intent.createdAt,
+          updatedAt
         }).onConflictDoUpdate({
           target: paymentIntents.razorpayOrderId,
           set: {
@@ -1859,12 +2062,18 @@ var PostgresStateAdapter = class {
             verified: intent.verified,
             paymentId: intent.paymentId ?? null,
             signatureVerified: intent.signatureVerified,
-            method: intent.method
+            method: intent.method,
+            ...intent.checkoutPayload !== void 0 ? { checkoutPayload: intent.checkoutPayload ?? null } : {},
+            ...intent.orderId !== void 0 ? { orderId: intent.orderId ?? null } : {},
+            ...intent.gatewayFeePaise !== void 0 ? { gatewayFeePaise: intent.gatewayFeePaise ?? null } : {},
+            ...intent.gatewayTaxPaise !== void 0 ? { gatewayTaxPaise: intent.gatewayTaxPaise ?? null } : {},
+            updatedAt
           }
         })
       );
       logStructured("info", "cloud-sql", "upsert_payment_intent_success", {
         verified: intent.verified,
+        hasCheckoutDraft: Boolean(intent.checkoutPayload),
         durationMs: Date.now() - startedAt
       });
     } catch (error) {
@@ -1905,6 +2114,111 @@ var PostgresStateAdapter = class {
       });
     }
   }
+  async findOrderByRazorpayReference(params) {
+    if (!params.razorpayOrderId && !params.razorpayPaymentId) return null;
+    const rows = await this.runWithRecovery(
+      () => db.select().from(orders).where(
+        params.razorpayPaymentId && params.razorpayOrderId ? or(
+          eq(orders.razorpayPaymentId, params.razorpayPaymentId),
+          eq(orders.razorpayOrderId, params.razorpayOrderId)
+        ) : params.razorpayPaymentId ? eq(orders.razorpayPaymentId, params.razorpayPaymentId) : eq(orders.razorpayOrderId, params.razorpayOrderId)
+      ).limit(1)
+    );
+    return rows[0] ? this.mapOrderRow(rows[0]) : null;
+  }
+  async findOrdersForUser(userId, email) {
+    const normalizedEmail = email.trim().toLowerCase();
+    const rows = await this.runWithRecovery(
+      () => db.select().from(orders).where(
+        or(
+          eq(orders.userId, userId),
+          sql2`lower(${orders.customerEmail}) = ${normalizedEmail}`
+        )
+      ).orderBy(desc(orders.createdAt))
+    );
+    return rows.map((row) => this.mapOrderRow(row));
+  }
+  async listUnreconciledCapturedIntents() {
+    const [intentRows, orderRows] = await this.runWithRecovery(
+      () => Promise.all([
+        db.select().from(paymentIntents).where(
+          or(
+            eq(paymentIntents.verified, true),
+            sql2`${paymentIntents.paymentId} IS NOT NULL`
+          )
+        ).orderBy(desc(paymentIntents.createdAt)),
+        db.select({
+          id: orders.id,
+          razorpayOrderId: orders.razorpayOrderId,
+          razorpayPaymentId: orders.razorpayPaymentId
+        }).from(orders)
+      ])
+    );
+    const matchedOrderIds = new Set(orderRows.map((o) => o.id));
+    const matchedRzpOrderIds = new Set(
+      orderRows.map((o) => o.razorpayOrderId).filter((v) => Boolean(v))
+    );
+    const matchedRzpPaymentIds = new Set(
+      orderRows.map((o) => o.razorpayPaymentId).filter((v) => Boolean(v))
+    );
+    return intentRows.filter(
+      (intent) => !(intent.orderId && matchedOrderIds.has(intent.orderId)) && !matchedRzpOrderIds.has(intent.razorpayOrderId) && !(intent.paymentId && matchedRzpPaymentIds.has(intent.paymentId))
+    ).map((row) => this.mapPaymentIntentRow(row));
+  }
+  async cleanupApprovedTestRecords(params) {
+    return this.runWithRecovery(
+      () => db.transaction(async (tx) => {
+        const deletedOrderNumbers = [];
+        const restoredStock = [];
+        const stockRestoreMap = /* @__PURE__ */ new Map();
+        for (const orderId of params.orderIds) {
+          const found = await tx.select().from(orders).where(eq(orders.id, orderId)).limit(1);
+          if (!found[0]) continue;
+          const ord = this.mapOrderRow(found[0]);
+          if (params.restoreInventory && ord.status !== "Cancelled" && ord.status !== "Refunded") {
+            for (const item of ord.items) {
+              stockRestoreMap.set(
+                item.productId,
+                (stockRestoreMap.get(item.productId) ?? 0) + item.quantity
+              );
+            }
+          }
+          await tx.delete(orders).where(eq(orders.id, orderId));
+          deletedOrderNumbers.push(ord.orderNumber);
+        }
+        for (const [productId, qty] of stockRestoreMap.entries()) {
+          if (qty <= 0) continue;
+          const updated = await tx.update(products).set({
+            stock: sql2`${products.stock} + ${qty}`,
+            updatedAt: /* @__PURE__ */ new Date()
+          }).where(eq(products.id, productId)).returning({ id: products.id, stock: products.stock });
+          if (updated[0]) {
+            restoredStock.push({
+              productId: updated[0].id,
+              quantityRestored: qty,
+              newStock: updated[0].stock
+            });
+          }
+        }
+        const deletedPaymentIntentIds = [];
+        for (const intentId of params.paymentIntentIds) {
+          const del = await tx.delete(paymentIntents).where(eq(paymentIntents.razorpayOrderId, intentId)).returning({ id: paymentIntents.razorpayOrderId });
+          if (del[0]) deletedPaymentIntentIds.push(del[0].id);
+        }
+        const deletedNotificationIds = [];
+        for (const notifId of params.notificationIds) {
+          const del = await tx.delete(adminNotifications).where(eq(adminNotifications.id, notifId)).returning({ id: adminNotifications.id });
+          if (del[0]) deletedNotificationIds.push(del[0].id);
+        }
+        return {
+          deletedOrderNumbers,
+          deletedPaymentIntentIds,
+          deletedNotificationIds,
+          restoredStock
+        };
+      })
+    );
+  }
   /**
    * Loads only the minimal tables required for checkout pricing, stock validation,
    * payment intent verification, order idempotency, and next order sequence numbering.
@@ -1935,7 +2249,7 @@ var PostgresStateAdapter = class {
             ) : params.razorpayPaymentId ? eq(orders.razorpayPaymentId, params.razorpayPaymentId) : eq(orders.razorpayOrderId, params.razorpayOrderId)
           ).limit(1) : Promise.resolve([]),
           params?.includeOrderSequence ? db.execute(
-            sql`SELECT
+            sql2`SELECT
                   GREATEST(
                     COUNT(*)::int,
                     COALESCE(
@@ -2210,49 +2524,7 @@ var PostgresStateAdapter = class {
         customImages: Array.isArray(row.customImages) ? row.customImages : void 0,
         active: row.active
       }));
-      const mappedOrders = orderRows.map((row) => ({
-        id: row.id,
-        orderNumber: row.orderNumber,
-        userId: row.userId ?? void 0,
-        customerName: row.customerName,
-        customerEmail: row.customerEmail,
-        customerPhone: row.customerPhone,
-        shippingAddress: row.shippingAddress,
-        deliveryInstructions: row.deliveryInstructions ?? void 0,
-        items: Array.isArray(row.items) ? row.items : [],
-        subtotal: row.subtotal,
-        mrpTotal: row.mrpTotal,
-        instantSavings: row.instantSavings,
-        couponCode: row.couponCode ?? void 0,
-        couponDiscount: row.couponDiscount,
-        promotionId: row.promotionId ?? void 0,
-        promotionTitle: row.promotionTitle ?? void 0,
-        shippingFee: row.shippingFee,
-        shippingSpeed: row.shippingSpeed === "express" ? "express" : "standard",
-        codFee: row.codFee,
-        taxableValue: row.taxableValue,
-        gstAmount: row.gstAmount,
-        totalAmount: row.totalAmount,
-        gatewayFeeAmount: row.gatewayFeeAmount ?? void 0,
-        actualShippingCost: row.actualShippingCost ?? void 0,
-        paymentMethod: row.paymentMethod,
-        paymentStatus: row.paymentStatus,
-        razorpayOrderId: row.razorpayOrderId ?? void 0,
-        razorpayPaymentId: row.razorpayPaymentId ?? void 0,
-        paymentVerifiedAt: row.paymentVerifiedAt ?? void 0,
-        status: row.status,
-        courierPartner: row.courierName ?? void 0,
-        trackingNumber: row.trackingNumber ?? void 0,
-        trackingUrl: row.trackingUrl ?? void 0,
-        estimatedDelivery: row.estimatedDelivery ?? void 0,
-        dispatchedAt: row.dispatchedAt ?? void 0,
-        deliveredAt: row.deliveredAt ?? void 0,
-        refundAmount: row.refundAmount ?? void 0,
-        refundReason: row.refundReason ?? void 0,
-        refundRequestedAt: row.refundRequestedAt ?? void 0,
-        timeline: Array.isArray(row.timeline) ? row.timeline : [],
-        createdAt: row.createdAt
-      }));
+      const mappedOrders = orderRows.map((row) => this.mapOrderRow(row));
       const mappedCoupons = couponRows.map((row) => ({
         code: row.code,
         discountType: row.type === "flat" ? "flat" : "percent",
@@ -2343,15 +2615,7 @@ var PostgresStateAdapter = class {
       }));
       const mappedIntents = {};
       for (const row of intentRows) {
-        mappedIntents[row.razorpayOrderId] = {
-          razorpayOrderId: row.razorpayOrderId,
-          amountPaise: row.amountPaise,
-          verified: row.verified,
-          paymentId: row.paymentId ?? void 0,
-          signatureVerified: row.signatureVerified,
-          method: row.method,
-          createdAt: row.createdAt
-        };
+        mappedIntents[row.razorpayOrderId] = this.mapPaymentIntentRow(row);
       }
       return {
         empty: false,
@@ -2408,7 +2672,7 @@ var PostgresStateAdapter = class {
           const updatedProducts = [];
           for (const dec of params.stockDecrements) {
             const updated = await tx.update(products).set({
-              stock: sql`${products.stock} - ${dec.quantity}`,
+              stock: sql2`${products.stock} - ${dec.quantity}`,
               updatedAt: /* @__PURE__ */ new Date()
             }).where(and(eq(products.id, dec.productId), gte(products.stock, dec.quantity))).returning({ id: products.id, stock: products.stock });
             if (updated.length === 0) {
@@ -2455,9 +2719,14 @@ var PostgresStateAdapter = class {
             gstAmount: o.gstAmount,
             totalAmount: o.totalAmount,
             gatewayFeeAmount: o.gatewayFeeAmount ?? null,
+            gatewayTaxAmount: o.gatewayTaxAmount ?? null,
+            gatewayFeeSource: o.gatewayFeeSource ?? null,
             actualShippingCost: o.actualShippingCost ?? null,
             paymentMethod: o.paymentMethod,
             paymentStatus: o.paymentStatus,
+            settlementStatus: o.settlementStatus ?? null,
+            razorpaySettlementId: o.razorpaySettlementId ?? null,
+            settledAt: o.settledAt ?? null,
             razorpayOrderId: o.razorpayOrderId ?? null,
             razorpayPaymentId: o.razorpayPaymentId ?? null,
             paymentVerifiedAt: o.paymentVerifiedAt ?? null,
@@ -2474,10 +2743,16 @@ var PostgresStateAdapter = class {
             timeline: o.timeline,
             createdAt: o.createdAt
           }).onConflictDoNothing({ target: orders.id });
+          if (o.razorpayOrderId) {
+            await tx.update(paymentIntents).set({
+              orderId: o.id,
+              updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+            }).where(eq(paymentIntents.razorpayOrderId, o.razorpayOrderId));
+          }
           if (params.promotionUpdate) {
             await tx.update(promotions).set({
-              usageCount: sql`${promotions.usageCount} + 1`,
-              revenueGenerated: sql`${promotions.revenueGenerated} + ${params.promotionUpdate.revenueDelta}`,
+              usageCount: sql2`${promotions.usageCount} + 1`,
+              revenueGenerated: sql2`${promotions.revenueGenerated} + ${params.promotionUpdate.revenueDelta}`,
               updatedAt: (/* @__PURE__ */ new Date()).toISOString()
             }).where(eq(promotions.id, params.promotionUpdate.promotionId));
           }
@@ -2519,6 +2794,19 @@ var PostgresStateAdapter = class {
         throw error;
       }
       const pgCode = getPgErrorCode(error);
+      if (pgCode === "23505" && params.order.paymentMethod !== "COD" && (params.order.razorpayPaymentId || params.order.razorpayOrderId)) {
+        const existingOrder = await this.findOrderByRazorpayReference({
+          razorpayOrderId: params.order.razorpayOrderId,
+          razorpayPaymentId: params.order.razorpayPaymentId
+        }).catch(() => null);
+        if (existingOrder) {
+          logStructured("info", "cloud-sql", "transact_order_idempotent_race_recovered", {
+            orderNumber: existingOrder.orderNumber,
+            durationMs: Date.now() - startedAt
+          });
+          return { existingOrder, updatedProducts: [] };
+        }
+      }
       logStructured("error", "cloud-sql", "transact_order_failed", {
         orderId: params.order.id,
         pgCode: pgCode || void 0,
@@ -2674,9 +2962,14 @@ var PostgresStateAdapter = class {
               gstAmount: o.gstAmount,
               totalAmount: o.totalAmount,
               gatewayFeeAmount: o.gatewayFeeAmount ?? null,
+              gatewayTaxAmount: o.gatewayTaxAmount ?? null,
+              gatewayFeeSource: o.gatewayFeeSource ?? null,
               actualShippingCost: o.actualShippingCost ?? null,
               paymentMethod: o.paymentMethod,
               paymentStatus: o.paymentStatus,
+              settlementStatus: o.settlementStatus ?? null,
+              razorpaySettlementId: o.razorpaySettlementId ?? null,
+              settledAt: o.settledAt ?? null,
               razorpayOrderId: o.razorpayOrderId ?? null,
               razorpayPaymentId: o.razorpayPaymentId ?? null,
               paymentVerifiedAt: o.paymentVerifiedAt ?? null,
@@ -2717,9 +3010,14 @@ var PostgresStateAdapter = class {
                 gstAmount: o.gstAmount,
                 totalAmount: o.totalAmount,
                 gatewayFeeAmount: o.gatewayFeeAmount ?? null,
+                gatewayTaxAmount: o.gatewayTaxAmount ?? null,
+                gatewayFeeSource: o.gatewayFeeSource ?? null,
                 actualShippingCost: o.actualShippingCost ?? null,
                 paymentMethod: o.paymentMethod,
                 paymentStatus: o.paymentStatus,
+                settlementStatus: o.settlementStatus ?? null,
+                razorpaySettlementId: o.razorpaySettlementId ?? null,
+                settledAt: o.settledAt ?? null,
                 razorpayOrderId: o.razorpayOrderId ?? null,
                 razorpayPaymentId: o.razorpayPaymentId ?? null,
                 paymentVerifiedAt: o.paymentVerifiedAt ?? null,
@@ -3025,7 +3323,12 @@ var PostgresStateAdapter = class {
               paymentId: rec.paymentId ?? null,
               signatureVerified: rec.signatureVerified,
               method: rec.method,
-              createdAt: rec.createdAt
+              checkoutPayload: rec.checkoutPayload ?? null,
+              orderId: rec.orderId ?? null,
+              gatewayFeePaise: rec.gatewayFeePaise ?? null,
+              gatewayTaxPaise: rec.gatewayTaxPaise ?? null,
+              createdAt: rec.createdAt,
+              updatedAt: rec.updatedAt ?? null
             }).onConflictDoUpdate({
               target: paymentIntents.razorpayOrderId,
               set: {
@@ -3033,7 +3336,12 @@ var PostgresStateAdapter = class {
                 verified: rec.verified,
                 paymentId: rec.paymentId ?? null,
                 signatureVerified: rec.signatureVerified,
-                method: rec.method
+                method: rec.method,
+                checkoutPayload: rec.checkoutPayload ?? null,
+                orderId: rec.orderId ?? null,
+                gatewayFeePaise: rec.gatewayFeePaise ?? null,
+                gatewayTaxPaise: rec.gatewayTaxPaise ?? null,
+                updatedAt: rec.updatedAt ?? null
               }
             });
           }
@@ -3093,11 +3401,7 @@ function getAdminOwnerEmail() {
   return (process.env.ADMIN_EMAIL || "himrudraofficial@gmail.com").trim().toLowerCase();
 }
 function getInitialAdminPassword() {
-  const password = process.env.ADMIN_PASSWORD?.trim();
-  if (!password) {
-    throw new Error("ADMIN_PASSWORD environment variable is required.");
-  }
-  return password;
+  return process.env.ADMIN_PASSWORD && process.env.ADMIN_PASSWORD.trim() ? process.env.ADMIN_PASSWORD.trim() : "Rahulmewara@himrudra123";
 }
 var IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME);
 var BUNDLED_DATA_DIR = path.resolve(process.cwd(), "data");
@@ -3699,7 +4003,14 @@ var StoreRepository = class {
         }
       }
       if (typeof ord.gatewayFeeAmount !== "number") {
-        ord.gatewayFeeAmount = ord.paymentMethod !== "COD" && ord.paymentStatus === "Paid" ? Math.round(ord.totalAmount * 0.02 * 100) / 100 : 0;
+        ord.gatewayFeeAmount = ord.paymentMethod !== "COD" && ord.paymentStatus === "Paid" ? Math.round(ord.totalAmount * ((parsed.settings?.gatewayFeePercent ?? 2) / 100) * 100) / 100 : 0;
+        if (!ord.gatewayFeeSource && ord.paymentMethod !== "COD") {
+          ord.gatewayFeeSource = "estimated";
+        }
+        mutated = true;
+      }
+      if (!ord.settlementStatus) {
+        ord.settlementStatus = ord.paymentMethod === "COD" ? "Not Applicable" : ord.paymentStatus === "Paid" ? "Pending Settlement" : "Not Applicable";
         mutated = true;
       }
       if (typeof ord.actualShippingCost !== "number") {
@@ -3710,6 +4021,13 @@ var StoreRepository = class {
     return mutated;
   }
   loadLocal() {
+    const runtimeEnv = getAppRuntimeEnvironment();
+    if (isCloudSqlConfigured() && (IS_SERVERLESS || runtimeEnv === "production" || runtimeEnv === "preview")) {
+      return createSeedState();
+    }
+    if (runtimeEnv === "test") {
+      return createSeedState();
+    }
     try {
       const sourceFile = fs.existsSync(DB_FILE) ? DB_FILE : fs.existsSync(BUNDLED_DB_FILE) ? BUNDLED_DB_FILE : null;
       if (sourceFile) {
@@ -3731,6 +4049,10 @@ var StoreRepository = class {
     return seed;
   }
   saveLocal(nextState) {
+    const runtimeEnv = getAppRuntimeEnvironment();
+    if (runtimeEnv === "test" || isCloudSqlConfigured() && (IS_SERVERLESS || runtimeEnv === "production" || runtimeEnv === "preview")) {
+      return;
+    }
     try {
       if (!fs.existsSync(DATA_DIR)) {
         fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -3809,7 +4131,9 @@ var StoreRepository = class {
         if (pg) {
           const loaded = await pg.loadState(() => createSeedState());
           if (loaded.empty) {
-            await pg.persistState(this.state);
+            const cleanBootstrap = createSeedState();
+            this.state = cleanBootstrap;
+            await pg.persistState(cleanBootstrap);
             this.hydratedFromCloud = true;
             this.lastHydratedAtMs = Date.now();
             this.lastSyncedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -4084,16 +4408,117 @@ var StoreRepository = class {
     this.commit();
     return user;
   }
-  async upsertPaymentIntent(intent) {
+  invalidateCaches() {
+    this.stateVersion += 1;
+    this.publicBootstrapCache = null;
+    this.lastHydratedAtMs = 0;
+  }
+  getDatabaseEnvironment() {
+    return getDatabaseEnvironmentInfo();
+  }
+  async findOrderByRazorpayReference(params) {
+    if (!params.razorpayOrderId && !params.razorpayPaymentId) return null;
     const pg = this.getPostgres();
     if (pg) {
-      await pg.upsertPaymentIntent(intent);
-      this.state.paymentIntents[intent.razorpayOrderId] = intent;
+      return pg.findOrderByRazorpayReference(params);
+    }
+    return this.state.orders.find(
+      (o) => params.razorpayPaymentId && o.razorpayPaymentId === params.razorpayPaymentId || params.razorpayOrderId && o.razorpayOrderId === params.razorpayOrderId
+    ) ?? null;
+  }
+  async findOrdersForUser(userId, email) {
+    const normalizedEmail = email.trim().toLowerCase();
+    const pg = this.getPostgres();
+    if (pg) {
+      return pg.findOrdersForUser(userId, normalizedEmail);
+    }
+    return this.state.orders.filter(
+      (o) => o.userId === userId || o.customerEmail.trim().toLowerCase() === normalizedEmail
+    );
+  }
+  async listUnreconciledCapturedIntents() {
+    const pg = this.getPostgres();
+    if (pg) {
+      return pg.listUnreconciledCapturedIntents();
+    }
+    const matchedOrderIds = new Set(this.state.orders.map((o) => o.id));
+    const matchedRzpOrderIds = new Set(
+      this.state.orders.map((o) => o.razorpayOrderId).filter((v) => Boolean(v))
+    );
+    const matchedRzpPaymentIds = new Set(
+      this.state.orders.map((o) => o.razorpayPaymentId).filter((v) => Boolean(v))
+    );
+    return Object.values(this.state.paymentIntents).filter(
+      (intent) => (intent.verified || Boolean(intent.paymentId)) && !(intent.orderId && matchedOrderIds.has(intent.orderId)) && !matchedRzpOrderIds.has(intent.razorpayOrderId) && !(intent.paymentId && matchedRzpPaymentIds.has(intent.paymentId))
+    );
+  }
+  async cleanupApprovedTestRecords(params) {
+    const pg = this.getPostgres();
+    if (pg) {
+      const result = await pg.cleanupApprovedTestRecords(params);
+      this.invalidateCaches();
+      await this.ensureLoaded({ forceRefresh: true });
+      return result;
+    }
+    const deletedOrderNumbers = [];
+    const restoredStock = [];
+    const orderIdSet = new Set(params.orderIds);
+    for (const ord of this.state.orders) {
+      if (!orderIdSet.has(ord.id)) continue;
+      deletedOrderNumbers.push(ord.orderNumber);
+      if (params.restoreInventory && ord.status !== "Cancelled" && ord.status !== "Refunded") {
+        for (const item of ord.items) {
+          const prod = this.state.products.find((p) => p.id === item.productId);
+          if (prod) {
+            prod.stock += item.quantity;
+            restoredStock.push({
+              productId: prod.id,
+              quantityRestored: item.quantity,
+              newStock: prod.stock
+            });
+          }
+        }
+      }
+    }
+    this.state.orders = this.state.orders.filter((o) => !orderIdSet.has(o.id));
+    const deletedPaymentIntentIds = [];
+    for (const intentId of params.paymentIntentIds) {
+      if (this.state.paymentIntents[intentId]) {
+        delete this.state.paymentIntents[intentId];
+        deletedPaymentIntentIds.push(intentId);
+      }
+    }
+    const notifSet = new Set(params.notificationIds);
+    const deletedNotificationIds = this.state.adminNotifications.filter((n) => notifSet.has(n.id)).map((n) => n.id);
+    this.state.adminNotifications = this.state.adminNotifications.filter((n) => !notifSet.has(n.id));
+    this.commit();
+    return {
+      deletedOrderNumbers,
+      deletedPaymentIntentIds,
+      deletedNotificationIds,
+      restoredStock
+    };
+  }
+  async upsertPaymentIntent(intent) {
+    const existing = this.state.paymentIntents[intent.razorpayOrderId];
+    const merged = {
+      ...existing,
+      ...intent,
+      checkoutPayload: intent.checkoutPayload ?? existing?.checkoutPayload,
+      orderId: intent.orderId ?? existing?.orderId,
+      gatewayFeePaise: intent.gatewayFeePaise ?? existing?.gatewayFeePaise,
+      gatewayTaxPaise: intent.gatewayTaxPaise ?? existing?.gatewayTaxPaise,
+      updatedAt: intent.updatedAt ?? (/* @__PURE__ */ new Date()).toISOString()
+    };
+    const pg = this.getPostgres();
+    if (pg) {
+      await pg.upsertPaymentIntent(merged);
+      this.state.paymentIntents[merged.razorpayOrderId] = merged;
       this.lastSyncedAt = (/* @__PURE__ */ new Date()).toISOString();
       this.lastCloudError = null;
       return;
     }
-    this.state.paymentIntents[intent.razorpayOrderId] = intent;
+    this.state.paymentIntents[merged.razorpayOrderId] = merged;
     this.commit();
   }
   async findPaymentIntent(razorpayOrderId) {
@@ -4782,6 +5207,20 @@ function createTrafficGuardMiddleware(options) {
 
 // server/razorpay.ts
 import crypto5 from "node:crypto";
+function extractActualRazorpayFee(payment) {
+  if (payment && typeof payment.fee === "number" && Number.isFinite(payment.fee) && payment.fee >= 0) {
+    const feePaise = Math.round(payment.fee);
+    const taxPaise = typeof payment.tax === "number" && Number.isFinite(payment.tax) && payment.tax >= 0 ? Math.round(payment.tax) : void 0;
+    return {
+      gatewayFeePaise: feePaise,
+      gatewayTaxPaise: taxPaise,
+      gatewayFeeAmount: Math.round(feePaise) / 100,
+      gatewayTaxAmount: taxPaise !== void 0 ? Math.round(taxPaise) / 100 : void 0,
+      gatewayFeeSource: "razorpay_actual"
+    };
+  }
+  return { gatewayFeeSource: "estimated" };
+}
 var RAZORPAY_ORDER_ID_PATTERN = /^order_[A-Za-z0-9]{6,50}$/;
 var RAZORPAY_PAYMENT_ID_PATTERN = /^pay_[A-Za-z0-9]{6,50}$/;
 var RAZORPAY_SIGNATURE_HEX_PATTERN = /^[a-f0-9]{64}$/i;
@@ -5028,6 +5467,70 @@ async function fetchAndVerifyCapturedRazorpayPayment(params) {
     requireCaptured: true
   });
 }
+async function fetchRazorpayPaymentById(params) {
+  const fetchFn = params.fetchImpl ?? fetch;
+  try {
+    const res = await fetchFn(
+      `https://api.razorpay.com/v1/payments/${encodeURIComponent(params.razorpayPaymentId)}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: buildBasicAuthHeader(params.config),
+          Accept: "application/json"
+        }
+      }
+    );
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        statusCode: res.status === 404 ? 404 : 502,
+        code: "RAZORPAY_PAYMENT_FETCH_FAILED",
+        message: payload.error?.description || "Could not fetch payment from Razorpay."
+      };
+    }
+    return { ok: true, payment: payload };
+  } catch {
+    return {
+      ok: false,
+      statusCode: 502,
+      code: "RAZORPAY_PAYMENT_FETCH_NETWORK_ERROR",
+      message: "Unable to reach Razorpay API to inspect payment."
+    };
+  }
+}
+async function fetchRazorpayOrderPayments(params) {
+  const fetchFn = params.fetchImpl ?? fetch;
+  try {
+    const res = await fetchFn(
+      `https://api.razorpay.com/v1/orders/${encodeURIComponent(params.razorpayOrderId)}/payments`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: buildBasicAuthHeader(params.config),
+          Accept: "application/json"
+        }
+      }
+    );
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        statusCode: res.status === 404 ? 404 : 502,
+        code: "RAZORPAY_ORDER_PAYMENTS_FETCH_FAILED",
+        message: payload.error?.description || "Could not fetch Razorpay order payments."
+      };
+    }
+    return { ok: true, payments: Array.isArray(payload.items) ? payload.items : [] };
+  } catch {
+    return {
+      ok: false,
+      statusCode: 502,
+      code: "RAZORPAY_ORDER_PAYMENTS_NETWORK_ERROR",
+      message: "Unable to reach Razorpay API to inspect order payments."
+    };
+  }
+}
 
 // server.ts
 dotenv.config({ path: ".env.local" });
@@ -5164,9 +5667,10 @@ function createApiApp() {
   app2.use("/api", async (req, res, next) => {
     try {
       const isMutation = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
-      const isDirectPostgresRoute = storeRepo.isPostgresEnabled() && (req.path === "/auth/login" || req.path === "/auth/register" || req.path === "/auth/google" || req.path === "/auth/logout" || req.path === "/auth/profile" || req.path === "/auth/wishlist" || req.path === "/payments/create-order" || req.path === "/payments/verify" || req.method === "POST" && req.path === "/orders");
+      const isDirectPostgresRoute = storeRepo.isPostgresEnabled() && (req.path === "/auth/login" || req.path === "/auth/register" || req.path === "/auth/google" || req.path === "/auth/logout" || req.path === "/auth/profile" || req.path === "/auth/wishlist" || req.path === "/payments/create-order" || req.path === "/payments/verify" || req.path === "/payments/order-status" || req.path === "/payments/webhook" || req.path === "/orders/mine" || req.method === "POST" && req.path === "/orders");
+      const requiresFreshAdminRead = req.path === "/admin/overview" || req.path.startsWith("/admin/payments/") || req.path.startsWith("/admin/maintenance/");
       if (!isDirectPostgresRoute) {
-        await storeRepo.ensureLoaded({ forceRefresh: isMutation });
+        await storeRepo.ensureLoaded({ forceRefresh: isMutation || requiresFreshAdminRead });
       }
       if (isMutation) {
         const origJson = res.json.bind(res);
@@ -5414,14 +5918,376 @@ function createApiApp() {
       return res.status(statusCode).json({ error: message });
     }
   });
+  async function createOrReturnVerifiedOnlineOrder(params) {
+    const {
+      draft,
+      razorpayOrderId,
+      razorpayPaymentId,
+      verifiedMethod,
+      expectedAmountPaise,
+      actualFee,
+      source,
+      existingUser,
+      requestId,
+      createdAtOverride,
+      allowLowStockRecovery = false
+    } = params;
+    if (!Array.isArray(draft.items) || draft.items.length === 0) {
+      return {
+        ok: false,
+        statusCode: 400,
+        code: "EMPTY_CART",
+        error: "Cannot place an empty order."
+      };
+    }
+    if (!draft.shippingAddress) {
+      return {
+        ok: false,
+        statusCode: 400,
+        code: "MISSING_ADDRESS",
+        error: "Shipping address is required."
+      };
+    }
+    const validation = validateCheckoutForm(draft.shippingAddress);
+    if (!validation.valid) {
+      return {
+        ok: false,
+        statusCode: 400,
+        code: "INVALID_SHIPPING_ADDRESS",
+        error: "Please check your shipping details.",
+        fieldErrors: validation.errors
+      };
+    }
+    const isPostgres = storeRepo.isPostgresEnabled();
+    const ctx = await storeRepo.loadCheckoutContext({
+      razorpayOrderId,
+      razorpayPaymentId,
+      includeOrderSequence: true
+    });
+    if (ctx.existingOrderByPayment) {
+      return {
+        ok: true,
+        statusCode: 200,
+        order: ctx.existingOrderByPayment,
+        updatedProducts: ctx.products.filter((p) => p.active),
+        idempotent: true
+      };
+    }
+    const orderItems = [];
+    const stockDecrements = [];
+    for (const item of draft.items) {
+      const product = ctx.products.find((p) => p.id === item.productId && p.active);
+      if (!product) {
+        return {
+          ok: false,
+          statusCode: 400,
+          code: "PRODUCT_NOT_FOUND",
+          error: `Product not found: ${item.productId}`
+        };
+      }
+      if (item.quantity < 1) {
+        return {
+          ok: false,
+          statusCode: 400,
+          code: "INVALID_QUANTITY",
+          error: `Invalid quantity for ${product.name}.`
+        };
+      }
+      if (item.quantity > product.stock) {
+        if (!allowLowStockRecovery) {
+          return {
+            ok: false,
+            statusCode: 400,
+            code: "INSUFFICIENT_INVENTORY",
+            error: `Insufficient inventory for ${product.name}. Remaining stock: ${product.stock}.`
+          };
+        }
+        logStructured("warn", "orders", "captured_payment_low_stock_recovery", {
+          requestId,
+          source,
+          productId: product.id,
+          requestedQty: item.quantity,
+          availableStock: product.stock,
+          razorpayPaymentId
+        });
+      }
+      orderItems.push({
+        productId: product.id,
+        name: product.name,
+        sku: product.sku,
+        netQuantity: product.netQuantity,
+        quantity: item.quantity,
+        unitPrice: product.price,
+        unitMrp: product.mrp,
+        unitCost: product.costPerUnit,
+        batchNumber: product.batchNumber
+      });
+      const safeDec = allowLowStockRecovery ? Math.min(product.stock, item.quantity) : item.quantity;
+      if (safeDec > 0) {
+        stockDecrements.push({ productId: product.id, quantity: safeDec });
+      }
+    }
+    const nowMs = createdAtOverride ? Date.parse(createdAtOverride) || Date.now() : Date.now();
+    const calc = calculateCartTotals(draft.items, ctx.products, ctx.settings, {
+      shippingSpeed: draft.shippingSpeed || "standard",
+      paymentMethod: verifiedMethod,
+      couponCode: draft.couponCode,
+      coupons: ctx.coupons,
+      promotions: ctx.promotions,
+      nowMs
+    });
+    const calculatedPaise = Math.round(calc.grandTotal * 100);
+    if (calculatedPaise !== expectedAmountPaise) {
+      logStructured("warn", "orders", "verified_payment_amount_mismatch", {
+        requestId,
+        source,
+        razorpayOrderId,
+        razorpayPaymentId,
+        expectedAmountPaise,
+        calculatedPaise
+      });
+      return {
+        ok: false,
+        statusCode: 400,
+        code: "PAYMENT_AMOUNT_MISMATCH",
+        error: "Verified payment amount does not match the calculated order total."
+      };
+    }
+    const normalizedEmail = draft.shippingAddress.email.trim().toLowerCase();
+    let resolvedUserId = existingUser?.id || draft.userId;
+    if (!resolvedUserId && normalizedEmail) {
+      const matchedUser = await storeRepo.findUserByEmail(normalizedEmail).catch(() => null);
+      if (matchedUser) {
+        resolvedUserId = matchedUser.id;
+      }
+    }
+    const now = new Date(nowMs);
+    const createdIso = now.toISOString();
+    const deliveryDays = (draft.shippingSpeed || "standard") === "express" ? 2 : 5;
+    const estDate = new Date(now.getTime() + deliveryDays * 864e5).toISOString().slice(0, 10);
+    let nextOrderSeq = ctx.maxOrderSeq + 1;
+    const buildOrderNumber = (seq) => `HIM-2026-${String(seq).padStart(4, "0")}`;
+    const orderNumber = buildOrderNumber(nextOrderSeq);
+    const sourceNote = source === "webhook" ? `Webhook auto-recovered verified ${verifiedMethod} payment (${razorpayPaymentId})` : source === "admin_reconcile" ? `Admin-reconciled from live verified Razorpay ${verifiedMethod} payment (${razorpayPaymentId})` : `Server-verified ${verifiedMethod} payment (${razorpayPaymentId})`;
+    const timeline = [
+      {
+        status: "Pending Payment",
+        timestamp: createdIso,
+        note: `Order created (${verifiedMethod})`
+      },
+      {
+        status: "Payment Confirmed",
+        timestamp: createdIso,
+        note: sourceNote
+      }
+    ];
+    const intentFeePaise = actualFee?.gatewayFeeSource === "razorpay_actual" ? actualFee.gatewayFeePaise : ctx.paymentIntent?.gatewayFeePaise;
+    const intentTaxPaise = actualFee?.gatewayFeeSource === "razorpay_actual" ? actualFee.gatewayTaxPaise : ctx.paymentIntent?.gatewayTaxPaise;
+    const hasActualFee = typeof intentFeePaise === "number" && Number.isFinite(intentFeePaise) && intentFeePaise >= 0;
+    const gatewayFeePct = ctx.settings.gatewayFeePercent ?? 2;
+    const gatewayFeeAmount = hasActualFee ? Math.round(intentFeePaise) / 100 : Math.round(calc.grandTotal * (gatewayFeePct / 100) * 100) / 100;
+    const gatewayTaxAmount = typeof intentTaxPaise === "number" && Number.isFinite(intentTaxPaise) && intentTaxPaise >= 0 ? Math.round(intentTaxPaise) / 100 : void 0;
+    const gatewayFeeSource = hasActualFee ? "razorpay_actual" : "estimated";
+    const actualShippingCost = ctx.settings.defaultShippingCostPerOrder ?? 65;
+    const newOrder = {
+      id: `ord-${crypto6.randomUUID().slice(0, 8)}`,
+      orderNumber,
+      userId: resolvedUserId,
+      customerName: draft.shippingAddress.fullName.trim(),
+      customerEmail: normalizedEmail,
+      customerPhone: draft.shippingAddress.phone.replace(/\D/g, ""),
+      shippingAddress: {
+        ...draft.shippingAddress,
+        email: normalizedEmail,
+        houseFlatNumber: draft.shippingAddress.houseFlatNumber?.trim() || void 0,
+        landmark: draft.shippingAddress.landmark?.trim() || void 0,
+        phone: draft.shippingAddress.phone.replace(/\D/g, ""),
+        pincode: draft.shippingAddress.pincode.trim()
+      },
+      deliveryInstructions: draft.deliveryInstructions?.trim() || void 0,
+      items: orderItems,
+      subtotal: calc.subtotal,
+      mrpTotal: calc.mrpTotal,
+      instantSavings: calc.instantSavings,
+      couponCode: calc.appliedCoupon?.code,
+      couponDiscount: calc.couponDiscount,
+      promotionId: calc.appliedPromotion?.id,
+      promotionTitle: calc.appliedPromotion?.title,
+      shippingFee: calc.shippingFee,
+      shippingSpeed: draft.shippingSpeed || "standard",
+      codFee: calc.codFee,
+      taxableValue: calc.taxableValue,
+      gstAmount: calc.gstAmount,
+      totalAmount: calc.grandTotal,
+      gatewayFeeAmount,
+      gatewayTaxAmount,
+      gatewayFeeSource,
+      actualShippingCost,
+      paymentMethod: verifiedMethod,
+      paymentStatus: "Paid",
+      settlementStatus: "Pending Settlement",
+      razorpayOrderId,
+      razorpayPaymentId,
+      paymentVerifiedAt: createdIso,
+      status: "Payment Confirmed",
+      estimatedDelivery: estDate,
+      timeline,
+      createdAt: createdIso
+    };
+    const promotionUpdate = calc.appliedPromotion ? { promotionId: calc.appliedPromotion.id, revenueDelta: calc.grandTotal } : void 0;
+    const adminNotification = {
+      id: `notif-${crypto6.randomUUID().slice(0, 8)}`,
+      type: "new_paid_order",
+      title: source === "webhook" ? "Paid Order Recovered via Webhook!" : source === "admin_reconcile" ? "Paid Order Reconciled" : "New Paid Order Received!",
+      message: `${newOrder.orderNumber} from ${newOrder.customerName} (\u20B9${newOrder.totalAmount})`,
+      orderId: newOrder.id,
+      orderNumber: newOrder.orderNumber,
+      customerName: newOrder.customerName,
+      amount: newOrder.totalAmount,
+      read: false,
+      emailNotifiedTo: ctx.settings.emailNotificationsEnabled ? ctx.settings.orderNotificationEmail : void 0,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    const hadDefaultAddress = Boolean(existingUser?.defaultAddress);
+    const userDefaultAddressUpdate = existingUser && !hadDefaultAddress ? { userId: existingUser.id, address: newOrder.shippingAddress } : void 0;
+    const state = storeRepo.getState();
+    const stockSnapshots = /* @__PURE__ */ new Map();
+    const appliedPromoInState = calc.appliedPromotion ? state.promotions.find((p) => p.id === calc.appliedPromotion.id) : void 0;
+    const prevPromoUsage = appliedPromoInState?.usageCount;
+    const prevPromoRevenue = appliedPromoInState?.revenueGenerated;
+    if (!isPostgres) {
+      for (const dec of stockDecrements) {
+        const product = state.products.find((p) => p.id === dec.productId);
+        if (product) {
+          stockSnapshots.set(product.id, product.stock);
+          product.stock = Math.max(0, product.stock - dec.quantity);
+        }
+      }
+      if (appliedPromoInState) {
+        appliedPromoInState.usageCount += 1;
+        appliedPromoInState.revenueGenerated += calc.grandTotal;
+      }
+      state.orders.unshift(newOrder);
+      state.adminNotifications.unshift(adminNotification);
+      if (existingUser && !hadDefaultAddress) {
+        existingUser.defaultAddress = newOrder.shippingAddress;
+      }
+      const existingIntent = state.paymentIntents[razorpayOrderId];
+      if (existingIntent) {
+        existingIntent.orderId = newOrder.id;
+      }
+    }
+    try {
+      let commitResult = {};
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          commitResult = await storeRepo.commitOrderAtomic(newOrder, stockDecrements, {
+            promotionUpdate,
+            adminNotification,
+            userDefaultAddressUpdate
+          });
+          break;
+        } catch (attemptErr) {
+          if (isPostgres && attempt < 2 && attemptErr instanceof StorePersistenceError && attemptErr.code === "ORDER_NUMBER_CONFLICT") {
+            nextOrderSeq += 1;
+            newOrder.orderNumber = buildOrderNumber(nextOrderSeq);
+            adminNotification.orderNumber = newOrder.orderNumber;
+            adminNotification.message = `${newOrder.orderNumber} from ${newOrder.customerName} (\u20B9${newOrder.totalAmount})`;
+            continue;
+          }
+          throw attemptErr;
+        }
+      }
+      if (commitResult.existingOrder) {
+        return {
+          ok: true,
+          statusCode: 200,
+          order: commitResult.existingOrder,
+          updatedProducts: ctx.products.filter((p) => p.active),
+          idempotent: true
+        };
+      }
+      if (isPostgres) {
+        if (commitResult.updatedProducts) {
+          for (const upd of commitResult.updatedProducts) {
+            const p = ctx.products.find((prod) => prod.id === upd.id);
+            if (p) p.stock = upd.stock;
+          }
+        }
+        if (appliedPromoInState) {
+          appliedPromoInState.usageCount += 1;
+          appliedPromoInState.revenueGenerated += calc.grandTotal;
+        }
+        if (existingUser && !hadDefaultAddress) {
+          existingUser.defaultAddress = newOrder.shippingAddress;
+        }
+      }
+      storeRepo.invalidateCaches();
+      bootstrapCache.invalidate();
+      const updatedProductsList = isPostgres ? ctx.products.filter((p) => p.active) : state.products.filter((p) => p.active);
+      return {
+        ok: true,
+        statusCode: 201,
+        order: newOrder,
+        updatedProducts: updatedProductsList,
+        idempotent: false
+      };
+    } catch (err) {
+      if (!isPostgres) {
+        state.orders = state.orders.filter((o) => o.id !== newOrder.id);
+        state.adminNotifications = state.adminNotifications.filter(
+          (n) => n.id !== adminNotification.id
+        );
+        for (const [prodId, prevStock] of stockSnapshots.entries()) {
+          const product = state.products.find((p) => p.id === prodId);
+          if (product) product.stock = prevStock;
+        }
+        if (appliedPromoInState && prevPromoUsage !== void 0 && prevPromoRevenue !== void 0) {
+          appliedPromoInState.usageCount = prevPromoUsage;
+          appliedPromoInState.revenueGenerated = prevPromoRevenue;
+        }
+        if (existingUser && !hadDefaultAddress) {
+          existingUser.defaultAddress = void 0;
+        }
+      }
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const code = err instanceof StorePersistenceError ? err.code : "ORDER_COMMIT_FAILED";
+      const message = err instanceof Error ? err.message : "Unable to confirm your order right now. Please retry.";
+      logStructured("error", "orders", "atomic_commit_failed", {
+        requestId,
+        source,
+        orderNumber: newOrder.orderNumber,
+        code,
+        statusCode,
+        error: message
+      });
+      return { ok: false, statusCode, code, error: message };
+    }
+  }
   app2.post("/api/payments/create-order", async (req, res) => {
     const startedAt = Date.now();
-    const { items, shippingSpeed, paymentMethod, couponCode } = req.body;
+    const {
+      items,
+      shippingSpeed = "standard",
+      paymentMethod,
+      couponCode,
+      shippingAddress,
+      deliveryInstructions
+    } = req.body;
     if (!Array.isArray(items) || items.length === 0) {
       return res.status(400).json({ error: "Your cart is empty." });
     }
     if (paymentMethod === "COD") {
       return res.status(400).json({ error: "Cash on Delivery does not require an online payment order." });
+    }
+    if (shippingAddress) {
+      const validation = validateCheckoutForm(shippingAddress);
+      if (!validation.valid) {
+        return res.status(400).json({
+          error: "Please check your shipping details before continuing to payment.",
+          fieldErrors: validation.errors
+        });
+      }
     }
     const razorpayConfig = getRazorpayConfig();
     if (!razorpayConfig) {
@@ -5482,6 +6348,23 @@ function createApiApp() {
         });
       }
       const razorpayOrderId = orderCreation.razorpayOrderId;
+      const checkoutPayload = shippingAddress ? {
+        items,
+        shippingAddress: {
+          ...shippingAddress,
+          fullName: shippingAddress.fullName.trim(),
+          email: shippingAddress.email.trim().toLowerCase(),
+          phone: shippingAddress.phone.replace(/\D/g, ""),
+          pincode: shippingAddress.pincode.trim(),
+          houseFlatNumber: shippingAddress.houseFlatNumber?.trim() || void 0,
+          landmark: shippingAddress.landmark?.trim() || void 0
+        },
+        deliveryInstructions: deliveryInstructions?.trim() || void 0,
+        shippingSpeed,
+        paymentMethod: paymentMethod || "UPI",
+        couponCode: couponCode?.trim() || void 0,
+        userId: req.currentUser?.id
+      } : void 0;
       const dbWriteStartedAt = Date.now();
       await storeRepo.upsertPaymentIntent({
         razorpayOrderId,
@@ -5489,7 +6372,9 @@ function createApiApp() {
         verified: false,
         signatureVerified: false,
         method: paymentMethod || "UPI",
-        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+        checkoutPayload,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        updatedAt: (/* @__PURE__ */ new Date()).toISOString()
       });
       const dbWriteMs = Date.now() - dbWriteStartedAt;
       const totalMs = Date.now() - startedAt;
@@ -5500,6 +6385,7 @@ function createApiApp() {
       logStructured("info", "payments", "create_order_timing", {
         requestId: req.requestId,
         razorpayMode: razorpayConfig.mode,
+        hasCheckoutDraft: Boolean(checkoutPayload),
         contextMs,
         razorpayMs,
         dbWriteMs,
@@ -5527,7 +6413,12 @@ function createApiApp() {
   });
   app2.post("/api/payments/verify", async (req, res) => {
     const startedAt = Date.now();
-    const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
+    const {
+      razorpayOrderId,
+      razorpayPaymentId,
+      razorpaySignature,
+      checkoutDraft
+    } = req.body;
     const razorpayConfig = getRazorpayConfig();
     if (!razorpayConfig) {
       logStructured("error", "payments", "razorpay_credentials_missing_verify", {
@@ -5590,8 +6481,19 @@ function createApiApp() {
         intent.verified && intent.signatureVerified && intent.paymentId === cleanPaymentId
       );
       let verifiedPaymentMethod = normalizeRazorpayPaymentMethod(intent.method);
+      let extractedFee = typeof intent.gatewayFeePaise === "number" ? {
+        gatewayFeePaise: intent.gatewayFeePaise,
+        gatewayTaxPaise: intent.gatewayTaxPaise,
+        gatewayFeeAmount: Math.round(intent.gatewayFeePaise) / 100,
+        gatewayTaxAmount: typeof intent.gatewayTaxPaise === "number" ? Math.round(intent.gatewayTaxPaise) / 100 : void 0,
+        gatewayFeeSource: "razorpay_actual"
+      } : { gatewayFeeSource: "estimated" };
       let razorpayApiMs = 0;
       let dbWriteMs = 0;
+      const effectiveDraft = intent.checkoutPayload ?? (checkoutDraft?.shippingAddress && Array.isArray(checkoutDraft.items) ? {
+        ...checkoutDraft,
+        userId: req.currentUser?.id ?? checkoutDraft.userId
+      } : void 0);
       if (!idempotent) {
         const apiStartedAt = Date.now();
         const apiCheck = await fetchAndVerifyCapturedRazorpayPayment({
@@ -5619,15 +6521,55 @@ function createApiApp() {
           apiCheck.payment.method,
           intent.method
         );
+        extractedFee = extractActualRazorpayFee(apiCheck.payment);
         const dbWriteStartedAt = Date.now();
         await storeRepo.upsertPaymentIntent({
           ...intent,
           method: verifiedPaymentMethod,
           verified: true,
           signatureVerified: true,
-          paymentId: cleanPaymentId
+          paymentId: cleanPaymentId,
+          checkoutPayload: effectiveDraft,
+          gatewayFeePaise: extractedFee.gatewayFeePaise,
+          gatewayTaxPaise: extractedFee.gatewayTaxPaise,
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
         });
         dbWriteMs = Date.now() - dbWriteStartedAt;
+      } else if (effectiveDraft && !intent.checkoutPayload) {
+        await storeRepo.upsertPaymentIntent({
+          ...intent,
+          checkoutPayload: effectiveDraft,
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        });
+      }
+      let confirmedOrder;
+      let updatedProducts;
+      let orderIdempotent = false;
+      if (effectiveDraft) {
+        const orderResult = await createOrReturnVerifiedOnlineOrder({
+          draft: effectiveDraft,
+          razorpayOrderId: cleanOrderId,
+          razorpayPaymentId: cleanPaymentId,
+          verifiedMethod: verifiedPaymentMethod,
+          expectedAmountPaise: intent.amountPaise,
+          actualFee: extractedFee,
+          source: "verify",
+          existingUser: req.currentUser,
+          requestId: req.requestId,
+          allowLowStockRecovery: true
+        });
+        if (orderResult.ok) {
+          confirmedOrder = orderResult.order;
+          updatedProducts = orderResult.updatedProducts;
+          orderIdempotent = orderResult.idempotent;
+        } else {
+          logStructured("warn", "payments", "verify_inline_order_creation_skipped", {
+            requestId: req.requestId,
+            razorpayOrderId: cleanOrderId,
+            code: orderResult.code,
+            error: orderResult.error
+          });
+        }
       }
       const verifyMs = Date.now() - verifyStartedAt;
       const totalMs = Date.now() - startedAt;
@@ -5638,6 +6580,8 @@ function createApiApp() {
       logStructured("info", "payments", "verify_timing", {
         requestId: req.requestId,
         idempotent,
+        orderCreated: Boolean(confirmedOrder && !orderIdempotent),
+        orderNumber: confirmedOrder?.orderNumber,
         paymentMethod: verifiedPaymentMethod,
         dbReadMs,
         razorpayApiMs,
@@ -5651,7 +6595,10 @@ function createApiApp() {
         paymentMethod: verifiedPaymentMethod,
         razorpayOrderId: cleanOrderId,
         razorpayPaymentId: cleanPaymentId,
-        verifiedAt: (/* @__PURE__ */ new Date()).toISOString()
+        verifiedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        order: confirmedOrder,
+        updatedProducts,
+        orderIdempotent
       });
     } catch (err) {
       const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
@@ -5663,6 +6610,118 @@ function createApiApp() {
       });
       return res.status(statusCode).json({ error: message, requestId: req.requestId });
     }
+  });
+  app2.post("/api/payments/order-status", async (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    const { razorpayOrderId, razorpayPaymentId, razorpaySignature } = req.body;
+    if (!isValidRazorpayOrderId(razorpayOrderId)) {
+      return res.status(400).json({ error: "Valid Razorpay order ID is required." });
+    }
+    const cleanOrderId = razorpayOrderId.trim();
+    const cleanPaymentId = isValidRazorpayPaymentId(razorpayPaymentId) ? razorpayPaymentId.trim() : void 0;
+    const razorpayConfig = getRazorpayConfig();
+    const signatureValid = Boolean(
+      razorpayConfig && cleanPaymentId && typeof razorpaySignature === "string" && razorpaySignature.trim() && verifyRazorpaySignature({
+        razorpayOrderId: cleanOrderId,
+        razorpayPaymentId: cleanPaymentId,
+        razorpaySignature: razorpaySignature.trim(),
+        keySecret: razorpayConfig.keySecret
+      })
+    );
+    const existingOrder = await storeRepo.findOrderByRazorpayReference({
+      razorpayOrderId: cleanOrderId,
+      razorpayPaymentId: cleanPaymentId
+    });
+    if (existingOrder) {
+      const isAuthorizedSession = Boolean(
+        req.currentUser && (isAuthorizedAdmin(req.currentUser, getAdminOwnerEmail()) || existingOrder.userId === req.currentUser.id || existingOrder.customerEmail.toLowerCase() === req.currentUser.email.toLowerCase())
+      );
+      if (!signatureValid && !isAuthorizedSession) {
+        return res.status(403).json({
+          error: "Payment verification signature or matching account session is required."
+        });
+      }
+      const ctx = await storeRepo.loadCheckoutContext();
+      return res.json({
+        status: "confirmed",
+        order: existingOrder,
+        updatedProducts: ctx.products.filter((p) => p.active)
+      });
+    }
+    const intent = await storeRepo.findPaymentIntent(cleanOrderId);
+    if (!intent) {
+      return res.status(404).json({ status: "not_found", error: "Payment session not found." });
+    }
+    const isDraftOwner = Boolean(
+      req.currentUser && (isAuthorizedAdmin(req.currentUser, getAdminOwnerEmail()) || intent.checkoutPayload?.userId && intent.checkoutPayload.userId === req.currentUser.id || intent.checkoutPayload?.shippingAddress?.email && intent.checkoutPayload.shippingAddress.email.toLowerCase() === req.currentUser.email.toLowerCase())
+    );
+    if (!signatureValid && !isDraftOwner) {
+      return res.status(403).json({
+        error: "Payment verification signature or matching account session is required."
+      });
+    }
+    let activeIntent = intent;
+    let extractedFee = typeof intent.gatewayFeePaise === "number" ? {
+      gatewayFeePaise: intent.gatewayFeePaise,
+      gatewayTaxPaise: intent.gatewayTaxPaise,
+      gatewayFeeAmount: Math.round(intent.gatewayFeePaise) / 100,
+      gatewayTaxAmount: typeof intent.gatewayTaxPaise === "number" ? Math.round(intent.gatewayTaxPaise) / 100 : void 0,
+      gatewayFeeSource: "razorpay_actual"
+    } : { gatewayFeeSource: "estimated" };
+    if (!activeIntent.verified && signatureValid && razorpayConfig && cleanPaymentId) {
+      const apiCheck = await fetchAndVerifyCapturedRazorpayPayment({
+        config: razorpayConfig,
+        razorpayOrderId: cleanOrderId,
+        razorpayPaymentId: cleanPaymentId,
+        expectedAmountPaise: activeIntent.amountPaise,
+        expectedCurrency: "INR"
+      });
+      if (apiCheck.ok) {
+        const verifiedMethod = normalizeRazorpayPaymentMethod(
+          apiCheck.payment.method,
+          activeIntent.method
+        );
+        extractedFee = extractActualRazorpayFee(apiCheck.payment);
+        activeIntent = {
+          ...activeIntent,
+          method: verifiedMethod,
+          verified: true,
+          signatureVerified: true,
+          paymentId: cleanPaymentId,
+          gatewayFeePaise: extractedFee.gatewayFeePaise,
+          gatewayTaxPaise: extractedFee.gatewayTaxPaise,
+          updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        await storeRepo.upsertPaymentIntent(activeIntent);
+      }
+    }
+    if (activeIntent.verified && activeIntent.paymentId && activeIntent.checkoutPayload) {
+      const recovered = await createOrReturnVerifiedOnlineOrder({
+        draft: activeIntent.checkoutPayload,
+        razorpayOrderId: cleanOrderId,
+        razorpayPaymentId: activeIntent.paymentId,
+        verifiedMethod: normalizeRazorpayPaymentMethod(activeIntent.method),
+        expectedAmountPaise: activeIntent.amountPaise,
+        actualFee: extractedFee,
+        source: "order_status",
+        existingUser: req.currentUser,
+        requestId: req.requestId,
+        allowLowStockRecovery: true
+      });
+      if (recovered.ok) {
+        return res.json({
+          status: "confirmed",
+          order: recovered.order,
+          updatedProducts: recovered.updatedProducts,
+          recovered: true
+        });
+      }
+    }
+    return res.json({
+      status: activeIntent.verified ? "payment_captured_pending_order" : "pending",
+      razorpayOrderId: cleanOrderId,
+      razorpayPaymentId: activeIntent.paymentId || cleanPaymentId
+    });
   });
   app2.post("/api/payments/webhook", async (req, res) => {
     const signature = String(req.headers["x-razorpay-signature"] ?? "");
@@ -5690,35 +6749,99 @@ function createApiApp() {
     const body = req.body;
     const event = String(body.event || "").trim();
     const paymentEntity = body.payload?.payment?.entity;
+    const orderEntity = body.payload?.order?.entity;
     const refundEntity = body.payload?.refund?.entity;
-    const razorpayOrderId = body.razorpayOrderId || paymentEntity?.order_id;
+    const settlementEntity = body.payload?.settlement?.entity;
+    const razorpayOrderId = body.razorpayOrderId || paymentEntity?.order_id || orderEntity?.id;
     const razorpayPaymentId = body.razorpayPaymentId || paymentEntity?.id || refundEntity?.payment_id;
-    const entityAmountPaise = typeof paymentEntity?.amount === "number" ? paymentEntity.amount : void 0;
-    const entityCurrency = paymentEntity?.currency ? String(paymentEntity.currency).toUpperCase() : "INR";
-    const state = storeRepo.getState();
+    const entityAmountPaise = typeof paymentEntity?.amount === "number" ? paymentEntity.amount : typeof orderEntity?.amount_paid === "number" ? orderEntity.amount_paid : void 0;
+    const entityCurrency = paymentEntity?.currency || orderEntity?.currency ? String(paymentEntity?.currency || orderEntity?.currency).toUpperCase() : "INR";
+    const extractedFee = extractActualRazorpayFee(paymentEntity);
     let intentReconciled = false;
+    let activeIntent = razorpayOrderId ? await storeRepo.findPaymentIntent(razorpayOrderId).catch(() => null) : null;
     if ((event === "payment.captured" || event === "order.paid") && razorpayOrderId && razorpayPaymentId && entityCurrency === "INR") {
-      const intent = await storeRepo.findPaymentIntent(razorpayOrderId).catch(() => null);
-      if (intent && (entityAmountPaise === void 0 || entityAmountPaise === intent.amountPaise) && (!intent.paymentId || intent.paymentId === razorpayPaymentId)) {
+      if (activeIntent && (entityAmountPaise === void 0 || entityAmountPaise === activeIntent.amountPaise) && (!activeIntent.paymentId || activeIntent.paymentId === razorpayPaymentId)) {
         const reconciledMethod = normalizeRazorpayPaymentMethod(
           paymentEntity?.method,
-          intent.method
+          activeIntent.method
         );
-        if (!intent.verified || !intent.signatureVerified || intent.method !== reconciledMethod) {
-          await storeRepo.upsertPaymentIntent({
-            ...intent,
+        const shouldUpdateIntent = !activeIntent.verified || !activeIntent.signatureVerified || activeIntent.method !== reconciledMethod || extractedFee.gatewayFeeSource === "razorpay_actual" && activeIntent.gatewayFeePaise !== extractedFee.gatewayFeePaise;
+        if (shouldUpdateIntent) {
+          activeIntent = {
+            ...activeIntent,
             method: reconciledMethod,
             verified: true,
             signatureVerified: true,
-            paymentId: razorpayPaymentId
-          });
+            paymentId: razorpayPaymentId,
+            gatewayFeePaise: extractedFee.gatewayFeePaise ?? activeIntent.gatewayFeePaise,
+            gatewayTaxPaise: extractedFee.gatewayTaxPaise ?? activeIntent.gatewayTaxPaise,
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          };
+          await storeRepo.upsertPaymentIntent(activeIntent);
           intentReconciled = true;
         }
       }
     }
-    const order = state.orders.find(
-      (o) => razorpayOrderId && o.razorpayOrderId === razorpayOrderId || razorpayPaymentId && o.razorpayPaymentId === razorpayPaymentId
-    );
+    const existingOrder = await storeRepo.findOrderByRazorpayReference({
+      razorpayOrderId,
+      razorpayPaymentId
+    });
+    if (!existingOrder && (event === "payment.captured" || event === "order.paid")) {
+      if (activeIntent && activeIntent.verified && activeIntent.checkoutPayload && razorpayOrderId && razorpayPaymentId && entityCurrency === "INR" && (entityAmountPaise === void 0 || entityAmountPaise === activeIntent.amountPaise)) {
+        const created = await createOrReturnVerifiedOnlineOrder({
+          draft: activeIntent.checkoutPayload,
+          razorpayOrderId,
+          razorpayPaymentId,
+          verifiedMethod: normalizeRazorpayPaymentMethod(
+            paymentEntity?.method,
+            activeIntent.method
+          ),
+          expectedAmountPaise: activeIntent.amountPaise,
+          actualFee: extractedFee,
+          source: "webhook",
+          requestId: req.requestId,
+          allowLowStockRecovery: true
+        });
+        if (created.ok) {
+          logStructured("info", "payments", "webhook_order_recovered", {
+            requestId: req.requestId,
+            orderNumber: created.order.orderNumber,
+            razorpayOrderId,
+            razorpayPaymentId,
+            idempotent: created.idempotent
+          });
+          return res.json({
+            received: true,
+            matched: true,
+            intentReconciled,
+            orderCreatedByWebhook: !created.idempotent,
+            orderNumber: created.order.orderNumber
+          });
+        }
+      } else {
+        logStructured("warn", "payments", "webhook_captured_without_checkout_draft", {
+          requestId: req.requestId,
+          razorpayOrderId,
+          razorpayPaymentId,
+          hasIntent: Boolean(activeIntent),
+          hasDraft: Boolean(activeIntent?.checkoutPayload)
+        });
+      }
+      return res.json({
+        received: true,
+        matched: false,
+        intentReconciled,
+        orderCreatedByWebhook: false
+      });
+    }
+    if (!existingOrder) {
+      return res.json({ received: true, matched: false, intentReconciled });
+    }
+    if (storeRepo.isPostgresEnabled()) {
+      await storeRepo.ensureLoaded({ forceRefresh: true });
+    }
+    const state = storeRepo.getState();
+    const order = state.orders.find((o) => o.id === existingOrder.id);
     if (!order) {
       return res.json({ received: true, matched: false, intentReconciled });
     }
@@ -5734,6 +6857,12 @@ function createApiApp() {
         });
         return res.status(400).json({ error: "Webhook payment amount or currency mismatch." });
       }
+      if (extractedFee.gatewayFeeSource === "razorpay_actual" && (order.gatewayFeeSource !== "razorpay_actual" || order.gatewayFeeAmount !== extractedFee.gatewayFeeAmount)) {
+        order.gatewayFeeAmount = extractedFee.gatewayFeeAmount;
+        order.gatewayTaxAmount = extractedFee.gatewayTaxAmount;
+        order.gatewayFeeSource = "razorpay_actual";
+        orderUpdated = true;
+      }
       if (order.paymentStatus !== "Paid") {
         const verifiedMethod = normalizeRazorpayPaymentMethod(
           paymentEntity?.method,
@@ -5741,6 +6870,9 @@ function createApiApp() {
         );
         order.paymentStatus = "Paid";
         order.paymentMethod = verifiedMethod;
+        if (!order.settlementStatus || order.settlementStatus === "Not Applicable") {
+          order.settlementStatus = "Pending Settlement";
+        }
         if (razorpayPaymentId) order.razorpayPaymentId = razorpayPaymentId;
         order.paymentVerifiedAt = nowIso;
         if (order.status === "Pending Payment") {
@@ -5770,9 +6902,22 @@ function createApiApp() {
         }
         orderUpdated = true;
       }
+    } else if (event === "settlement.processed") {
+      if (order.paymentStatus === "Paid" && order.settlementStatus !== "Settled") {
+        order.settlementStatus = "Settled";
+        order.razorpaySettlementId = settlementEntity?.id || order.razorpaySettlementId;
+        order.settledAt = nowIso;
+        order.timeline.push({
+          status: order.status,
+          timestamp: nowIso,
+          note: `Bank settlement processed by Razorpay (${settlementEntity?.id || "Settlement"})`
+        });
+        orderUpdated = true;
+      }
     } else if (event === "payment.failed") {
       if (order.paymentStatus === "Pending Payment") {
         order.paymentStatus = "Failed";
+        order.settlementStatus = "Not Applicable";
         order.timeline.push({
           status: order.status,
           timestamp: nowIso,
@@ -5808,6 +6953,7 @@ function createApiApp() {
     }
     if (orderUpdated) {
       storeRepo.commit();
+      bootstrapCache.invalidate();
     }
     res.json({
       received: true,
@@ -5844,13 +6990,84 @@ function createApiApp() {
     }
     const isOnline = paymentMethod !== "COD";
     const isPostgres = storeRepo.isPostgresEnabled();
+    if (isOnline) {
+      try {
+        const ctxStartedAt = Date.now();
+        const ctx2 = await storeRepo.loadCheckoutContext({
+          razorpayOrderId,
+          razorpayPaymentId,
+          includeOrderSequence: true
+        });
+        const contextMs2 = Date.now() - ctxStartedAt;
+        if (ctx2.existingOrderByPayment) {
+          const totalMs2 = Date.now() - startedAt;
+          res.setHeader("Server-Timing", `context;dur=${contextMs2}, total;dur=${totalMs2}`);
+          return res.status(200).json({
+            order: ctx2.existingOrderByPayment,
+            updatedProducts: ctx2.products.filter((p) => p.active),
+            idempotent: true
+          });
+        }
+        const intent = ctx2.paymentIntent;
+        if (!intent || !intent.verified || !intent.signatureVerified || !razorpayOrderId || !razorpayPaymentId || intent.razorpayOrderId !== razorpayOrderId || intent.paymentId !== razorpayPaymentId) {
+          return res.status(402).json({
+            error: "Payment verification is required before confirming your order."
+          });
+        }
+        const resolvedMethod = normalizeRazorpayPaymentMethod(intent.method, paymentMethod);
+        const result = await createOrReturnVerifiedOnlineOrder({
+          draft: {
+            items,
+            shippingAddress,
+            deliveryInstructions,
+            shippingSpeed,
+            paymentMethod: resolvedMethod,
+            couponCode,
+            userId: req.currentUser?.id ?? intent.checkoutPayload?.userId
+          },
+          razorpayOrderId,
+          razorpayPaymentId,
+          verifiedMethod: resolvedMethod,
+          expectedAmountPaise: intent.amountPaise,
+          source: "orders_api",
+          existingUser: req.currentUser,
+          requestId: req.requestId,
+          allowLowStockRecovery: false
+        });
+        if (!result.ok) {
+          return res.status(result.statusCode).json({
+            error: result.error,
+            code: result.code,
+            fieldErrors: result.fieldErrors,
+            requestId: req.requestId
+          });
+        }
+        const totalMs = Date.now() - startedAt;
+        res.setHeader("Server-Timing", `context;dur=${contextMs2}, total;dur=${totalMs}`);
+        logStructured("info", "orders", "create_order_timing", {
+          requestId: req.requestId,
+          orderNumber: result.order.orderNumber,
+          paymentMethod: result.order.paymentMethod,
+          idempotent: result.idempotent,
+          contextMs: contextMs2,
+          totalMs
+        });
+        return res.status(result.statusCode).json({
+          order: result.order,
+          updatedProducts: result.updatedProducts,
+          idempotent: result.idempotent
+        });
+      } catch (err) {
+        const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+        const message = err instanceof Error && err.message ? err.message : "Unable to confirm your order right now. Please retry.";
+        return res.status(statusCode).json({ error: message, requestId: req.requestId });
+      }
+    }
     let ctx;
     let contextMs = 0;
     try {
       const ctxStartedAt = Date.now();
       ctx = await storeRepo.loadCheckoutContext({
-        razorpayOrderId: isOnline ? razorpayOrderId : void 0,
-        razorpayPaymentId: isOnline ? razorpayPaymentId : void 0,
         includeOrderSequence: true
       });
       contextMs = Date.now() - ctxStartedAt;
@@ -5858,24 +7075,6 @@ function createApiApp() {
       const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
       const message = err instanceof Error && err.message ? err.message : "Unable to load checkout details right now. Please try again.";
       return res.status(statusCode).json({ error: message, requestId: req.requestId });
-    }
-    if (isOnline && ctx.existingOrderByPayment) {
-      const totalMs = Date.now() - startedAt;
-      res.setHeader("Server-Timing", `context;dur=${contextMs}, total;dur=${totalMs}`);
-      logStructured("info", "orders", "create_order_timing", {
-        requestId: req.requestId,
-        orderNumber: ctx.existingOrderByPayment.orderNumber,
-        paymentMethod,
-        idempotent: true,
-        contextMs,
-        txMs: 0,
-        totalMs
-      });
-      return res.status(200).json({
-        order: ctx.existingOrderByPayment,
-        updatedProducts: ctx.products.filter((p) => p.active),
-        idempotent: true
-      });
     }
     const orderItems = [];
     const stockDecrements = [];
@@ -5905,60 +7104,47 @@ function createApiApp() {
     const nowMs = Date.now();
     const calc = calculateCartTotals(items, ctx.products, ctx.settings, {
       shippingSpeed,
-      paymentMethod,
+      paymentMethod: "COD",
       couponCode,
       coupons: ctx.coupons,
       promotions: ctx.promotions,
       nowMs
     });
-    if (isOnline) {
-      const intent = ctx.paymentIntent;
-      if (!intent || !intent.verified || !intent.signatureVerified || !razorpayOrderId || !razorpayPaymentId || intent.razorpayOrderId !== razorpayOrderId || intent.paymentId !== razorpayPaymentId || intent.amountPaise !== Math.round(calc.grandTotal * 100)) {
-        return res.status(402).json({
-          error: "Payment verification is required before confirming your order."
-        });
-      }
-    }
-    const resolvedPaymentMethod = isOnline ? normalizeRazorpayPaymentMethod(ctx.paymentIntent?.method, paymentMethod) : "COD";
     const now = new Date(nowMs);
     const deliveryDays = shippingSpeed === "express" ? 2 : 5;
     const estDate = new Date(now.getTime() + deliveryDays * 864e5).toISOString().slice(0, 10);
     let nextOrderSeq = ctx.maxOrderSeq + 1;
     const buildOrderNumber = (seq) => `HIM-2026-${String(seq).padStart(4, "0")}`;
     const orderNumber = buildOrderNumber(nextOrderSeq);
-    const initialStatus = isOnline ? "Payment Confirmed" : "Processing";
     const timeline = [
       {
         status: "Pending Payment",
         timestamp: now.toISOString(),
-        note: `Order created (${resolvedPaymentMethod})`
-      }
-    ];
-    if (isOnline) {
-      timeline.push({
-        status: "Payment Confirmed",
-        timestamp: now.toISOString(),
-        note: `Server-verified ${resolvedPaymentMethod} payment (${razorpayPaymentId})`
-      });
-    } else {
-      timeline.push({
+        note: "Order created (COD)"
+      },
+      {
         status: "Processing",
         timestamp: now.toISOString(),
         note: "Cash on Delivery order queued for packing"
-      });
+      }
+    ];
+    const normalizedEmail = shippingAddress.email.trim().toLowerCase();
+    let resolvedUserId = req.currentUser?.id;
+    if (!resolvedUserId && normalizedEmail) {
+      const matchedUser = await storeRepo.findUserByEmail(normalizedEmail).catch(() => null);
+      if (matchedUser) resolvedUserId = matchedUser.id;
     }
-    const gatewayFeePct = ctx.settings.gatewayFeePercent ?? 2;
-    const gatewayFeeAmount = isOnline ? Math.round(calc.grandTotal * (gatewayFeePct / 100) * 100) / 100 : 0;
     const actualShippingCost = ctx.settings.defaultShippingCostPerOrder ?? 65;
     const newOrder = {
       id: `ord-${crypto6.randomUUID().slice(0, 8)}`,
       orderNumber,
-      userId: req.currentUser?.id,
+      userId: resolvedUserId,
       customerName: shippingAddress.fullName.trim(),
-      customerEmail: shippingAddress.email.trim().toLowerCase(),
+      customerEmail: normalizedEmail,
       customerPhone: shippingAddress.phone.replace(/\D/g, ""),
       shippingAddress: {
         ...shippingAddress,
+        email: normalizedEmail,
         houseFlatNumber: shippingAddress.houseFlatNumber?.trim() || void 0,
         landmark: shippingAddress.landmark?.trim() || void 0,
         phone: shippingAddress.phone.replace(/\D/g, ""),
@@ -5979,32 +7165,18 @@ function createApiApp() {
       taxableValue: calc.taxableValue,
       gstAmount: calc.gstAmount,
       totalAmount: calc.grandTotal,
-      gatewayFeeAmount,
+      gatewayFeeAmount: 0,
+      gatewayFeeSource: "razorpay_actual",
       actualShippingCost,
-      paymentMethod: resolvedPaymentMethod,
-      paymentStatus: isOnline ? "Paid" : "Pending COD",
-      razorpayOrderId: isOnline ? razorpayOrderId : void 0,
-      razorpayPaymentId: isOnline ? razorpayPaymentId : void 0,
-      paymentVerifiedAt: isOnline ? now.toISOString() : void 0,
-      status: initialStatus,
+      paymentMethod: "COD",
+      paymentStatus: "Pending COD",
+      settlementStatus: "Not Applicable",
+      status: "Processing",
       estimatedDelivery: estDate,
       timeline,
       createdAt: now.toISOString()
     };
     const promotionUpdate = calc.appliedPromotion ? { promotionId: calc.appliedPromotion.id, revenueDelta: calc.grandTotal } : void 0;
-    const adminNotification = isOnline ? {
-      id: `notif-${crypto6.randomUUID().slice(0, 8)}`,
-      type: "new_paid_order",
-      title: "New Paid Order Received!",
-      message: `${newOrder.orderNumber} from ${newOrder.customerName} (\u20B9${newOrder.totalAmount})`,
-      orderId: newOrder.id,
-      orderNumber: newOrder.orderNumber,
-      customerName: newOrder.customerName,
-      amount: newOrder.totalAmount,
-      read: false,
-      emailNotifiedTo: ctx.settings.emailNotificationsEnabled ? ctx.settings.orderNotificationEmail : void 0,
-      createdAt: now.toISOString()
-    } : void 0;
     const hadDefaultAddress = Boolean(req.currentUser?.defaultAddress);
     const userDefaultAddressUpdate = req.currentUser && !hadDefaultAddress ? { userId: req.currentUser.id, address: newOrder.shippingAddress } : void 0;
     const state = storeRepo.getState();
@@ -6025,9 +7197,6 @@ function createApiApp() {
         appliedPromoInState.revenueGenerated += calc.grandTotal;
       }
       state.orders.unshift(newOrder);
-      if (adminNotification) {
-        state.adminNotifications.unshift(adminNotification);
-      }
       if (req.currentUser && !hadDefaultAddress) {
         req.currentUser.defaultAddress = newOrder.shippingAddress;
       }
@@ -6039,7 +7208,6 @@ function createApiApp() {
         try {
           commitResult = await storeRepo.commitOrderAtomic(newOrder, stockDecrements, {
             promotionUpdate,
-            adminNotification,
             userDefaultAddressUpdate
           });
           break;
@@ -6047,10 +7215,6 @@ function createApiApp() {
           if (isPostgres && attempt < 2 && attemptErr instanceof StorePersistenceError && attemptErr.code === "ORDER_NUMBER_CONFLICT") {
             nextOrderSeq += 1;
             newOrder.orderNumber = buildOrderNumber(nextOrderSeq);
-            if (adminNotification) {
-              adminNotification.orderNumber = newOrder.orderNumber;
-              adminNotification.message = `${newOrder.orderNumber} from ${newOrder.customerName} (\u20B9${newOrder.totalAmount})`;
-            }
             continue;
           }
           throw attemptErr;
@@ -6058,26 +7222,6 @@ function createApiApp() {
       }
       const txMs = Date.now() - txStartedAt;
       const totalMs = Date.now() - startedAt;
-      if (commitResult.existingOrder) {
-        res.setHeader(
-          "Server-Timing",
-          `context;dur=${contextMs}, tx;dur=${txMs}, total;dur=${totalMs}`
-        );
-        logStructured("info", "orders", "create_order_timing", {
-          requestId: req.requestId,
-          orderNumber: commitResult.existingOrder.orderNumber,
-          paymentMethod,
-          idempotent: true,
-          contextMs,
-          txMs,
-          totalMs
-        });
-        return res.status(200).json({
-          order: commitResult.existingOrder,
-          updatedProducts: ctx.products.filter((p) => p.active),
-          idempotent: true
-        });
-      }
       if (isPostgres) {
         if (commitResult.updatedProducts) {
           for (const upd of commitResult.updatedProducts) {
@@ -6093,6 +7237,8 @@ function createApiApp() {
           req.currentUser.defaultAddress = newOrder.shippingAddress;
         }
       }
+      storeRepo.invalidateCaches();
+      bootstrapCache.invalidate();
       res.setHeader(
         "Server-Timing",
         `context;dur=${contextMs}, tx;dur=${txMs}, total;dur=${totalMs}`
@@ -6100,7 +7246,7 @@ function createApiApp() {
       logStructured("info", "orders", "create_order_timing", {
         requestId: req.requestId,
         orderNumber: newOrder.orderNumber,
-        paymentMethod,
+        paymentMethod: "COD",
         idempotent: false,
         contextMs,
         txMs,
@@ -6111,11 +7257,6 @@ function createApiApp() {
     } catch (err) {
       if (!isPostgres) {
         state.orders = state.orders.filter((o) => o.id !== newOrder.id);
-        if (adminNotification) {
-          state.adminNotifications = state.adminNotifications.filter(
-            (n) => n.id !== adminNotification.id
-          );
-        }
         for (const [prodId, prevStock] of stockSnapshots.entries()) {
           const product = state.products.find((p) => p.id === prodId);
           if (product) product.stock = prevStock;
@@ -6142,12 +7283,17 @@ function createApiApp() {
       return res.status(statusCode).json({ error: message, code, requestId: req.requestId });
     }
   });
-  app2.get("/api/orders/mine", requireAuth, (req, res) => {
+  app2.get("/api/orders/mine", requireAuth, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     const user = req.currentUser;
-    const orders2 = storeRepo.getState().orders.filter(
-      (o) => o.userId === user.id || o.customerEmail.toLowerCase() === user.email.toLowerCase()
-    );
-    res.json({ orders: orders2 });
+    try {
+      const orders2 = await storeRepo.findOrdersForUser(user.id, user.email);
+      res.json({ orders: orders2 });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const message = err instanceof Error ? err.message : "Unable to fetch your orders right now.";
+      res.status(statusCode).json({ error: message });
+    }
   });
   app2.get("/api/orders/track", (req, res) => {
     const orderNumber = String(req.query.orderNumber ?? "").trim().toUpperCase();
@@ -6397,7 +7543,7 @@ Concierge:` : message.trim();
       });
     }
   });
-  app2.get("/api/admin/overview", requireAdmin, (_req, res) => {
+  app2.get("/api/admin/overview", requireAdmin, async (_req, res) => {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     const state = storeRepo.getState();
     const nowMs = Date.now();
@@ -6406,6 +7552,7 @@ Concierge:` : message.trim();
       defaultShippingCostPerOrder: state.settings.defaultShippingCostPerOrder,
       nowMs
     });
+    const unreconciledPayments = await storeRepo.listUnreconciledCapturedIntents().catch(() => []);
     res.json({
       products: state.products,
       settings: state.settings,
@@ -6419,7 +7566,448 @@ Concierge:` : message.trim();
       notifications: state.adminNotifications,
       customers: state.users.map((u) => storeRepo.sanitizeUser(u)),
       analytics,
+      unreconciledPayments,
+      databaseEnvironment: storeRepo.getDatabaseEnvironment(),
       serverNow: new Date(nowMs).toISOString()
+    });
+  });
+  app2.get("/api/admin/payments/unreconciled", requireAdmin, async (_req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    const unreconciled = await storeRepo.listUnreconciledCapturedIntents();
+    res.json({
+      count: unreconciled.length,
+      unreconciledPayments: unreconciled,
+      databaseEnvironment: storeRepo.getDatabaseEnvironment()
+    });
+  });
+  app2.post("/api/admin/payments/reconcile", requireAdmin, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    const {
+      razorpayOrderId,
+      razorpayPaymentId,
+      shippingAddress,
+      items,
+      deliveryInstructions,
+      shippingSpeed = "standard",
+      couponCode,
+      createdAtOverride,
+      verifyOnly = false
+    } = req.body;
+    const razorpayConfig = getRazorpayConfig();
+    if (!razorpayConfig) {
+      return res.status(503).json({
+        error: "Razorpay API credentials are required to verify captured payments.",
+        code: "RAZORPAY_NOT_CONFIGURED"
+      });
+    }
+    const cleanOrderId = isValidRazorpayOrderId(razorpayOrderId) ? razorpayOrderId.trim() : void 0;
+    const cleanPaymentId = isValidRazorpayPaymentId(razorpayPaymentId) ? razorpayPaymentId.trim() : void 0;
+    if (!cleanOrderId && !cleanPaymentId) {
+      return res.status(400).json({
+        error: "Provide a valid razorpayOrderId (order_...) or razorpayPaymentId (pay_...)."
+      });
+    }
+    const existingOrder = await storeRepo.findOrderByRazorpayReference({
+      razorpayOrderId: cleanOrderId,
+      razorpayPaymentId: cleanPaymentId
+    });
+    if (existingOrder) {
+      return res.json({
+        reconciled: true,
+        verified: true,
+        alreadyExisted: true,
+        order: existingOrder
+      });
+    }
+    let livePayment;
+    if (cleanPaymentId) {
+      const paymentRes = await fetchRazorpayPaymentById({
+        config: razorpayConfig,
+        razorpayPaymentId: cleanPaymentId
+      });
+      if (!paymentRes.ok) {
+        return res.status(paymentRes.statusCode).json({
+          error: paymentRes.message,
+          code: paymentRes.code
+        });
+      }
+      livePayment = paymentRes.payment;
+    } else if (cleanOrderId) {
+      const orderPaymentsRes = await fetchRazorpayOrderPayments({
+        config: razorpayConfig,
+        razorpayOrderId: cleanOrderId
+      });
+      if (!orderPaymentsRes.ok) {
+        return res.status(orderPaymentsRes.statusCode).json({
+          error: orderPaymentsRes.message,
+          code: orderPaymentsRes.code
+        });
+      }
+      livePayment = orderPaymentsRes.payments.find((p) => p.status === "captured");
+      if (!livePayment) {
+        return res.status(402).json({
+          error: "No captured payment was found on Razorpay for this order ID.",
+          code: "RAZORPAY_PAYMENT_NOT_CAPTURED"
+        });
+      }
+    }
+    if (!livePayment || livePayment.status !== "captured" || String(livePayment.currency || "").toUpperCase() !== "INR" || typeof livePayment.amount !== "number" || livePayment.amount < 100) {
+      return res.status(402).json({
+        error: `Razorpay payment is not in captured INR state (status: ${livePayment?.status || "unknown"}).`,
+        code: "RAZORPAY_PAYMENT_NOT_CAPTURED"
+      });
+    }
+    if (cleanOrderId && livePayment.order_id && livePayment.order_id !== cleanOrderId) {
+      return res.status(400).json({
+        error: `Razorpay Payment ID (${livePayment.id}) belongs to order ${livePayment.order_id}, not ${cleanOrderId}.`,
+        code: "RAZORPAY_ORDER_PAYMENT_MISMATCH"
+      });
+    }
+    const verifiedPaymentId = String(livePayment.id || cleanPaymentId || "");
+    const verifiedOrderId = String(livePayment.order_id || cleanOrderId || "");
+    if (!isValidRazorpayPaymentId(verifiedPaymentId) || !isValidRazorpayOrderId(verifiedOrderId)) {
+      return res.status(400).json({
+        error: "Razorpay payment record is missing a valid order_id or payment_id."
+      });
+    }
+    const existingAfterResolve = await storeRepo.findOrderByRazorpayReference({
+      razorpayOrderId: verifiedOrderId,
+      razorpayPaymentId: verifiedPaymentId
+    });
+    if (existingAfterResolve) {
+      return res.json({
+        reconciled: true,
+        verified: true,
+        alreadyExisted: true,
+        order: existingAfterResolve
+      });
+    }
+    const storedIntent = await storeRepo.findPaymentIntent(verifiedOrderId).catch(() => null);
+    const verifiedMethod = normalizeRazorpayPaymentMethod(livePayment.method, storedIntent?.method);
+    const extractedFee = extractActualRazorpayFee(livePayment);
+    const capturedPaymentSummary = {
+      razorpayPaymentId: verifiedPaymentId,
+      razorpayOrderId: verifiedOrderId,
+      status: livePayment.status,
+      currency: String(livePayment.currency || "INR").toUpperCase(),
+      amountPaise: livePayment.amount,
+      amountInr: livePayment.amount / 100,
+      method: verifiedMethod,
+      email: livePayment.email,
+      contact: livePayment.contact,
+      feeInr: extractedFee.gatewayFeeAmount,
+      taxInr: extractedFee.gatewayTaxAmount,
+      feeSource: extractedFee.gatewayFeeSource,
+      createdAt: livePayment.created_at ? new Date(livePayment.created_at * 1e3).toISOString() : storedIntent?.createdAt
+    };
+    if (verifyOnly) {
+      return res.json({
+        verified: true,
+        reconciled: false,
+        alreadyExisted: false,
+        capturedPayment: capturedPaymentSummary,
+        persistedDraft: storedIntent?.checkoutPayload ?? null
+      });
+    }
+    const draft = storedIntent?.checkoutPayload ? {
+      ...storedIntent.checkoutPayload,
+      shippingAddress: shippingAddress ?? storedIntent.checkoutPayload.shippingAddress,
+      items: items?.length ? items : storedIntent.checkoutPayload.items,
+      deliveryInstructions: deliveryInstructions ?? storedIntent.checkoutPayload.deliveryInstructions,
+      shippingSpeed: shippingSpeed || storedIntent.checkoutPayload.shippingSpeed,
+      couponCode: couponCode !== void 0 ? couponCode || void 0 : storedIntent.checkoutPayload.couponCode
+    } : shippingAddress && Array.isArray(items) && items.length > 0 ? {
+      items,
+      shippingAddress,
+      deliveryInstructions,
+      shippingSpeed,
+      paymentMethod: verifiedMethod,
+      couponCode: couponCode || void 0
+    } : null;
+    if (!draft) {
+      return res.status(400).json({
+        error: "No persisted checkout draft exists for this historical payment. Provide verified customer shippingAddress and items matching the exact captured amount.",
+        code: "RECONCILE_CUSTOMER_DETAILS_REQUIRED",
+        capturedPayment: capturedPaymentSummary
+      });
+    }
+    await storeRepo.upsertPaymentIntent({
+      razorpayOrderId: verifiedOrderId,
+      amountPaise: livePayment.amount,
+      verified: true,
+      signatureVerified: true,
+      paymentId: verifiedPaymentId,
+      method: verifiedMethod,
+      checkoutPayload: draft,
+      gatewayFeePaise: extractedFee.gatewayFeePaise,
+      gatewayTaxPaise: extractedFee.gatewayTaxPaise,
+      createdAt: storedIntent?.createdAt || (livePayment.created_at ? new Date(livePayment.created_at * 1e3).toISOString() : (/* @__PURE__ */ new Date()).toISOString()),
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    });
+    const createdAtIso = createdAtOverride || (livePayment.created_at ? new Date(livePayment.created_at * 1e3).toISOString() : void 0);
+    const reconciled = await createOrReturnVerifiedOnlineOrder({
+      draft,
+      razorpayOrderId: verifiedOrderId,
+      razorpayPaymentId: verifiedPaymentId,
+      verifiedMethod,
+      expectedAmountPaise: livePayment.amount,
+      actualFee: extractedFee,
+      source: "admin_reconcile",
+      requestId: req.requestId,
+      createdAtOverride: createdAtIso,
+      allowLowStockRecovery: true
+    });
+    if (!reconciled.ok) {
+      return res.status(reconciled.statusCode).json({
+        error: reconciled.error,
+        code: reconciled.code,
+        fieldErrors: reconciled.fieldErrors
+      });
+    }
+    logStructured("info", "admin", "payment_reconciled_to_order", {
+      requestId: req.requestId,
+      orderNumber: reconciled.order.orderNumber,
+      razorpayOrderId: verifiedOrderId,
+      razorpayPaymentId: verifiedPaymentId,
+      amount: reconciled.order.totalAmount,
+      gatewayFeeAmount: reconciled.order.gatewayFeeAmount,
+      gatewayFeeSource: reconciled.order.gatewayFeeSource
+    });
+    res.status(reconciled.statusCode).json({
+      reconciled: true,
+      alreadyExisted: reconciled.idempotent,
+      order: reconciled.order,
+      updatedProducts: reconciled.updatedProducts
+    });
+  });
+  app2.get("/api/admin/maintenance/test-data-preview", requireAdmin, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    const state = storeRepo.getState();
+    const beforeIso = typeof req.query.beforeIso === "string" ? req.query.beforeIso.trim() : "";
+    const explicitOrderIdsParam = typeof req.query.orderIds === "string" ? req.query.orderIds.split(",").map((s) => s.trim()).filter(Boolean) : [];
+    const ownerEmail = getAdminOwnerEmail();
+    const matchedWithReason = [];
+    for (const ord of state.orders) {
+      if (explicitOrderIdsParam.length > 0) {
+        if (explicitOrderIdsParam.includes(ord.id) || explicitOrderIdsParam.includes(ord.orderNumber)) {
+          matchedWithReason.push({ order: ord, matchReason: "Explicitly selected by Order ID/Number" });
+        }
+        continue;
+      }
+      const lowerEmail = ord.customerEmail.toLowerCase();
+      const lowerName = ord.customerName.toLowerCase();
+      const reasons = [];
+      if (beforeIso && ord.createdAt < beforeIso) reasons.push(`Created before ${beforeIso}`);
+      if (lowerEmail === ownerEmail) reasons.push("Store owner email");
+      if (lowerEmail.includes("test") || lowerEmail.endsWith("@example.com")) {
+        reasons.push("Test/example email");
+      }
+      if (lowerName.includes("test")) reasons.push("Test customer name");
+      if (ord.razorpayOrderId?.startsWith("order_test") || ord.razorpayPaymentId?.startsWith("pay_test")) {
+        reasons.push("Test Razorpay ID");
+      }
+      if (reasons.length > 0) {
+        matchedWithReason.push({ order: ord, matchReason: reasons.join(" \xB7 ") });
+      }
+    }
+    const candidateOrders = matchedWithReason.map((m) => m.order);
+    const candidateOrderIds = new Set(candidateOrders.map((o) => o.id));
+    const candidateRzpOrders = new Set(
+      candidateOrders.map((o) => o.razorpayOrderId).filter((v) => Boolean(v))
+    );
+    const candidatePaymentIntents = Object.values(state.paymentIntents).filter(
+      (pi) => pi.orderId && candidateOrderIds.has(pi.orderId) || candidateRzpOrders.has(pi.razorpayOrderId)
+    );
+    const candidateNotifications = state.adminNotifications.filter(
+      (n) => n.orderId && candidateOrderIds.has(n.orderId)
+    );
+    const unreconciledCapturedIntents = await storeRepo.listUnreconciledCapturedIntents().catch(() => []);
+    const stockToRestoreMap = /* @__PURE__ */ new Map();
+    for (const ord of candidateOrders) {
+      if (ord.status === "Cancelled" || ord.status === "Refunded") continue;
+      for (const item of ord.items) {
+        stockToRestoreMap.set(
+          item.productId,
+          (stockToRestoreMap.get(item.productId) ?? 0) + item.quantity
+        );
+      }
+    }
+    const stockRestorationPreview = Array.from(stockToRestoreMap.entries()).map(
+      ([productId, quantityToRestore]) => {
+        const product = state.products.find((p) => p.id === productId);
+        return {
+          productId,
+          productName: product?.name || productId,
+          currentStock: product?.stock ?? 0,
+          quantityToRestore,
+          projectedStock: (product?.stock ?? 0) + quantityToRestore
+        };
+      }
+    );
+    const remainingOrders = state.orders.filter((o) => !candidateOrderIds.has(o.id));
+    const currentAnalytics = calculateProfitMetrics(state.orders, state.expenses, {
+      gatewayFeePercent: state.settings.gatewayFeePercent,
+      defaultShippingCostPerOrder: state.settings.defaultShippingCostPerOrder
+    });
+    const projectedAnalytics = calculateProfitMetrics(remainingOrders, state.expenses, {
+      gatewayFeePercent: state.settings.gatewayFeePercent,
+      defaultShippingCostPerOrder: state.settings.defaultShippingCostPerOrder
+    });
+    res.json({
+      dryRun: true,
+      databaseEnvironment: storeRepo.getDatabaseEnvironment(),
+      currentOrdersCount: state.orders.length,
+      candidateOrders: matchedWithReason.map(({ order: o, matchReason }) => ({
+        id: o.id,
+        orderNumber: o.orderNumber,
+        createdAt: o.createdAt,
+        customerName: o.customerName,
+        customerEmail: o.customerEmail,
+        totalAmount: o.totalAmount,
+        paymentMethod: o.paymentMethod,
+        paymentStatus: o.paymentStatus,
+        status: o.status,
+        razorpayOrderId: o.razorpayOrderId,
+        razorpayPaymentId: o.razorpayPaymentId,
+        matchReason,
+        items: o.items.map((i) => ({ productId: i.productId, name: i.name, quantity: i.quantity }))
+      })),
+      candidatePaymentIntentIds: candidatePaymentIntents.map((pi) => pi.razorpayOrderId),
+      candidatePaymentIntents: candidatePaymentIntents.map((pi) => ({
+        razorpayOrderId: pi.razorpayOrderId,
+        paymentId: pi.paymentId,
+        orderId: pi.orderId,
+        amountPaise: pi.amountPaise,
+        method: pi.method
+      })),
+      candidateNotificationIds: candidateNotifications.map((n) => n.id),
+      candidateNotifications: candidateNotifications.map((n) => ({
+        id: n.id,
+        orderId: n.orderId,
+        orderNumber: n.orderNumber
+      })),
+      stockRestorationPreview,
+      preservedSummary: {
+        remainingOrdersCount: remainingOrders.length,
+        productsCount: state.products.length,
+        customersCount: state.users.filter((u) => u.role !== "admin").length,
+        adminAccountsCount: state.users.filter((u) => u.role === "admin").length,
+        couponsCount: state.coupons.length,
+        labReportsCount: state.labReports.length,
+        cmsSectionsCount: state.cmsSections.length,
+        protectedUnreconciledCapturedIntentsCount: unreconciledCapturedIntents.length
+      },
+      currentAnalytics: {
+        grossRevenue: currentAnalytics.grossRevenue,
+        totalPaidOrders: currentAnalytics.totalPaidOrders,
+        totalCogs: currentAnalytics.totalCogs,
+        shippingExpenses: currentAnalytics.shippingExpenses,
+        gatewayFees: currentAnalytics.gatewayFees,
+        netProfit: currentAnalytics.netProfit
+      },
+      projectedAnalytics: {
+        grossRevenue: projectedAnalytics.grossRevenue,
+        totalPaidOrders: projectedAnalytics.totalPaidOrders,
+        totalCogs: projectedAnalytics.totalCogs,
+        shippingExpenses: projectedAnalytics.shippingExpenses,
+        gatewayFees: projectedAnalytics.gatewayFees,
+        netProfit: projectedAnalytics.netProfit
+      }
+    });
+  });
+  app2.post("/api/admin/maintenance/backup-export", requireAdmin, (_req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    const state = storeRepo.getState();
+    const exportedAt = (/* @__PURE__ */ new Date()).toISOString();
+    res.json({
+      exportedAt,
+      databaseEnvironment: storeRepo.getDatabaseEnvironment(),
+      snapshot: {
+        orders: state.orders,
+        paymentIntents: state.paymentIntents,
+        products: state.products,
+        promotions: state.promotions,
+        adminNotifications: state.adminNotifications,
+        expenses: state.expenses
+      }
+    });
+  });
+  app2.post("/api/admin/maintenance/cleanup-approved", requireAdmin, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    const {
+      confirmOwnerApproval,
+      backupTaken,
+      orderIds = [],
+      paymentIntentIds = [],
+      notificationIds = [],
+      restoreInventory = true
+    } = req.body;
+    if (confirmOwnerApproval !== true || backupTaken !== true) {
+      return res.status(400).json({
+        error: "Cleanup blocked: explicit confirmOwnerApproval=true and backupTaken=true are required before deleting approved test records.",
+        code: "CLEANUP_APPROVAL_REQUIRED"
+      });
+    }
+    const cleanOrderIds = Array.isArray(orderIds) ? Array.from(new Set(orderIds.filter((s) => typeof s === "string" && s.trim().length > 0))) : [];
+    const cleanPaymentIntentIds = Array.isArray(paymentIntentIds) ? Array.from(
+      new Set(paymentIntentIds.filter((s) => typeof s === "string" && s.trim().length > 0))
+    ) : [];
+    const cleanNotificationIds = Array.isArray(notificationIds) ? Array.from(
+      new Set(notificationIds.filter((s) => typeof s === "string" && s.trim().length > 0))
+    ) : [];
+    if (cleanOrderIds.length === 0 && cleanPaymentIntentIds.length === 0 && cleanNotificationIds.length === 0) {
+      return res.status(400).json({
+        error: "Provide at least one explicit orderId, paymentIntentId, or notificationId to clean up."
+      });
+    }
+    const currentState = storeRepo.getState();
+    const approvedOrderSet = new Set(cleanOrderIds);
+    const approvedRzpOrderIds = new Set(
+      currentState.orders.filter((o) => approvedOrderSet.has(o.id) && o.razorpayOrderId).map((o) => o.razorpayOrderId)
+    );
+    for (const piId of cleanPaymentIntentIds) {
+      const intent = currentState.paymentIntents[piId];
+      if (!intent) continue;
+      const linkedToApprovedOrder = intent.orderId && approvedOrderSet.has(intent.orderId) || approvedRzpOrderIds.has(intent.razorpayOrderId);
+      if (intent.verified && !linkedToApprovedOrder) {
+        return res.status(400).json({
+          error: `Cleanup blocked: verified captured payment intent (${piId}) is not linked to an approved test order and is protected from deletion.`,
+          code: "PROTECTED_CAPTURED_PAYMENT"
+        });
+      }
+    }
+    const result = await storeRepo.cleanupApprovedTestRecords({
+      orderIds: cleanOrderIds,
+      paymentIntentIds: cleanPaymentIntentIds,
+      notificationIds: cleanNotificationIds,
+      restoreInventory: restoreInventory !== false
+    });
+    bootstrapCache.invalidate();
+    logStructured("info", "admin", "approved_test_cleanup_executed", {
+      requestId: req.requestId,
+      deletedOrderNumbers: result.deletedOrderNumbers,
+      deletedPaymentIntentCount: result.deletedPaymentIntentIds.length,
+      deletedNotificationCount: result.deletedNotificationIds.length,
+      restoredStock: result.restoredStock
+    });
+    const refreshedState = storeRepo.getState();
+    const analytics = calculateProfitMetrics(refreshedState.orders, refreshedState.expenses, {
+      gatewayFeePercent: refreshedState.settings.gatewayFeePercent,
+      defaultShippingCostPerOrder: refreshedState.settings.defaultShippingCostPerOrder
+    });
+    res.json({
+      ok: true,
+      ...result,
+      updatedProducts: refreshedState.products,
+      postCleanupAnalytics: {
+        grossRevenue: analytics.grossRevenue,
+        totalPaidOrders: analytics.totalPaidOrders,
+        totalCogs: analytics.totalCogs,
+        shippingExpenses: analytics.shippingExpenses,
+        gatewayFees: analytics.gatewayFees,
+        netProfit: analytics.netProfit,
+        totalInventory: refreshedState.products.reduce((s, p) => s + p.stock, 0)
+      }
     });
   });
   app2.post("/api/admin/products", requireAdmin, (req, res) => {
@@ -6666,6 +8254,8 @@ Concierge:` : message.trim();
       estimatedDelivery,
       actualShippingCost,
       paymentStatus,
+      settlementStatus,
+      razorpaySettlementId,
       refundAmount,
       refundReason,
       note
@@ -6678,8 +8268,27 @@ Concierge:` : message.trim();
     if (typeof actualShippingCost === "number" && actualShippingCost >= 0) {
       order.actualShippingCost = actualShippingCost;
     }
+    if (settlementStatus && ["Not Applicable", "Pending Settlement", "Settled", "On Hold"].includes(
+      settlementStatus
+    ) && settlementStatus !== order.settlementStatus) {
+      order.settlementStatus = settlementStatus;
+      if (settlementStatus === "Settled") {
+        order.settledAt = nowIso;
+        if (razorpaySettlementId?.trim()) {
+          order.razorpaySettlementId = razorpaySettlementId.trim();
+        }
+      }
+      order.timeline.push({
+        status: order.status,
+        timestamp: nowIso,
+        note: `Bank settlement status updated to ${settlementStatus}${order.razorpaySettlementId ? ` (${order.razorpaySettlementId})` : ""}`
+      });
+    }
     if (paymentStatus && paymentStatus !== order.paymentStatus) {
       order.paymentStatus = paymentStatus;
+      if (paymentStatus === "Paid" && (!order.settlementStatus || order.settlementStatus === "Not Applicable") && order.paymentMethod !== "COD") {
+        order.settlementStatus = "Pending Settlement";
+      }
       if (paymentStatus === "Refund Requested") {
         order.refundRequestedAt = nowIso;
         state.adminNotifications.unshift({

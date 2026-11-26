@@ -1,4 +1,4 @@
-import { relations } from 'drizzle-orm';
+import { relations, sql } from 'drizzle-orm';
 import {
   boolean,
   doublePrecision,
@@ -7,6 +7,7 @@ import {
   pgTable,
   text,
   timestamp,
+  uniqueIndex,
 } from 'drizzle-orm/pg-core';
 import type {
   InquiryReplyChannel,
@@ -14,6 +15,7 @@ import type {
   LabMicrobiologicalResult,
   OrderItem,
   OrderTimelineEvent,
+  PersistedCheckoutDraft,
   ShippingAddress,
   StoreSettings,
 } from '../types.ts';
@@ -66,7 +68,9 @@ export const products = pgTable('products', {
   updatedAt: timestamp('updated_at').defaultNow(),
 });
 
-export const orders = pgTable('orders', {
+export const orders = pgTable(
+  'orders',
+  {
   id: text('id').primaryKey(),
   sortOrder: integer('sort_order').notNull().default(0),
   orderNumber: text('order_number').notNull().unique(),
@@ -91,9 +95,14 @@ export const orders = pgTable('orders', {
   gstAmount: doublePrecision('gst_amount').notNull(),
   totalAmount: doublePrecision('total_amount').notNull(),
   gatewayFeeAmount: doublePrecision('gateway_fee_amount'),
+  gatewayTaxAmount: doublePrecision('gateway_tax_amount'),
+  gatewayFeeSource: text('gateway_fee_source'),
   actualShippingCost: doublePrecision('actual_shipping_cost'),
   paymentMethod: text('payment_method').notNull(),
   paymentStatus: text('payment_status').notNull(),
+  settlementStatus: text('settlement_status'),
+  razorpaySettlementId: text('razorpay_settlement_id'),
+  settledAt: text('settled_at'),
   razorpayOrderId: text('razorpay_order_id'),
   razorpayPaymentId: text('razorpay_payment_id'),
   paymentVerifiedAt: text('payment_verified_at'),
@@ -109,7 +118,16 @@ export const orders = pgTable('orders', {
   refundRequestedAt: text('refund_requested_at'),
   timeline: jsonb('timeline').$type<OrderTimelineEvent[]>().notNull().default([]),
   createdAt: text('created_at').notNull(),
-});
+  },
+  (table) => [
+    uniqueIndex('orders_razorpay_payment_id_uidx')
+      .on(table.razorpayPaymentId)
+      .where(sql`${table.razorpayPaymentId} IS NOT NULL`),
+    uniqueIndex('orders_razorpay_order_id_uidx')
+      .on(table.razorpayOrderId)
+      .where(sql`${table.razorpayOrderId} IS NOT NULL`),
+  ]
+);
 
 export const coupons = pgTable('coupons', {
   id: text('id').primaryKey(),
@@ -229,7 +247,12 @@ export const paymentIntents = pgTable('payment_intents', {
   paymentId: text('payment_id'),
   signatureVerified: boolean('signature_verified').notNull().default(false),
   method: text('method').notNull(),
+  checkoutPayload: jsonb('checkout_payload').$type<PersistedCheckoutDraft | null>(),
+  orderId: text('order_id'),
+  gatewayFeePaise: integer('gateway_fee_paise'),
+  gatewayTaxPaise: integer('gateway_tax_paise'),
   createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at'),
 });
 
 export const storeSettings = pgTable('store_settings', {

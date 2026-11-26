@@ -138,6 +138,12 @@ export type OrderPaymentStatus =
   | 'Refund Requested'
   | 'Refunded';
 
+export type PaymentSettlementStatus =
+  | 'Not Applicable'
+  | 'Pending Settlement'
+  | 'Settled'
+  | 'On Hold';
+
 export type PaymentMethod =
   | 'UPI'
   | 'Card'
@@ -147,6 +153,16 @@ export type PaymentMethod =
   | 'PayLater'
   | 'Online'
   | 'COD';
+
+export interface PersistedCheckoutDraft {
+  items: CartItem[];
+  shippingAddress: ShippingAddress;
+  deliveryInstructions?: string;
+  shippingSpeed: 'standard' | 'express';
+  paymentMethod: PaymentMethod;
+  couponCode?: string;
+  userId?: string;
+}
 
 export interface OrderTimelineEvent {
   status: OrderStatus;
@@ -190,9 +206,14 @@ export interface Order {
   gstAmount: number;
   totalAmount: number;
   gatewayFeeAmount?: number;
+  gatewayTaxAmount?: number;
+  gatewayFeeSource?: 'razorpay_actual' | 'estimated';
   actualShippingCost?: number;
   paymentMethod: PaymentMethod;
   paymentStatus: OrderPaymentStatus;
+  settlementStatus?: PaymentSettlementStatus;
+  razorpaySettlementId?: string;
+  settledAt?: string;
   razorpayOrderId?: string;
   razorpayPaymentId?: string;
   paymentVerifiedAt?: string;
@@ -288,4 +309,19 @@ export interface PublicStoreBootstrap {
   labReports: LabReport[];
   cmsSections: CmsSection[];
   serverNow: string;
+}
+
+export interface UnreconciledPaymentIntent {
+  razorpayOrderId: string;
+  amountPaise: number;
+  verified: boolean;
+  paymentId?: string;
+  signatureVerified: boolean;
+  method: string;
+  checkoutPayload?: PersistedCheckoutDraft;
+  orderId?: string;
+  gatewayFeePaise?: number;
+  gatewayTaxPaise?: number;
+  createdAt: string;
+  updatedAt?: string;
 }

@@ -27,7 +27,9 @@ import { resolveProductImageUrl } from '../lib/productImages';
 import { AdminAnalyticsSection } from './admin/AdminAnalyticsSection';
 import { AdminInquiriesPanel, type InquiryReplyResult } from './admin/AdminInquiriesPanel';
 import { AdminOrdersSection } from './admin/AdminOrdersSection';
+import { AdminPaymentReconciliationPanel } from './admin/AdminPaymentReconciliationPanel';
 import { AdminPromotionsSection } from './admin/AdminPromotionsSection';
+import { AdminTestCleanupPanel } from './admin/AdminTestCleanupPanel';
 import { ShippingCodQuickCard } from './admin/ShippingCodQuickCard';
 import type {
   AdminNotification,
@@ -40,9 +42,11 @@ import type {
   Order,
   OrderPaymentStatus,
   OrderStatus,
+  PaymentSettlementStatus,
   Product,
   Promotion,
   StoreSettings,
+  UnreconciledPaymentIntent,
   User,
 } from '../types';
 
@@ -65,6 +69,7 @@ interface AdminOverviewData {
   notifications: AdminNotification[];
   customers: User[];
   analytics: ProfitSummary;
+  unreconciledPayments?: UnreconciledPaymentIntent[];
   serverNow: string;
 }
 
@@ -380,6 +385,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       estimatedDelivery?: string;
       actualShippingCost?: number;
       paymentStatus?: OrderPaymentStatus;
+      settlementStatus?: PaymentSettlementStatus;
       refundAmount?: number;
       refundReason?: string;
       note?: string;
@@ -964,11 +970,44 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
                 {/* 2. ORDERS & DISPATCH */}
                 {section === 'orders' && (
-                  <AdminOrdersSection
-                    orders={data.orders}
-                    brandAddress={data.settings.brandAddress}
-                    onUpdateOrder={updateOrderDetailed}
-                  />
+                  <div className="space-y-6">
+                    <AdminPaymentReconciliationPanel
+                      unreconciledPayments={data.unreconciledPayments ?? []}
+                      products={data.products}
+                      settings={data.settings}
+                      coupons={data.coupons}
+                      promotions={data.promotions ?? []}
+                      adminFetch={adminFetch}
+                      onReconciled={async (order, alreadyExisted) => {
+                        showToast(
+                          alreadyExisted
+                            ? `Order ${order.orderNumber} already exists — no duplicate created.`
+                            : `Recovered order ${order.orderNumber} from captured payment.`
+                        );
+                        await fetchOverview(false, true);
+                        onStorefrontDataChanged();
+                      }}
+                    />
+                    <AdminTestCleanupPanel
+                      orders={data.orders}
+                      products={data.products}
+                      expenses={data.expenses}
+                      settings={data.settings}
+                      adminFetch={adminFetch}
+                      onCleanupComplete={async (summary) => {
+                        showToast(
+                          `Cleaned ${summary.deletedOrderNumbers.length} approved test order(s) and recalculated metrics.`
+                        );
+                        await fetchOverview(false, true);
+                        onStorefrontDataChanged();
+                      }}
+                    />
+                    <AdminOrdersSection
+                      orders={data.orders}
+                      brandAddress={data.settings.brandAddress}
+                      onUpdateOrder={updateOrderDetailed}
+                    />
+                  </div>
                 )}
 
                 {/* 3. OFFERS & PROMOTIONS CMS */}
