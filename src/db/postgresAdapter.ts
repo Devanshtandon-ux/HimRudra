@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gte, notInArray, or, sql } from 'drizzle-orm';
-import { createPool, db, isUsingExternalPostgresUrl } from './index.ts';
+import { createPool, db, getDatabaseEnvironmentInfo, isUsingExternalPostgresUrl } from './index.ts';
 import {
   adminNotifications,
   cmsSections,
@@ -56,24 +56,88 @@ export interface PostgresCheckoutContext {
   maxOrderSeq: number;
 }
 
+interface PgErrorLike {
+  code?: unknown;
+  message?: unknown;
+  detail?: unknown;
+  hint?: unknown;
+  schema?: unknown;
+  table?: unknown;
+  column?: unknown;
+  position?: unknown;
+  cause?: PgErrorLike;
+}
+
+function getUnderlyingPgError(error: unknown): PgErrorLike | null {
+  if (!error || typeof error !== 'object') return null;
+  let current = error as PgErrorLike;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (current.cause && typeof current.cause === 'object') {
+      current = current.cause;
+    } else {
+      break;
+    }
+  }
+  return current;
+}
+
 function getPgErrorCode(error: unknown): string {
   if (!error || typeof error !== 'object') return '';
-  const direct = (error as { code?: unknown }).code;
-  if (typeof direct === 'string' && direct) return direct;
-  const cause = (error as { cause?: { code?: unknown } }).cause;
-  if (cause && typeof cause.code === 'string') return cause.code;
+  let current: PgErrorLike | undefined = error as PgErrorLike;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    if (typeof current.code === 'string' && current.code) return current.code;
+    current = current.cause && typeof current.cause === 'object' ? current.cause : undefined;
+  }
   return '';
+}
+
+function getPgCauseMessage(error: unknown): string {
+  const underlying = getUnderlyingPgError(error);
+  if (underlying && typeof underlying.message === 'string' && underlying.message) {
+    return underlying.message;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+function extractMissingColumnName(message: string): string | undefined {
+  const match = message.match(
+    /column\s+["']?([a-zA-Z0-9_."']+)["']?\s+(?:of\s+relation\s+["']?[a-zA-Z0-9_."']+["']?\s+)?does not exist/i
+  );
+  return match?.[1]?.replaceAll('"', '').replaceAll("'", '');
+}
+
+export function extractPgDiagnostics(error: unknown): Record<string, unknown> {
+  const topMessage = error instanceof Error ? error.message : String(error);
+  const underlying = getUnderlyingPgError(error);
+  const causeMessage = getPgCauseMessage(error);
+  const code = getPgErrorCode(error) || undefined;
+  const missingColumn =
+    (typeof underlying?.column === 'string' && underlying.column) ||
+    extractMissingColumnName(causeMessage) ||
+    extractMissingColumnName(topMessage);
+
+  return {
+    pgCode: code,
+    pgCause: causeMessage,
+    ...(missingColumn ? { missingColumn } : {}),
+    ...(typeof underlying?.table === 'string' && underlying.table ? { pgTable: underlying.table } : {}),
+    ...(typeof underlying?.schema === 'string' && underlying.schema ? { pgSchema: underlying.schema } : {}),
+    ...(typeof underlying?.detail === 'string' && underlying.detail ? { pgDetail: underlying.detail } : {}),
+    ...(typeof underlying?.hint === 'string' && underlying.hint ? { pgHint: underlying.hint } : {}),
+    ...(typeof underlying?.position === 'string' && underlying.position ? { pgPosition: underlying.position } : {}),
+    ...(topMessage !== causeMessage ? { queryError: topMessage.slice(0, 400) } : {}),
+  };
 }
 
 function isUndefinedTableError(error: unknown): boolean {
   if (getPgErrorCode(error) === '42P01') return true;
-  const msg = error instanceof Error ? error.message : String(error);
+  const msg = `${error instanceof Error ? error.message : String(error)} ${getPgCauseMessage(error)}`;
   return /relation ["']?[a-z_]+["']? does not exist/i.test(msg);
 }
 
 function isUndefinedColumnError(error: unknown): boolean {
   if (getPgErrorCode(error) === '42703') return true;
-  const msg = error instanceof Error ? error.message : String(error);
+  const msg = `${error instanceof Error ? error.message : String(error)} ${getPgCauseMessage(error)}`;
   return /column ["']?[a-z0-9_.]+["']? does not exist/i.test(msg);
 }
 
@@ -89,7 +153,7 @@ function isTransientConnectionError(error: unknown): boolean {
   ) {
     return true;
   }
-  const msg = error instanceof Error ? error.message : String(error);
+  const msg = `${error instanceof Error ? error.message : String(error)} ${getPgCauseMessage(error)}`;
   return /ECONNRESET|Connection terminated unexpectedly|terminating connection|socket hang up/i.test(
     msg
   );
@@ -432,6 +496,66 @@ export class PostgresStateAdapter {
     return summary;
   }
 
+  private connectionIdentityCache: {
+    host?: string;
+    port?: number;
+    sourceEnvVar?: string;
+    provider: string;
+    runtimeEnv: string;
+    databaseName?: string;
+    currentSchema?: string;
+    searchPath?: string;
+  } | null = null;
+
+  /**
+   * Read-only diagnostic lookup of connected DB identity (host, database name, current_schema, search_path).
+   * Safe for server-side logs only — never exposes credentials, usernames, or connection strings.
+   */
+  private async getSafeConnectionDiagnostics(): Promise<{
+    host?: string;
+    port?: number;
+    sourceEnvVar?: string;
+    provider: string;
+    runtimeEnv: string;
+    databaseName?: string;
+    currentSchema?: string;
+    searchPath?: string;
+  }> {
+    if (this.connectionIdentityCache) return this.connectionIdentityCache;
+    const envInfo = getDatabaseEnvironmentInfo();
+    const base = {
+      host: envInfo.host,
+      port: envInfo.port,
+      sourceEnvVar: envInfo.sourceEnvVar,
+      provider: envInfo.provider,
+      runtimeEnv: envInfo.runtimeEnv,
+      databaseName: envInfo.databaseName,
+    };
+    try {
+      const pool = createPool();
+      const res = await pool.query<{
+        database_name: string;
+        current_schema: string;
+        search_path: string;
+      }>(
+        `SELECT current_database() AS database_name,
+                current_schema() AS current_schema,
+                current_setting('search_path') AS search_path`
+      );
+      const row = res.rows[0];
+      const identity = {
+        ...base,
+        databaseName: row?.database_name || base.databaseName,
+        currentSchema: row?.current_schema,
+        searchPath: row?.search_path,
+      };
+      this.connectionIdentityCache = identity;
+      return identity;
+    } catch {
+      return base;
+    }
+  }
+
   /**
    * Executes a Postgres operation without runtime ALTER TABLE / CREATE INDEX DDL.
    * Retries once on transient idle-socket resets (common when Neon compute wakes from scale-to-zero).
@@ -445,9 +569,17 @@ export class PostgresStateAdapter {
         return await operation();
       }
       if (isUndefinedColumnError(error)) {
+        const dbIdentity = await this.getSafeConnectionDiagnostics();
         logStructured('error', 'cloud-sql', 'schema_migration_required', {
-          code: getPgErrorCode(error) || '42703',
-          error: error instanceof Error ? error.message : String(error),
+          ...extractPgDiagnostics(error),
+          dbHost: dbIdentity.host,
+          dbPort: dbIdentity.port,
+          dbName: dbIdentity.databaseName,
+          dbSchema: dbIdentity.currentSchema,
+          searchPath: dbIdentity.searchPath,
+          dbSourceEnvVar: dbIdentity.sourceEnvVar,
+          dbProvider: dbIdentity.provider,
+          runtimeEnv: dbIdentity.runtimeEnv,
           hint: 'Run database schema migration using the authorized database owner role.',
         });
         throw error;
@@ -637,9 +769,18 @@ export class PostgresStateAdapter {
         dbMs,
       };
     } catch (error) {
+      const dbIdentity = await this.getSafeConnectionDiagnostics();
       logStructured('error', 'cloud-sql', 'load_public_bootstrap_failed', {
         durationMs: Date.now() - startedAt,
-        code: getPgErrorCode(error) || 'unknown',
+        ...extractPgDiagnostics(error),
+        dbHost: dbIdentity.host,
+        dbPort: dbIdentity.port,
+        dbName: dbIdentity.databaseName,
+        dbSchema: dbIdentity.currentSchema,
+        searchPath: dbIdentity.searchPath,
+        dbSourceEnvVar: dbIdentity.sourceEnvVar,
+        dbProvider: dbIdentity.provider,
+        runtimeEnv: dbIdentity.runtimeEnv,
       });
       throw error;
     }
@@ -1151,9 +1292,14 @@ export class PostgresStateAdapter {
         maxOrderSeq,
       };
     } catch (error) {
+      const dbIdentity = await this.getSafeConnectionDiagnostics();
       logStructured('error', 'cloud-sql', 'load_checkout_context_failed', {
         durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error),
+        ...extractPgDiagnostics(error),
+        dbHost: dbIdentity.host,
+        dbName: dbIdentity.databaseName,
+        searchPath: dbIdentity.searchPath,
+        dbSourceEnvVar: dbIdentity.sourceEnvVar,
       });
       throw new StorePersistenceError('Database read failed during checkout. Please try again shortly.', {
         code: 'POSTGRES_CHECKOUT_READ_FAILED',
@@ -1171,8 +1317,13 @@ export class PostgresStateAdapter {
       );
       return rows[0] ? this.mapUserRow(rows[0]) : null;
     } catch (error) {
+      const dbIdentity = await this.getSafeConnectionDiagnostics();
       logStructured('error', 'cloud-sql', 'find_user_by_email_failed', {
-        error: error instanceof Error ? error.message : String(error),
+        ...extractPgDiagnostics(error),
+        dbHost: dbIdentity.host,
+        dbName: dbIdentity.databaseName,
+        searchPath: dbIdentity.searchPath,
+        dbSourceEnvVar: dbIdentity.sourceEnvVar,
       });
       throw new StorePersistenceError('Database read failed. Please try again shortly.', {
         code: 'POSTGRES_READ_FAILED',
@@ -1189,8 +1340,13 @@ export class PostgresStateAdapter {
       );
       return rows[0] ? this.mapUserRow(rows[0]) : null;
     } catch (error) {
+      const dbIdentity = await this.getSafeConnectionDiagnostics();
       logStructured('error', 'cloud-sql', 'find_user_by_id_failed', {
-        error: error instanceof Error ? error.message : String(error),
+        ...extractPgDiagnostics(error),
+        dbHost: dbIdentity.host,
+        dbName: dbIdentity.databaseName,
+        searchPath: dbIdentity.searchPath,
+        dbSourceEnvVar: dbIdentity.sourceEnvVar,
       });
       throw new StorePersistenceError('Database read failed. Please try again shortly.', {
         code: 'POSTGRES_READ_FAILED',
@@ -1519,8 +1675,16 @@ export class PostgresStateAdapter {
         dbMs: Date.now() - startedAt,
       };
     } catch (error) {
+      const dbIdentity = await this.getSafeConnectionDiagnostics();
       logStructured('error', 'cloud-sql', 'load_state_failed', {
-        error: error instanceof Error ? error.message : String(error),
+        ...extractPgDiagnostics(error),
+        dbHost: dbIdentity.host,
+        dbName: dbIdentity.databaseName,
+        dbSchema: dbIdentity.currentSchema,
+        searchPath: dbIdentity.searchPath,
+        dbSourceEnvVar: dbIdentity.sourceEnvVar,
+        dbProvider: dbIdentity.provider,
+        runtimeEnv: dbIdentity.runtimeEnv,
       });
       throw new StorePersistenceError('Database read failed. Please try again shortly.', {
         code: 'POSTGRES_READ_FAILED',

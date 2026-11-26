@@ -19,28 +19,62 @@ export function getAppRuntimeEnvironment(
   return 'development';
 }
 
+function normalizePostgresUrl(raw?: string): string | null {
+  if (!raw) return null;
+  const cleaned = raw.trim().replace(/^['"]+|['"]+$/g, '').trim();
+  return cleaned.startsWith('postgres://') || cleaned.startsWith('postgresql://')
+    ? cleaned
+    : null;
+}
+
+interface ResolvedExternalPostgresUrl {
+  url: string;
+  sourceEnvVar:
+    | 'DATABASE_URL'
+    | 'POSTGRES_URL'
+    | 'POSTGRES_PRISMA_URL'
+    | 'DATABASE_URL_PREVIEW'
+    | 'DATABASE_URL_TEST';
+}
+
+function resolveExternalPostgresUrl(
+  env: Record<string, string | undefined> = process.env
+): ResolvedExternalPostgresUrl | null {
+  const runtimeEnv = getAppRuntimeEnvironment(env);
+  if (runtimeEnv === 'test') {
+    const testUrl = normalizePostgresUrl(env.DATABASE_URL_TEST);
+    return testUrl ? { url: testUrl, sourceEnvVar: 'DATABASE_URL_TEST' } : null;
+  }
+  if (runtimeEnv === 'preview') {
+    const previewUrl = normalizePostgresUrl(env.DATABASE_URL_PREVIEW);
+    if (previewUrl) {
+      return { url: previewUrl, sourceEnvVar: 'DATABASE_URL_PREVIEW' };
+    }
+  }
+  const primary = normalizePostgresUrl(env.DATABASE_URL);
+  if (primary) return { url: primary, sourceEnvVar: 'DATABASE_URL' };
+  const pgUrl = normalizePostgresUrl(env.POSTGRES_URL);
+  if (pgUrl) return { url: pgUrl, sourceEnvVar: 'POSTGRES_URL' };
+  const prismaUrl = normalizePostgresUrl(env.POSTGRES_PRISMA_URL);
+  if (prismaUrl) return { url: prismaUrl, sourceEnvVar: 'POSTGRES_PRISMA_URL' };
+  return null;
+}
+
 function getExternalPostgresUrl(
   env: Record<string, string | undefined> = process.env
 ): string | null {
-  const runtimeEnv = getAppRuntimeEnvironment(env);
-  if (runtimeEnv === 'test') {
-    const testUrl = env.DATABASE_URL_TEST?.trim() || '';
-    return testUrl.startsWith('postgres://') || testUrl.startsWith('postgresql://')
-      ? testUrl
-      : null;
-  }
-  if (runtimeEnv === 'preview' && env.DATABASE_URL_PREVIEW?.trim()) {
-    const previewUrl = env.DATABASE_URL_PREVIEW.trim();
-    if (previewUrl.startsWith('postgres://') || previewUrl.startsWith('postgresql://')) {
-      return previewUrl;
-    }
-  }
-  const raw =
-    env.DATABASE_URL?.trim() ||
-    env.POSTGRES_URL?.trim() ||
-    env.POSTGRES_PRISMA_URL?.trim() ||
-    '';
-  return raw.startsWith('postgres://') || raw.startsWith('postgresql://') ? raw : null;
+  return resolveExternalPostgresUrl(env)?.url ?? null;
+}
+
+function hasCloudSqlObjectVars(
+  env: Record<string, string | undefined> = process.env
+): boolean {
+  return Boolean(
+    env.SQL_HOST?.trim() &&
+      env.SQL_USER?.trim() &&
+      env.SQL_PASSWORD?.trim() &&
+      env.SQL_DB_NAME?.trim()
+  );
 }
 
 export function getDatabaseEnvironmentInfo(
@@ -48,34 +82,35 @@ export function getDatabaseEnvironmentInfo(
 ): {
   runtimeEnv: AppRuntimeEnvironment;
   provider: 'external-postgres' | 'cloud-sql' | 'none';
+  sourceEnvVar?: string;
   host?: string;
+  port?: number;
   databaseName?: string;
   isolatedTestEnv: boolean;
 } {
   const runtimeEnv = getAppRuntimeEnvironment(env);
-  const hasCloudSqlObjectVars = Boolean(
-    env.SQL_HOST?.trim() &&
-      env.SQL_USER?.trim() &&
-      env.SQL_PASSWORD?.trim() &&
-      env.SQL_DB_NAME?.trim()
-  );
-  if (hasCloudSqlObjectVars && runtimeEnv !== 'test') {
+  if (hasCloudSqlObjectVars(env) && runtimeEnv !== 'test') {
+    const parsedPort = env.SQL_PORT ? Number(env.SQL_PORT) : undefined;
     return {
       runtimeEnv,
       provider: 'cloud-sql',
+      sourceEnvVar: 'SQL_HOST',
       host: env.SQL_HOST?.trim(),
+      ...(Number.isFinite(parsedPort) ? { port: parsedPort } : {}),
       databaseName: env.SQL_DB_NAME?.trim(),
       isolatedTestEnv: false,
     };
   }
-  const url = getExternalPostgresUrl(env);
-  if (url) {
+  const resolved = resolveExternalPostgresUrl(env);
+  if (resolved) {
     try {
-      const parsed = new URL(url);
+      const parsed = new URL(resolved.url);
       return {
         runtimeEnv,
         provider: 'external-postgres',
+        sourceEnvVar: resolved.sourceEnvVar,
         host: parsed.hostname,
+        port: parsed.port ? Number(parsed.port) : 5432,
         databaseName: parsed.pathname.replace(/^\//, ''),
         isolatedTestEnv: runtimeEnv === 'test',
       };
@@ -83,6 +118,7 @@ export function getDatabaseEnvironmentInfo(
       return {
         runtimeEnv,
         provider: 'external-postgres',
+        sourceEnvVar: resolved.sourceEnvVar,
         isolatedTestEnv: runtimeEnv === 'test',
       };
     }
@@ -98,14 +134,8 @@ export function isUsingExternalPostgresUrl(
   env: Record<string, string | undefined> = process.env
 ): boolean {
   const runtimeEnv = getAppRuntimeEnvironment(env);
-  const hasCloudSqlObjectVars = Boolean(
-    env.SQL_HOST?.trim() &&
-      env.SQL_USER?.trim() &&
-      env.SQL_PASSWORD?.trim() &&
-      env.SQL_DB_NAME?.trim()
-  );
-  if (hasCloudSqlObjectVars && runtimeEnv !== 'test') return false;
-  return Boolean(getExternalPostgresUrl(env));
+  if (hasCloudSqlObjectVars(env) && runtimeEnv !== 'test') return false;
+  return Boolean(resolveExternalPostgresUrl(env));
 }
 
 export function isCloudSqlConfigured(
@@ -117,32 +147,23 @@ export function isCloudSqlConfigured(
   }
   const runtimeEnv = getAppRuntimeEnvironment(env);
   if (runtimeEnv === 'test') {
-    return Boolean(getExternalPostgresUrl(env));
+    return Boolean(resolveExternalPostgresUrl(env));
   }
-  const hasObjectVars = Boolean(
-    env.SQL_HOST?.trim() &&
-      env.SQL_USER?.trim() &&
-      env.SQL_PASSWORD?.trim() &&
-      env.SQL_DB_NAME?.trim()
-  );
-  return hasObjectVars || Boolean(getExternalPostgresUrl(env));
+  return hasCloudSqlObjectVars(env) || Boolean(resolveExternalPostgresUrl(env));
 }
 
 export const createPool = () => {
   if (!global._postgresPool) {
-    const hasObjectVars = Boolean(
-      process.env.SQL_HOST?.trim() &&
-        process.env.SQL_USER?.trim() &&
-        process.env.SQL_PASSWORD?.trim() &&
-        process.env.SQL_DB_NAME?.trim()
-    );
-    const externalUrl = hasObjectVars ? null : getExternalPostgresUrl(process.env);
+    const runtimeEnv = getAppRuntimeEnvironment(process.env);
+    const useCloudSqlVars = hasCloudSqlObjectVars(process.env) && runtimeEnv !== 'test';
+    const externalUrl = useCloudSqlVars ? null : getExternalPostgresUrl(process.env);
 
     if (externalUrl) {
       const parsed = new URL(externalUrl);
       const sslDisabled =
         parsed.searchParams.get('sslmode') === 'disable' ||
         (process.env.SQL_SSL || '').trim().toLowerCase() === 'false';
+      const pgOptions = parsed.searchParams.get('options')?.trim() || undefined;
 
       global._postgresPool = new Pool({
         host: parsed.hostname,
@@ -150,6 +171,7 @@ export const createPool = () => {
         user: decodeURIComponent(parsed.username),
         password: decodeURIComponent(parsed.password),
         database: parsed.pathname.replace(/^\//, ''),
+        ...(pgOptions ? { options: pgOptions } : {}),
         ...(sslDisabled ? {} : { ssl: { rejectUnauthorized: false } }),
         max: process.env.VERCEL ? 3 : 10,
         idleTimeoutMillis: process.env.VERCEL ? 10_000 : 30_000,
