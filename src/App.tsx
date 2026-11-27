@@ -72,6 +72,7 @@ export default function App() {
   const [bannerDismissed, setBannerDismissed] = useState(false);
   const [labPreviewOpen, setLabPreviewOpen] = useState(false);
   const [selectedLabReportId, setSelectedLabReportId] = useState('');
+  const [orderSyncVersion, setOrderSyncVersion] = useState(0);
 
   const loadStoreBootstrap = async () => {
     setLoadError('');
@@ -263,7 +264,7 @@ export default function App() {
     }
   };
 
-  const handleOrderSuccess = (_order: Order, updatedProducts: Product[]) => {
+  const handleOrderSuccess = (order: Order, updatedProducts: Product[]) => {
     setCartItems([]);
     setCouponCode('');
     clearCachedBootstrap();
@@ -273,6 +274,14 @@ export default function App() {
       writeCachedBootstrap(next);
       return next;
     });
+    setOrderSyncVersion((v) => v + 1);
+    try {
+      window.dispatchEvent(new CustomEvent('himrudra:order-created', { detail: order }));
+    } catch {
+      // ignore event errors in non-DOM environments
+    }
+    void loadStoreBootstrap();
+    void loadCurrentUser();
   };
 
   const isLegalRoute =
@@ -563,6 +572,7 @@ export default function App() {
         products={products}
         initialTrackOrderNumber={trackOrderNumber}
         initialTab={accountTab}
+        orderSyncVersion={orderSyncVersion}
         onAuthChange={(nextUser) => setUser(nextUser)}
         onOpenAdminDashboard={() => setAdminOpen(true)}
         onAddToCart={(pid, qty) => addToCart(pid, qty, true)}

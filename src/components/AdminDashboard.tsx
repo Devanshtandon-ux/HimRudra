@@ -3,6 +3,8 @@ import {
   BarChart3,
   Bell,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Download,
   Eye,
   EyeOff,
@@ -20,6 +22,7 @@ import {
   Trash2,
   Upload,
   Users,
+  Wrench,
   X,
 } from 'lucide-react';
 import { formatINR, type ProfitSummary } from '../lib/commerce';
@@ -181,6 +184,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [couponType, setCouponType] = useState<'percent' | 'flat'>('percent');
 
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [advancedMaintenanceOpen, setAdvancedMaintenanceOpen] = useState(false);
   const authBlockedRef = useRef(false);
   const pollTimerRef = useRef<number | null>(null);
 
@@ -255,11 +259,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         void fetchOverview(true);
       }
     };
+    const handleOrderCreated = () => {
+      if (!authBlockedRef.current) {
+        void fetchOverview(true);
+      }
+    };
     window.addEventListener('focus', handleFocus);
+    window.addEventListener('himrudra:order-created', handleOrderCreated);
     document.addEventListener('visibilitychange', handleVisibility);
     return () => {
       stopPolling();
       window.removeEventListener('focus', handleFocus);
+      window.removeEventListener('himrudra:order-created', handleOrderCreated);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);
@@ -971,42 +982,87 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 {/* 2. ORDERS & DISPATCH */}
                 {section === 'orders' && (
                   <div className="space-y-6">
-                    <AdminPaymentReconciliationPanel
-                      unreconciledPayments={data.unreconciledPayments ?? []}
-                      products={data.products}
-                      settings={data.settings}
-                      coupons={data.coupons}
-                      promotions={data.promotions ?? []}
-                      adminFetch={adminFetch}
-                      onReconciled={async (order, alreadyExisted) => {
-                        showToast(
-                          alreadyExisted
-                            ? `Order ${order.orderNumber} already exists — no duplicate created.`
-                            : `Recovered order ${order.orderNumber} from captured payment.`
-                        );
-                        await fetchOverview(false, true);
-                        onStorefrontDataChanged();
-                      }}
-                    />
-                    <AdminTestCleanupPanel
-                      orders={data.orders}
-                      products={data.products}
-                      expenses={data.expenses}
-                      settings={data.settings}
-                      adminFetch={adminFetch}
-                      onCleanupComplete={async (summary) => {
-                        showToast(
-                          `Cleaned ${summary.deletedOrderNumbers.length} approved test order(s) and recalculated metrics.`
-                        );
-                        await fetchOverview(false, true);
-                        onStorefrontDataChanged();
-                      }}
-                    />
                     <AdminOrdersSection
                       orders={data.orders}
                       brandAddress={data.settings.brandAddress}
                       onUpdateOrder={updateOrderDetailed}
                     />
+
+                    {/* Collapsed Advanced Maintenance Drawer (Manual Recovery & Test Cleanup) */}
+                    <section
+                      data-testid="admin-advanced-maintenance"
+                      className="rounded-xl border border-[#79543D]/20 bg-[#F3EDE5]/40 overflow-hidden"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => setAdvancedMaintenanceOpen((prev) => !prev)}
+                        aria-expanded={advancedMaintenanceOpen}
+                        className="w-full flex flex-wrap items-center justify-between gap-3 px-4 py-3 text-left hover:bg-[#F3EDE5]/80 transition"
+                      >
+                        <div className="flex items-center gap-2.5">
+                          <Wrench className="h-4 w-4 text-[#79543D] shrink-0" />
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-serif text-sm font-semibold text-[#281A15]">
+                                Advanced Maintenance
+                              </span>
+                              {(data.unreconciledPayments?.length ?? 0) > 0 && (
+                                <span className="rounded-full bg-amber-100 border border-amber-300 px-2 py-0.5 font-mono text-[10px] font-semibold text-amber-900">
+                                  {data.unreconciledPayments?.length} pending recovery
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-[11px] text-[#79543D]">
+                              Manual Razorpay payment reconciliation &amp; owner-approved test-data cleanup tools
+                            </p>
+                          </div>
+                        </div>
+                        <span className="inline-flex items-center gap-1 text-xs font-medium text-[#79543D]">
+                          <span>{advancedMaintenanceOpen ? 'Collapse' : 'Expand'}</span>
+                          {advancedMaintenanceOpen ? (
+                            <ChevronUp className="h-4 w-4" />
+                          ) : (
+                            <ChevronDown className="h-4 w-4" />
+                          )}
+                        </span>
+                      </button>
+
+                      {advancedMaintenanceOpen && (
+                        <div className="p-4 border-t border-[#79543D]/15 bg-[#FAF8F4] space-y-5">
+                          <AdminPaymentReconciliationPanel
+                            unreconciledPayments={data.unreconciledPayments ?? []}
+                            products={data.products}
+                            settings={data.settings}
+                            coupons={data.coupons}
+                            promotions={data.promotions ?? []}
+                            adminFetch={adminFetch}
+                            onReconciled={async (order, alreadyExisted) => {
+                              showToast(
+                                alreadyExisted
+                                  ? `Order ${order.orderNumber} already exists — no duplicate created.`
+                                  : `Recovered order ${order.orderNumber} from captured payment.`
+                              );
+                              await fetchOverview(false, true);
+                              onStorefrontDataChanged();
+                            }}
+                          />
+                          <AdminTestCleanupPanel
+                            orders={data.orders}
+                            products={data.products}
+                            expenses={data.expenses}
+                            settings={data.settings}
+                            adminFetch={adminFetch}
+                            onCleanupComplete={async (summary) => {
+                              showToast(
+                                `Cleaned ${summary.deletedOrderNumbers.length} approved test order(s) and recalculated metrics.`
+                              );
+                              await fetchOverview(false, true);
+                              onStorefrontDataChanged();
+                            }}
+                          />
+                        </div>
+                      )}
+                    </section>
                   </div>
                 )}
 

@@ -26,6 +26,7 @@ interface AccountDashboardModalProps {
   products: Product[];
   initialTrackOrderNumber?: string;
   initialTab?: 'account' | 'orders' | 'track' | 'wishlist';
+  orderSyncVersion?: number;
   onAuthChange: (user: User | null) => void;
   onOpenAdminDashboard: () => void;
   onAddToCart: (productId: string, qty: number) => void;
@@ -38,6 +39,7 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
   products,
   initialTrackOrderNumber = '',
   initialTab,
+  orderSyncVersion = 0,
   onAuthChange,
   onOpenAdminDashboard,
   onAddToCart,
@@ -100,7 +102,17 @@ export const AccountDashboardModal: React.FC<AccountDashboardModalProps> = ({
     if (open && user) {
       void fetchMyOrders();
     }
-  }, [open, user]);
+  }, [open, user, orderSyncVersion]);
+
+  useEffect(() => {
+    const onOrderCreated = () => {
+      if (user) {
+        void fetchMyOrders();
+      }
+    };
+    window.addEventListener('himrudra:order-created', onOrderCreated);
+    return () => window.removeEventListener('himrudra:order-created', onOrderCreated);
+  }, [user]);
 
   if (!open) return null;
 

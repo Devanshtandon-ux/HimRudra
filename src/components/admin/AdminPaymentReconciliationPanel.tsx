@@ -106,7 +106,7 @@ export const AdminPaymentReconciliationPanel: React.FC<
   adminFetch,
   onReconciled,
 }) => {
-  const [expanded, setExpanded] = useState(unreconciledPayments.length > 0);
+  const [expanded, setExpanded] = useState(false);
   const [queue, setQueue] = useState<UnreconciledPaymentIntent[]>(unreconciledPayments);
   const [refreshingQueue, setRefreshingQueue] = useState(false);
 
@@ -136,9 +136,6 @@ export const AdminPaymentReconciliationPanel: React.FC<
   // Sync queue when parent overview refreshes
   React.useEffect(() => {
     setQueue(unreconciledPayments);
-    if (unreconciledPayments.length > 0) {
-      setExpanded(true);
-    }
   }, [unreconciledPayments]);
 
   const draftItems: CartItem[] = useMemo(

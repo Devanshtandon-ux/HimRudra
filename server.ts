@@ -52,6 +52,7 @@ import {
   buildRazorpayOrderNotes,
   recoverVerifiedCheckoutDetails,
 } from './server/reconciliationRecovery.ts';
+import { sendAutomaticOrderEmails } from './server/orderNotifications.ts';
 import type {
   AdminNotification,
   BannerTheme,
@@ -735,13 +736,19 @@ export function createApiApp(): express.Express {
     }
 
     const nowMs = createdAtOverride ? Date.parse(createdAtOverride) || Date.now() : Date.now();
+    // Price using the payment intent's creation timestamp when available so launch-offer or promo boundaries never cause false amount mismatches after capture
+    const pricingNowMs = createdAtOverride
+      ? nowMs
+      : ctx.paymentIntent?.createdAt
+      ? Date.parse(ctx.paymentIntent.createdAt) || nowMs
+      : nowMs;
     const calc = calculateCartTotals(draft.items, ctx.products, ctx.settings, {
       shippingSpeed: draft.shippingSpeed || 'standard',
       paymentMethod: verifiedMethod,
       couponCode: draft.couponCode,
       coupons: ctx.coupons,
       promotions: ctx.promotions,
-      nowMs,
+      nowMs: pricingNowMs,
     });
 
     const calculatedPaise = Math.round(calc.grandTotal * 100);
@@ -763,10 +770,11 @@ export function createApiApp(): express.Express {
     }
 
     const normalizedEmail = draft.shippingAddress.email.trim().toLowerCase();
+    let matchedUser = existingUser ?? null;
     let resolvedUserId = existingUser?.id || draft.userId;
-    if (!resolvedUserId && normalizedEmail) {
-      const matchedUser = await storeRepo.findUserByEmail(normalizedEmail).catch(() => null);
-      if (matchedUser) {
+    if (!matchedUser && normalizedEmail) {
+      matchedUser = await storeRepo.findUserByEmail(normalizedEmail).catch(() => null);
+      if (matchedUser && !resolvedUserId) {
         resolvedUserId = matchedUser.id;
       }
     }
@@ -896,10 +904,10 @@ export function createApiApp(): express.Express {
       createdAt: new Date().toISOString(),
     };
 
-    const hadDefaultAddress = Boolean(existingUser?.defaultAddress);
+    const hadDefaultAddress = Boolean(matchedUser?.defaultAddress);
     const userDefaultAddressUpdate =
-      existingUser && !hadDefaultAddress
-        ? { userId: existingUser.id, address: newOrder.shippingAddress }
+      matchedUser && !hadDefaultAddress
+        ? { userId: matchedUser.id, address: newOrder.shippingAddress }
         : undefined;
 
     const state = storeRepo.getState();
@@ -924,8 +932,8 @@ export function createApiApp(): express.Express {
       }
       state.orders.unshift(newOrder);
       state.adminNotifications.unshift(adminNotification);
-      if (existingUser && !hadDefaultAddress) {
-        existingUser.defaultAddress = newOrder.shippingAddress;
+      if (matchedUser && !hadDefaultAddress) {
+        matchedUser.defaultAddress = newOrder.shippingAddress;
       }
       const existingIntent = state.paymentIntents[razorpayOrderId];
       if (existingIntent) {
@@ -985,13 +993,20 @@ export function createApiApp(): express.Express {
           appliedPromoInState.usageCount += 1;
           appliedPromoInState.revenueGenerated += calc.grandTotal;
         }
-        if (existingUser && !hadDefaultAddress) {
-          existingUser.defaultAddress = newOrder.shippingAddress;
+        if (matchedUser && !hadDefaultAddress) {
+          matchedUser.defaultAddress = newOrder.shippingAddress;
         }
       }
 
       storeRepo.invalidateCaches();
       bootstrapCache.invalidate();
+
+      // Fire non-blocking automatic order confirmation (customer) & admin alert emails exactly once
+      void sendAutomaticOrderEmails({
+        order: newOrder,
+        settings: ctx.settings,
+        requestId,
+      });
 
       const updatedProductsList = isPostgres
         ? ctx.products.filter((p) => p.active)
@@ -1018,8 +1033,8 @@ export function createApiApp(): express.Express {
           appliedPromoInState.usageCount = prevPromoUsage;
           appliedPromoInState.revenueGenerated = prevPromoRevenue;
         }
-        if (existingUser && !hadDefaultAddress) {
-          existingUser.defaultAddress = undefined;
+        if (matchedUser && !hadDefaultAddress) {
+          matchedUser.defaultAddress = undefined;
         }
       }
       const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
@@ -1065,14 +1080,17 @@ export function createApiApp(): express.Express {
     if (paymentMethod === 'COD') {
       return res.status(400).json({ error: 'Cash on Delivery does not require an online payment order.' });
     }
-    if (shippingAddress) {
-      const validation = validateCheckoutForm(shippingAddress);
-      if (!validation.valid) {
-        return res.status(400).json({
-          error: 'Please check your shipping details before continuing to payment.',
-          fieldErrors: validation.errors,
-        });
-      }
+    if (!shippingAddress) {
+      return res.status(400).json({
+        error: 'Complete shipping address, contact details, and PIN code are required before initiating payment.',
+      });
+    }
+    const validation = validateCheckoutForm(shippingAddress);
+    if (!validation.valid) {
+      return res.status(400).json({
+        error: 'Please check your shipping details before continuing to payment.',
+        fieldErrors: validation.errors,
+      });
     }
 
     const razorpayConfig = getRazorpayConfig();
@@ -1390,6 +1408,8 @@ export function createApiApp(): express.Express {
       let confirmedOrder: Order | undefined;
       let updatedProducts: Product[] | undefined;
       let orderIdempotent = false;
+      let orderError: string | undefined;
+      let orderErrorCode: string | undefined;
       if (effectiveDraft) {
         const orderResult = await createOrReturnVerifiedOnlineOrder({
           draft: effectiveDraft,
@@ -1408,6 +1428,8 @@ export function createApiApp(): express.Express {
           updatedProducts = orderResult.updatedProducts;
           orderIdempotent = orderResult.idempotent;
         } else {
+          orderError = orderResult.error;
+          orderErrorCode = orderResult.code;
           logStructured('warn', 'payments', 'verify_inline_order_creation_skipped', {
             requestId: req.requestId,
             razorpayOrderId: cleanOrderId,
@@ -1446,6 +1468,7 @@ export function createApiApp(): express.Express {
         order: confirmedOrder,
         updatedProducts,
         orderIdempotent,
+        ...(orderError ? { orderError, orderErrorCode } : {}),
       });
     } catch (err) {
       const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
@@ -1753,26 +1776,92 @@ export function createApiApp(): express.Express {
       razorpayPaymentId,
     });
 
-    // 3. Auto-create missing order when payment is captured and server-side checkout draft was persisted
+    // 3. Auto-create missing order when payment is captured (uses persisted checkout draft or verified multi-source recovery)
     if (!existingOrder && (event === 'payment.captured' || event === 'order.paid')) {
+      const resolvedMethod = normalizeRazorpayPaymentMethod(
+        paymentEntity?.method,
+        activeIntent?.method
+      );
+      let recoveryDraft: PersistedCheckoutDraft | null = activeIntent?.checkoutPayload ?? null;
+      const expectedPaise = activeIntent?.amountPaise ?? entityAmountPaise;
+
       if (
-        activeIntent &&
-        activeIntent.verified &&
-        activeIntent.checkoutPayload &&
+        !recoveryDraft &&
         razorpayOrderId &&
         razorpayPaymentId &&
         entityCurrency === 'INR' &&
-        (entityAmountPaise === undefined || entityAmountPaise === activeIntent.amountPaise)
+        typeof expectedPaise === 'number' &&
+        expectedPaise >= 100
+      ) {
+        if (storeRepo.isPostgresEnabled()) {
+          await storeRepo.ensureLoaded({ forceRefresh: true }).catch(() => undefined);
+        }
+        const stateSnapshot = storeRepo.getState();
+        const recoveredFromSources = recoverVerifiedCheckoutDetails({
+          livePayment: {
+            id: razorpayPaymentId,
+            order_id: razorpayOrderId,
+            amount: expectedPaise,
+            currency: entityCurrency,
+            status: 'captured',
+            method: paymentEntity?.method,
+            fee: paymentEntity?.fee,
+            tax: paymentEntity?.tax,
+            email: (paymentEntity as { email?: string } | undefined)?.email,
+            contact: (paymentEntity as { contact?: string } | undefined)?.contact,
+            notes: (paymentEntity as { notes?: Record<string, string> } | undefined)?.notes,
+          },
+          liveOrder: orderEntity
+            ? {
+                id: orderEntity.id,
+                amount: orderEntity.amount,
+                notes: (orderEntity as { notes?: Record<string, string> }).notes,
+              }
+            : null,
+          storedIntent: activeIntent,
+          allPaymentIntents: Object.values(stateSnapshot.paymentIntents),
+          users: stateSnapshot.users,
+          orders: stateSnapshot.orders,
+          products: stateSnapshot.products,
+          settings: stateSnapshot.settings,
+          coupons: stateSnapshot.coupons,
+          promotions: stateSnapshot.promotions,
+          verifiedMethod: resolvedMethod,
+        });
+        if (recoveredFromSources.canAutoReconcile && recoveredFromSources.draft) {
+          recoveryDraft = recoveredFromSources.draft;
+          await storeRepo
+            .upsertPaymentIntent({
+              razorpayOrderId,
+              amountPaise: expectedPaise,
+              verified: true,
+              signatureVerified: true,
+              paymentId: razorpayPaymentId,
+              method: resolvedMethod,
+              checkoutPayload: recoveryDraft,
+              gatewayFeePaise: extractedFee.gatewayFeePaise ?? activeIntent?.gatewayFeePaise,
+              gatewayTaxPaise: extractedFee.gatewayTaxPaise ?? activeIntent?.gatewayTaxPaise,
+              createdAt: activeIntent?.createdAt || new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            })
+            .catch(() => undefined);
+        }
+      }
+
+      if (
+        recoveryDraft &&
+        razorpayOrderId &&
+        razorpayPaymentId &&
+        entityCurrency === 'INR' &&
+        typeof expectedPaise === 'number' &&
+        (entityAmountPaise === undefined || entityAmountPaise === expectedPaise)
       ) {
         const created = await createOrReturnVerifiedOnlineOrder({
-          draft: activeIntent.checkoutPayload,
+          draft: recoveryDraft,
           razorpayOrderId,
           razorpayPaymentId,
-          verifiedMethod: normalizeRazorpayPaymentMethod(
-            paymentEntity?.method,
-            activeIntent.method
-          ),
-          expectedAmountPaise: activeIntent.amountPaise,
+          verifiedMethod: resolvedMethod,
+          expectedAmountPaise: expectedPaise,
           actualFee: extractedFee,
           source: 'webhook',
           requestId: req.requestId,
@@ -2035,6 +2124,19 @@ export function createApiApp(): express.Express {
         }
 
         const resolvedMethod = normalizeRazorpayPaymentMethod(intent.method, paymentMethod);
+        const intentFee: ExtractedRazorpayFee =
+          typeof intent.gatewayFeePaise === 'number'
+            ? {
+                gatewayFeePaise: intent.gatewayFeePaise,
+                gatewayTaxPaise: intent.gatewayTaxPaise,
+                gatewayFeeAmount: Math.round(intent.gatewayFeePaise) / 100,
+                gatewayTaxAmount:
+                  typeof intent.gatewayTaxPaise === 'number'
+                    ? Math.round(intent.gatewayTaxPaise) / 100
+                    : undefined,
+                gatewayFeeSource: 'razorpay_actual',
+              }
+            : { gatewayFeeSource: 'estimated' };
         const result = await createOrReturnVerifiedOnlineOrder({
           draft: {
             items,
@@ -2049,10 +2151,11 @@ export function createApiApp(): express.Express {
           razorpayPaymentId,
           verifiedMethod: resolvedMethod,
           expectedAmountPaise: intent.amountPaise,
+          actualFee: intentFee,
           source: 'orders_api',
           existingUser: req.currentUser,
           requestId: req.requestId,
-          allowLowStockRecovery: false,
+          allowLowStockRecovery: true,
         });
 
         if (!result.ok) {
@@ -2221,6 +2324,22 @@ export function createApiApp(): express.Express {
       ? { promotionId: calc.appliedPromotion.id, revenueDelta: calc.grandTotal }
       : undefined;
 
+    const codAdminNotification: AdminNotification = {
+      id: `notif-${crypto.randomUUID().slice(0, 8)}`,
+      type: 'new_paid_order',
+      title: 'New COD Order Received!',
+      message: `${newOrder.orderNumber} from ${newOrder.customerName} (₹${newOrder.totalAmount} · COD)`,
+      orderId: newOrder.id,
+      orderNumber: newOrder.orderNumber,
+      customerName: newOrder.customerName,
+      amount: newOrder.totalAmount,
+      read: false,
+      emailNotifiedTo: ctx.settings.emailNotificationsEnabled
+        ? ctx.settings.orderNotificationEmail
+        : undefined,
+      createdAt: new Date().toISOString(),
+    };
+
     const hadDefaultAddress = Boolean(req.currentUser?.defaultAddress);
     const userDefaultAddressUpdate =
       req.currentUser && !hadDefaultAddress
@@ -2248,6 +2367,7 @@ export function createApiApp(): express.Express {
         appliedPromoInState.revenueGenerated += calc.grandTotal;
       }
       state.orders.unshift(newOrder);
+      state.adminNotifications.unshift(codAdminNotification);
       if (req.currentUser && !hadDefaultAddress) {
         req.currentUser.defaultAddress = newOrder.shippingAddress;
       }
@@ -2264,6 +2384,7 @@ export function createApiApp(): express.Express {
         try {
           commitResult = await storeRepo.commitOrderAtomic(newOrder, stockDecrements, {
             promotionUpdate,
+            adminNotification: codAdminNotification,
             userDefaultAddressUpdate,
           });
           break;
@@ -2276,6 +2397,8 @@ export function createApiApp(): express.Express {
           ) {
             nextOrderSeq += 1;
             newOrder.orderNumber = buildOrderNumber(nextOrderSeq);
+            codAdminNotification.orderNumber = newOrder.orderNumber;
+            codAdminNotification.message = `${newOrder.orderNumber} from ${newOrder.customerName} (₹${newOrder.totalAmount} · COD)`;
             continue;
           }
           throw attemptErr;
@@ -2304,6 +2427,13 @@ export function createApiApp(): express.Express {
       storeRepo.invalidateCaches();
       bootstrapCache.invalidate();
 
+      // Fire non-blocking automatic order confirmation (customer) & admin alert emails
+      void sendAutomaticOrderEmails({
+        order: newOrder,
+        settings: ctx.settings,
+        requestId: req.requestId,
+      });
+
       res.setHeader(
         'Server-Timing',
         `context;dur=${contextMs}, tx;dur=${txMs}, total;dur=${totalMs}`
@@ -2326,6 +2456,9 @@ export function createApiApp(): express.Express {
     } catch (err) {
       if (!isPostgres) {
         state.orders = state.orders.filter((o) => o.id !== newOrder.id);
+        state.adminNotifications = state.adminNotifications.filter(
+          (n) => n.id !== codAdminNotification.id
+        );
         for (const [prodId, prevStock] of stockSnapshots.entries()) {
           const product = state.products.find((p) => p.id === prodId);
           if (product) product.stock = prevStock;

@@ -80,7 +80,7 @@ interface RazorpayWindow extends Window {
 
 const RAZORPAY_SCRIPT_SRC = 'https://checkout.razorpay.com/v1/checkout.js';
 const PENDING_PAYMENT_STORAGE_KEY = 'himrudra_pending_razorpay_payment_v1';
-const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 502, 503, 504]);
+const RETRYABLE_HTTP_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 let razorpayScriptPromise: Promise<NonNullable<RazorpayWindow['Razorpay']>> | null = null;
 
 interface PendingOnlinePayment {
@@ -104,8 +104,14 @@ function getAuthHeaders(): Record<string, string> {
 }
 
 function savePendingPayment(payment: PendingOnlinePayment) {
+  const serialized = JSON.stringify(payment);
   try {
-    window.sessionStorage.setItem(PENDING_PAYMENT_STORAGE_KEY, JSON.stringify(payment));
+    window.localStorage.setItem(PENDING_PAYMENT_STORAGE_KEY, serialized);
+  } catch {
+    // ignore storage errors
+  }
+  try {
+    window.sessionStorage.setItem(PENDING_PAYMENT_STORAGE_KEY, serialized);
   } catch {
     // ignore storage errors
   }
@@ -113,7 +119,9 @@ function savePendingPayment(payment: PendingOnlinePayment) {
 
 function readPendingPayment(): PendingOnlinePayment | null {
   try {
-    const raw = window.sessionStorage.getItem(PENDING_PAYMENT_STORAGE_KEY);
+    const raw =
+      window.localStorage.getItem(PENDING_PAYMENT_STORAGE_KEY) ||
+      window.sessionStorage.getItem(PENDING_PAYMENT_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as PendingOnlinePayment;
     if (
@@ -122,7 +130,7 @@ function readPendingPayment(): PendingOnlinePayment | null {
       !parsed?.razorpaySignature ||
       Date.now() - (parsed.savedAt || 0) > 1000 * 60 * 30
     ) {
-      window.sessionStorage.removeItem(PENDING_PAYMENT_STORAGE_KEY);
+      clearPendingPayment();
       return null;
     }
     return parsed;
@@ -133,6 +141,11 @@ function readPendingPayment(): PendingOnlinePayment | null {
 
 function clearPendingPayment() {
   try {
+    window.localStorage.removeItem(PENDING_PAYMENT_STORAGE_KEY);
+  } catch {
+    // ignore storage errors
+  }
+  try {
     window.sessionStorage.removeItem(PENDING_PAYMENT_STORAGE_KEY);
   } catch {
     // ignore storage errors
@@ -142,13 +155,17 @@ function clearPendingPayment() {
 async function fetchJsonWithRetry(
   url: string,
   init: RequestInit,
-  retryDelaysMs: number[] = [800, 1800, 3000]
+  retryDelaysMs: number[] = [700, 1600, 2800],
+  perAttemptTimeoutMs = 15000
 ): Promise<{ res: Response; data: Record<string, unknown> }> {
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => controller.abort(), perAttemptTimeoutMs);
     try {
       const res = await fetch(url, {
         ...init,
+        signal: controller.signal,
         credentials: 'include',
         cache: 'no-store',
       });
@@ -164,6 +181,8 @@ async function fetchJsonWithRetry(
         await new Promise((r) => window.setTimeout(r, retryDelaysMs[attempt]));
         continue;
       }
+    } finally {
+      window.clearTimeout(timer);
     }
   }
   throw lastErr ?? new Error('Network error while contacting server.');
@@ -528,6 +547,10 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     }
 
     setServerError('');
+    if (cartItems.length === 0) {
+      setServerError('Your cart is empty. Please add a product before checking out.');
+      return;
+    }
     const validation = validateCheckoutForm(address);
     if (!validation.valid) {
       setFieldErrors(validation.errors);
@@ -541,7 +564,7 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
     }
 
     setSubmitting(true);
-    setStatusLabel('Initializing Razorpay...');
+    setStatusLabel('Saving Details & Initializing Razorpay...');
     paymentCallbackHandledRef.current = false;
 
     try {
@@ -550,26 +573,29 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
         (err: unknown) => ({ ok: false as const, err })
       );
 
-      const res = await fetch('/api/payments/create-order', {
-        method: 'POST',
-        credentials: 'include',
-        cache: 'no-store',
-        headers: getAuthHeaders(),
-        body: JSON.stringify({
-          items: cartItems,
-          shippingAddress: address,
-          deliveryInstructions,
-          shippingSpeed,
-          paymentMethod,
-          couponCode,
-        }),
-      });
+      const { res, data } = await fetchJsonWithRetry(
+        '/api/payments/create-order',
+        {
+          method: 'POST',
+          headers: getAuthHeaders(),
+          body: JSON.stringify({
+            items: cartItems,
+            shippingAddress: address,
+            deliveryInstructions,
+            shippingSpeed,
+            paymentMethod,
+            couponCode,
+          }),
+        },
+        [700, 1600]
+      );
 
-      const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.razorpayOrderId || !data.keyId) {
-        if (data.fieldErrors) setFieldErrors(data.fieldErrors);
+        if (data.fieldErrors) setFieldErrors(data.fieldErrors as CheckoutValidationErrors);
         setServerError(
-          data.error || 'Could not initialize Razorpay payment gateway. Please try again.'
+          String(
+            data.error || 'Could not initialize Razorpay payment gateway. Please try again.'
+          )
         );
         setSubmitting(false);
         setStatusLabel('');
@@ -583,12 +609,12 @@ export const CheckoutModal: React.FC<CheckoutModalProps> = ({
       const RazorpayCtor = scriptResult.ctor;
 
       const rzp = new RazorpayCtor({
-        key: data.keyId,
-        amount: data.amountPaise,
-        currency: data.currency || 'INR',
+        key: String(data.keyId),
+        amount: Number(data.amountPaise),
+        currency: String(data.currency || 'INR'),
         name: 'HimRudra — Pure by Himalayas',
         description: `Order (${calc.itemCount} item${calc.itemCount === 1 ? '' : 's'})`,
-        order_id: data.razorpayOrderId,
+        order_id: String(data.razorpayOrderId),
         prefill: {
           name: address.fullName.trim(),
           email: address.email.trim(),
