@@ -1186,6 +1186,7 @@ export function createApiApp(): express.Express {
             paymentMethod: paymentMethod || 'UPI',
             couponCode: couponCode?.trim() || undefined,
             userId: req.currentUser?.id,
+            gatewayStatus: 'initiated',
           }
         : undefined;
 
@@ -1363,6 +1364,48 @@ export function createApiApp(): express.Express {
         razorpayApiMs = Date.now() - apiStartedAt;
 
         if (!apiCheck.ok) {
+          if (
+            apiCheck.code === 'RAZORPAY_PAYMENT_NOT_CAPTURED' &&
+            !intent.verified &&
+            !intent.orderId &&
+            effectiveDraft
+          ) {
+            const nowIso = new Date().toISOString();
+            if (apiCheck.paymentStatus === 'failed') {
+              await storeRepo
+                .upsertPaymentIntent({
+                  ...intent,
+                  checkoutPayload: {
+                    ...effectiveDraft,
+                    gatewayStatus: 'failed',
+                    pendingPaymentId: undefined,
+                    paymentFailure: {
+                      paymentId: cleanPaymentId,
+                      reason: apiCheck.message,
+                      code: apiCheck.errorCode || apiCheck.code,
+                      failedAt: nowIso,
+                    },
+                  },
+                  updatedAt: nowIso,
+                })
+                .catch(() => undefined);
+            } else if (
+              apiCheck.paymentStatus === 'authorized' ||
+              apiCheck.paymentStatus === 'created'
+            ) {
+              await storeRepo
+                .upsertPaymentIntent({
+                  ...intent,
+                  checkoutPayload: {
+                    ...effectiveDraft,
+                    gatewayStatus: 'pending',
+                    pendingPaymentId: cleanPaymentId,
+                  },
+                  updatedAt: nowIso,
+                })
+                .catch(() => undefined);
+            }
+          }
           logStructured('warn', 'payments', 'razorpay_api_verification_failed', {
             requestId: req.requestId,
             razorpayOrderId: cleanOrderId,
@@ -1383,6 +1426,15 @@ export function createApiApp(): express.Express {
         );
         extractedFee = extractActualRazorpayFee(apiCheck.payment);
 
+        const capturedDraft: PersistedCheckoutDraft | undefined = effectiveDraft
+          ? {
+              ...effectiveDraft,
+              gatewayStatus: 'captured',
+              pendingPaymentId: undefined,
+              paymentFailure: undefined,
+            }
+          : undefined;
+
         const dbWriteStartedAt = Date.now();
         await storeRepo.upsertPaymentIntent({
           ...intent,
@@ -1390,7 +1442,7 @@ export function createApiApp(): express.Express {
           verified: true,
           signatureVerified: true,
           paymentId: cleanPaymentId,
-          checkoutPayload: effectiveDraft,
+          checkoutPayload: capturedDraft,
           gatewayFeePaise: extractedFee.gatewayFeePaise,
           gatewayTaxPaise: extractedFee.gatewayTaxPaise,
           updatedAt: new Date().toISOString(),
@@ -1760,6 +1812,14 @@ export function createApiApp(): express.Express {
             verified: true,
             signatureVerified: true,
             paymentId: razorpayPaymentId,
+            checkoutPayload: activeIntent.checkoutPayload
+              ? {
+                  ...activeIntent.checkoutPayload,
+                  gatewayStatus: 'captured',
+                  pendingPaymentId: undefined,
+                  paymentFailure: undefined,
+                }
+              : undefined,
             gatewayFeePaise: extractedFee.gatewayFeePaise ?? activeIntent.gatewayFeePaise,
             gatewayTaxPaise: extractedFee.gatewayTaxPaise ?? activeIntent.gatewayTaxPaise,
             updatedAt: new Date().toISOString(),
@@ -1768,6 +1828,56 @@ export function createApiApp(): express.Express {
           intentReconciled = true;
         }
       }
+    } else if (
+      event === 'payment.authorized' &&
+      activeIntent &&
+      !activeIntent.verified &&
+      !activeIntent.orderId &&
+      activeIntent.checkoutPayload
+    ) {
+      const nowIso = new Date().toISOString();
+      activeIntent = {
+        ...activeIntent,
+        checkoutPayload: {
+          ...activeIntent.checkoutPayload,
+          gatewayStatus: 'pending',
+          pendingPaymentId: razorpayPaymentId ?? activeIntent.checkoutPayload.pendingPaymentId,
+        },
+        updatedAt: nowIso,
+      };
+      await storeRepo.upsertPaymentIntent(activeIntent);
+      intentReconciled = true;
+    } else if (
+      event === 'payment.failed' &&
+      activeIntent &&
+      !activeIntent.verified &&
+      !activeIntent.orderId &&
+      activeIntent.checkoutPayload
+    ) {
+      const nowIso = new Date().toISOString();
+      const failureEntity = paymentEntity as
+        | { error_description?: string; error_reason?: string; error_code?: string }
+        | undefined;
+      activeIntent = {
+        ...activeIntent,
+        checkoutPayload: {
+          ...activeIntent.checkoutPayload,
+          gatewayStatus: 'failed',
+          pendingPaymentId: undefined,
+          paymentFailure: {
+            paymentId: razorpayPaymentId,
+            reason:
+              failureEntity?.error_description ||
+              failureEntity?.error_reason ||
+              'Payment failed at Razorpay gateway',
+            code: failureEntity?.error_code,
+            failedAt: nowIso,
+          },
+        },
+        updatedAt: nowIso,
+      };
+      await storeRepo.upsertPaymentIntent(activeIntent);
+      intentReconciled = true;
     }
 
     // 2. Direct live lookup of existing order (never relying on stale serverless memory cache)
@@ -2869,6 +2979,35 @@ ${labContext}`;
       databaseEnvironment: storeRepo.getDatabaseEnvironment(),
       serverNow: new Date(nowMs).toISOString(),
     });
+  });
+
+  // Admin: Live Checkout Activity (reads actual Neon PostgreSQL payment_intents & checkout_payload; strictly admin-only)
+  app.get('/api/admin/checkout-activity', requireAdmin, async (req, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    try {
+      const rawLimit = Number(req.query.limit);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.trunc(rawLimit), 500) : 200;
+      const activity = await storeRepo.listLiveCheckoutActivity(limit);
+      const rawStatus = typeof req.query.status === 'string' ? req.query.status.trim().toLowerCase() : 'all';
+      const allowedStatuses = new Set(['initiated', 'pending', 'failed', 'captured', 'confirmed']);
+      const filteredItems = allowedStatuses.has(rawStatus)
+        ? activity.items.filter((item) => item.status === rawStatus)
+        : activity.items;
+
+      res.json({
+        items: filteredItems,
+        counts: activity.counts,
+        refreshedAt: activity.refreshedAt,
+      });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const code = err instanceof StorePersistenceError ? err.code : 'CHECKOUT_ACTIVITY_LOAD_FAILED';
+      res.status(statusCode).json({
+        error: 'Unable to load live checkout activity right now. Please try again.',
+        code,
+      });
+    }
   });
 
   // Admin: List captured Razorpay payment intents with no matching customer order

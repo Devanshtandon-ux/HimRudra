@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
+  Activity,
   BarChart3,
   Bell,
   CheckCircle2,
@@ -29,6 +30,7 @@ import { formatINR, type ProfitSummary } from '../lib/commerce';
 import { resolveProductImageUrl } from '../lib/productImages';
 import { AdminAnalyticsSection } from './admin/AdminAnalyticsSection';
 import { AdminInquiriesPanel, type InquiryReplyResult } from './admin/AdminInquiriesPanel';
+import { AdminLiveCheckoutActivitySection } from './admin/AdminLiveCheckoutActivitySection';
 import { AdminOrdersSection } from './admin/AdminOrdersSection';
 import { AdminPaymentReconciliationPanel } from './admin/AdminPaymentReconciliationPanel';
 import { AdminPromotionsSection } from './admin/AdminPromotionsSection';
@@ -79,6 +81,7 @@ interface AdminOverviewData {
 type AdminSection =
   | 'overview'
   | 'orders'
+  | 'checkout-activity'
   | 'promotions'
   | 'products'
   | 'quality'
@@ -762,6 +765,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }> = [
     { key: 'overview', label: 'Analytics & Profit', icon: BarChart3 },
     { key: 'orders', label: 'Orders & Dispatch', icon: ShoppingBag },
+    { key: 'checkout-activity', label: 'Live Checkout Activity', icon: Activity },
     { key: 'promotions', label: 'Offers & Promotions', icon: Sparkles },
     { key: 'products', label: 'Products & Inventory', icon: Package },
     { key: 'quality', label: 'Lab Certificates', icon: ShieldCheck },
@@ -1064,6 +1068,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       )}
                     </section>
                   </div>
+                )}
+
+                {/* 2B. LIVE CHECKOUT ACTIVITY */}
+                {section === 'checkout-activity' && (
+                  <AdminLiveCheckoutActivitySection
+                    adminFetch={adminFetch}
+                    onOpenOrders={() => setSection('orders')}
+                    onOpenRecovery={() => {
+                      setSection('orders');
+                      setAdvancedMaintenanceOpen(true);
+                    }}
+                  />
                 )}
 
                 {/* 3. OFFERS & PROMOTIONS CMS */}

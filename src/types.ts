@@ -154,6 +154,13 @@ export type PaymentMethod =
   | 'Online'
   | 'COD';
 
+export interface PersistedCheckoutPaymentFailure {
+  paymentId?: string;
+  reason?: string;
+  code?: string;
+  failedAt: string;
+}
+
 export interface PersistedCheckoutDraft {
   items: CartItem[];
   shippingAddress: ShippingAddress;
@@ -162,6 +169,9 @@ export interface PersistedCheckoutDraft {
   paymentMethod: PaymentMethod;
   couponCode?: string;
   userId?: string;
+  gatewayStatus?: 'initiated' | 'pending' | 'failed' | 'captured';
+  pendingPaymentId?: string;
+  paymentFailure?: PersistedCheckoutPaymentFailure;
 }
 
 export interface OrderTimelineEvent {
@@ -324,4 +334,69 @@ export interface UnreconciledPaymentIntent {
   gatewayTaxPaise?: number;
   createdAt: string;
   updatedAt?: string;
+}
+
+export type CheckoutActivityStatus =
+  | 'initiated'
+  | 'pending'
+  | 'failed'
+  | 'captured'
+  | 'confirmed';
+
+export interface LiveCheckoutActivityProductLine {
+  productId: string;
+  name: string;
+  sku?: string;
+  netQuantity?: string;
+  quantity: number;
+  unitPrice?: number;
+}
+
+export interface LiveCheckoutActivityItem {
+  razorpayOrderId: string;
+  razorpayPaymentId?: string;
+  pendingPaymentId?: string;
+  failedPaymentId?: string;
+  status: CheckoutActivityStatus;
+  statusLabel: string;
+  paymentMethod: string;
+  amountPaise: number;
+  amountInr: number;
+  verified: boolean;
+  signatureVerified: boolean;
+  hasCheckoutPayload: boolean;
+  customerName?: string;
+  customerEmail?: string;
+  customerPhone?: string;
+  shippingAddress?: ShippingAddress;
+  formattedAddress?: string;
+  pincode?: string;
+  deliveryInstructions?: string;
+  shippingSpeed?: 'standard' | 'express';
+  couponCode?: string;
+  items: LiveCheckoutActivityProductLine[];
+  totalQuantity: number;
+  linkedOrderId?: string;
+  linkedOrderNumber?: string;
+  linkedOrderStatus?: OrderStatus;
+  linkedOrderPaymentStatus?: OrderPaymentStatus;
+  failureReason?: string;
+  failureCode?: string;
+  createdAt: string;
+  updatedAt?: string;
+}
+
+export interface LiveCheckoutActivitySummary {
+  total: number;
+  initiated: number;
+  pending: number;
+  failed: number;
+  captured: number;
+  confirmed: number;
+}
+
+export interface LiveCheckoutActivityResponse {
+  items: LiveCheckoutActivityItem[];
+  counts: LiveCheckoutActivitySummary;
+  refreshedAt: string;
 }

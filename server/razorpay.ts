@@ -73,6 +73,8 @@ export interface RazorpayValidationFailure {
   statusCode: number;
   code: string;
   message: string;
+  paymentStatus?: string;
+  errorCode?: string;
 }
 
 export interface RazorpayValidationSuccess {
@@ -249,6 +251,7 @@ export function validateRazorpayPaymentDetails(
       ok: false,
       statusCode: 402,
       code: 'RAZORPAY_PAYMENT_NOT_CAPTURED',
+      paymentStatus: payment.status,
       message:
         payment.status === 'failed'
           ? payment.error_description || 'Payment failed at the bank or gateway. Please try again.'

@@ -1077,6 +1077,56 @@ export class PostgresStateAdapter {
       .map((row) => this.mapPaymentIntentRow(row));
   }
 
+  /**
+   * Targeted read-only query for Admin Live Checkout Activity.
+   * Reads fresh Neon PostgreSQL payment_intents (with checkout_payload), linked orders, and catalog products.
+   */
+  async listCheckoutActivitySources(limit = 200): Promise<{
+    intents: PaymentIntentRecord[];
+    orders: Order[];
+    products: Product[];
+  }> {
+    const startedAt = Date.now();
+    const safeLimit = Math.min(Math.max(Math.trunc(limit) || 200, 1), 500);
+    try {
+      const [intentRows, orderRows, productRows] = await this.runWithRecovery(() =>
+        Promise.all([
+          db
+            .select()
+            .from(paymentIntents)
+            .orderBy(desc(paymentIntents.createdAt))
+            .limit(safeLimit),
+          db.select().from(orders).orderBy(desc(orders.createdAt)),
+          db.select().from(products),
+        ])
+      );
+      logStructured('info', 'cloud-sql', 'list_checkout_activity_success', {
+        intentCount: intentRows.length,
+        orderCount: orderRows.length,
+        durationMs: Date.now() - startedAt,
+      });
+      return {
+        intents: intentRows.map((row) => this.mapPaymentIntentRow(row)),
+        orders: orderRows.map((row) => this.mapOrderRow(row)),
+        products: productRows.map((row) => this.mapProductRow(row)),
+      };
+    } catch (error) {
+      const pgDiag = extractPgDiagnostics(error);
+      const connDiag = await this.getSafeConnectionDiagnostics();
+      logStructured('error', 'cloud-sql', 'list_checkout_activity_failed', {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+        ...pgDiag,
+        ...connDiag,
+      });
+      throw new StorePersistenceError('Unable to load live checkout activity right now.', {
+        code: 'POSTGRES_CHECKOUT_ACTIVITY_READ_FAILED',
+        statusCode: 503,
+        retryable: true,
+      });
+    }
+  }
+
   async cleanupApprovedTestRecords(params: {
     orderIds: string[];
     paymentIntentIds: string[];

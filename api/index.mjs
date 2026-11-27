@@ -472,6 +472,184 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+// server/checkoutActivity.ts
+var CHECKOUT_ACTIVITY_STATUS_LABELS = {
+  initiated: "Initiated",
+  pending: "Pending",
+  failed: "Failed",
+  captured: "Captured (No Order Yet)",
+  confirmed: "Confirmed Order"
+};
+function formatShippingAddressReadable(address) {
+  if (!address) return void 0;
+  const streetParts = [
+    address.houseFlatNumber?.trim(),
+    address.line1?.trim(),
+    address.line2?.trim(),
+    address.landmark?.trim() ? `Near ${address.landmark.trim()}` : void 0
+  ].filter((part) => Boolean(part));
+  const cityState = [address.city?.trim(), address.state?.trim()].filter((part) => Boolean(part)).join(", ");
+  const locality = cityState && address.pincode?.trim() ? `${cityState} - ${address.pincode.trim()}` : cityState || address.pincode?.trim() || "";
+  const full = [...streetParts, locality].filter(Boolean).join(", ");
+  return full || void 0;
+}
+function classifyCheckoutActivityStatus(intent, matchedOrder) {
+  if (matchedOrder) {
+    if (matchedOrder.paymentStatus === "Failed") {
+      return {
+        status: "failed",
+        statusLabel: CHECKOUT_ACTIVITY_STATUS_LABELS.failed
+      };
+    }
+    if (matchedOrder.paymentStatus === "Pending Payment") {
+      return {
+        status: "pending",
+        statusLabel: CHECKOUT_ACTIVITY_STATUS_LABELS.pending
+      };
+    }
+    return {
+      status: "confirmed",
+      statusLabel: CHECKOUT_ACTIVITY_STATUS_LABELS.confirmed
+    };
+  }
+  const gatewayStatus = intent.checkoutPayload?.gatewayStatus;
+  const hasFailure = Boolean(intent.checkoutPayload?.paymentFailure);
+  const hasPendingPayment = Boolean(intent.checkoutPayload?.pendingPaymentId);
+  if (intent.verified || intent.signatureVerified || gatewayStatus === "captured" || Boolean(intent.paymentId) && gatewayStatus !== "failed" && gatewayStatus !== "pending") {
+    return {
+      status: "captured",
+      statusLabel: CHECKOUT_ACTIVITY_STATUS_LABELS.captured
+    };
+  }
+  if (gatewayStatus === "failed" || hasFailure) {
+    return {
+      status: "failed",
+      statusLabel: CHECKOUT_ACTIVITY_STATUS_LABELS.failed
+    };
+  }
+  if (gatewayStatus === "pending" || hasPendingPayment) {
+    return {
+      status: "pending",
+      statusLabel: CHECKOUT_ACTIVITY_STATUS_LABELS.pending
+    };
+  }
+  return {
+    status: "initiated",
+    statusLabel: CHECKOUT_ACTIVITY_STATUS_LABELS.initiated
+  };
+}
+function resolveProductLines(intent, matchedOrder, productById) {
+  const draftItems = intent.checkoutPayload?.items;
+  if (Array.isArray(draftItems) && draftItems.length > 0) {
+    return draftItems.map((item) => {
+      const product = productById.get(item.productId);
+      const matchedOrderItem = matchedOrder?.items.find((oi) => oi.productId === item.productId);
+      return {
+        productId: item.productId,
+        name: product?.name || matchedOrderItem?.name || item.productId,
+        sku: product?.sku || matchedOrderItem?.sku,
+        netQuantity: product?.netQuantity || matchedOrderItem?.netQuantity,
+        quantity: Number(item.quantity) || 0,
+        unitPrice: matchedOrderItem?.unitPrice ?? product?.price
+      };
+    });
+  }
+  if (matchedOrder && Array.isArray(matchedOrder.items) && matchedOrder.items.length > 0) {
+    return matchedOrder.items.map((item) => ({
+      productId: item.productId,
+      name: item.name,
+      sku: item.sku,
+      netQuantity: item.netQuantity,
+      quantity: Number(item.quantity) || 0,
+      unitPrice: item.unitPrice
+    }));
+  }
+  return [];
+}
+function buildLiveCheckoutActivity(params) {
+  const { intents, orders: orders2, products: products2 } = params;
+  const refreshedAt = params.refreshedAt ?? (/* @__PURE__ */ new Date()).toISOString();
+  const orderById = /* @__PURE__ */ new Map();
+  const orderByRzpOrderId = /* @__PURE__ */ new Map();
+  const orderByRzpPaymentId = /* @__PURE__ */ new Map();
+  for (const order of orders2) {
+    orderById.set(order.id, order);
+    if (order.razorpayOrderId) {
+      orderByRzpOrderId.set(order.razorpayOrderId, order);
+    }
+    if (order.razorpayPaymentId) {
+      orderByRzpPaymentId.set(order.razorpayPaymentId, order);
+    }
+  }
+  const productById = /* @__PURE__ */ new Map();
+  for (const product of products2) {
+    productById.set(product.id, product);
+  }
+  const counts = {
+    total: 0,
+    initiated: 0,
+    pending: 0,
+    failed: 0,
+    captured: 0,
+    confirmed: 0
+  };
+  const items = intents.map((intent) => {
+    const matchedOrder = (intent.orderId ? orderById.get(intent.orderId) : void 0) ?? orderByRzpOrderId.get(intent.razorpayOrderId) ?? (intent.paymentId ? orderByRzpPaymentId.get(intent.paymentId) : void 0) ?? null;
+    const { status, statusLabel } = classifyCheckoutActivityStatus(intent, matchedOrder);
+    counts.total += 1;
+    counts[status] += 1;
+    const payload = intent.checkoutPayload;
+    const shippingAddress = payload?.shippingAddress ?? matchedOrder?.shippingAddress;
+    const resolvedItems = resolveProductLines(intent, matchedOrder, productById);
+    const totalQuantity = resolvedItems.reduce((sum, line) => sum + line.quantity, 0);
+    const amountPaise = typeof intent.amountPaise === "number" && Number.isFinite(intent.amountPaise) ? Math.round(intent.amountPaise) : matchedOrder ? Math.round(matchedOrder.totalAmount * 100) : 0;
+    const amountInr = Math.round(amountPaise) / 100;
+    return {
+      razorpayOrderId: intent.razorpayOrderId,
+      razorpayPaymentId: intent.paymentId ?? matchedOrder?.razorpayPaymentId,
+      pendingPaymentId: payload?.pendingPaymentId,
+      failedPaymentId: payload?.paymentFailure?.paymentId,
+      status,
+      statusLabel,
+      paymentMethod: intent.method || payload?.paymentMethod || matchedOrder?.paymentMethod || "Online",
+      amountPaise,
+      amountInr,
+      verified: Boolean(intent.verified),
+      signatureVerified: Boolean(intent.signatureVerified),
+      hasCheckoutPayload: Boolean(payload),
+      customerName: shippingAddress?.fullName?.trim() || matchedOrder?.customerName,
+      customerEmail: shippingAddress?.email?.trim() || matchedOrder?.customerEmail,
+      customerPhone: shippingAddress?.phone?.trim() || matchedOrder?.customerPhone,
+      shippingAddress,
+      formattedAddress: formatShippingAddressReadable(shippingAddress),
+      pincode: shippingAddress?.pincode?.trim() || void 0,
+      deliveryInstructions: payload?.deliveryInstructions ?? matchedOrder?.deliveryInstructions,
+      shippingSpeed: payload?.shippingSpeed ?? matchedOrder?.shippingSpeed,
+      couponCode: payload?.couponCode ?? matchedOrder?.couponCode,
+      items: resolvedItems,
+      totalQuantity,
+      linkedOrderId: matchedOrder?.id ?? intent.orderId,
+      linkedOrderNumber: matchedOrder?.orderNumber,
+      linkedOrderStatus: matchedOrder?.status,
+      linkedOrderPaymentStatus: matchedOrder?.paymentStatus,
+      failureReason: payload?.paymentFailure?.reason,
+      failureCode: payload?.paymentFailure?.code,
+      createdAt: intent.createdAt,
+      updatedAt: intent.updatedAt
+    };
+  });
+  items.sort((a, b) => {
+    const aTime = a.createdAt || a.updatedAt || "";
+    const bTime = b.createdAt || b.updatedAt || "";
+    return bTime.localeCompare(aTime);
+  });
+  return {
+    items,
+    counts,
+    refreshedAt
+  };
+}
+
 // server/dynamodb.ts
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
@@ -1284,43 +1462,63 @@ function getAppRuntimeEnvironment(env = process.env) {
   if (env.NODE_ENV === "production") return "production";
   return "development";
 }
-function getExternalPostgresUrl(env = process.env) {
+function normalizePostgresUrl(raw) {
+  if (!raw) return null;
+  const cleaned = raw.trim().replace(/^['"]+|['"]+$/g, "").trim();
+  return cleaned.startsWith("postgres://") || cleaned.startsWith("postgresql://") ? cleaned : null;
+}
+function resolveExternalPostgresUrl(env = process.env) {
   const runtimeEnv = getAppRuntimeEnvironment(env);
   if (runtimeEnv === "test") {
-    const testUrl = env.DATABASE_URL_TEST?.trim() || "";
-    return testUrl.startsWith("postgres://") || testUrl.startsWith("postgresql://") ? testUrl : null;
+    const testUrl = normalizePostgresUrl(env.DATABASE_URL_TEST);
+    return testUrl ? { url: testUrl, sourceEnvVar: "DATABASE_URL_TEST" } : null;
   }
-  if (runtimeEnv === "preview" && env.DATABASE_URL_PREVIEW?.trim()) {
-    const previewUrl = env.DATABASE_URL_PREVIEW.trim();
-    if (previewUrl.startsWith("postgres://") || previewUrl.startsWith("postgresql://")) {
-      return previewUrl;
+  if (runtimeEnv === "preview") {
+    const previewUrl = normalizePostgresUrl(env.DATABASE_URL_PREVIEW);
+    if (previewUrl) {
+      return { url: previewUrl, sourceEnvVar: "DATABASE_URL_PREVIEW" };
     }
   }
-  const raw = env.DATABASE_URL?.trim() || env.POSTGRES_URL?.trim() || env.POSTGRES_PRISMA_URL?.trim() || "";
-  return raw.startsWith("postgres://") || raw.startsWith("postgresql://") ? raw : null;
+  const primary = normalizePostgresUrl(env.DATABASE_URL);
+  if (primary) return { url: primary, sourceEnvVar: "DATABASE_URL" };
+  const pgUrl = normalizePostgresUrl(env.POSTGRES_URL);
+  if (pgUrl) return { url: pgUrl, sourceEnvVar: "POSTGRES_URL" };
+  const prismaUrl = normalizePostgresUrl(env.POSTGRES_PRISMA_URL);
+  if (prismaUrl) return { url: prismaUrl, sourceEnvVar: "POSTGRES_PRISMA_URL" };
+  return null;
+}
+function getExternalPostgresUrl(env = process.env) {
+  return resolveExternalPostgresUrl(env)?.url ?? null;
+}
+function hasCloudSqlObjectVars(env = process.env) {
+  return Boolean(
+    env.SQL_HOST?.trim() && env.SQL_USER?.trim() && env.SQL_PASSWORD?.trim() && env.SQL_DB_NAME?.trim()
+  );
 }
 function getDatabaseEnvironmentInfo(env = process.env) {
   const runtimeEnv = getAppRuntimeEnvironment(env);
-  const hasCloudSqlObjectVars = Boolean(
-    env.SQL_HOST?.trim() && env.SQL_USER?.trim() && env.SQL_PASSWORD?.trim() && env.SQL_DB_NAME?.trim()
-  );
-  if (hasCloudSqlObjectVars && runtimeEnv !== "test") {
+  if (hasCloudSqlObjectVars(env) && runtimeEnv !== "test") {
+    const parsedPort = env.SQL_PORT ? Number(env.SQL_PORT) : void 0;
     return {
       runtimeEnv,
       provider: "cloud-sql",
+      sourceEnvVar: "SQL_HOST",
       host: env.SQL_HOST?.trim(),
+      ...Number.isFinite(parsedPort) ? { port: parsedPort } : {},
       databaseName: env.SQL_DB_NAME?.trim(),
       isolatedTestEnv: false
     };
   }
-  const url = getExternalPostgresUrl(env);
-  if (url) {
+  const resolved = resolveExternalPostgresUrl(env);
+  if (resolved) {
     try {
-      const parsed = new URL(url);
+      const parsed = new URL(resolved.url);
       return {
         runtimeEnv,
         provider: "external-postgres",
+        sourceEnvVar: resolved.sourceEnvVar,
         host: parsed.hostname,
+        port: parsed.port ? Number(parsed.port) : 5432,
         databaseName: parsed.pathname.replace(/^\//, ""),
         isolatedTestEnv: runtimeEnv === "test"
       };
@@ -1328,6 +1526,7 @@ function getDatabaseEnvironmentInfo(env = process.env) {
       return {
         runtimeEnv,
         provider: "external-postgres",
+        sourceEnvVar: resolved.sourceEnvVar,
         isolatedTestEnv: runtimeEnv === "test"
       };
     }
@@ -1340,11 +1539,8 @@ function getDatabaseEnvironmentInfo(env = process.env) {
 }
 function isUsingExternalPostgresUrl(env = process.env) {
   const runtimeEnv = getAppRuntimeEnvironment(env);
-  const hasCloudSqlObjectVars = Boolean(
-    env.SQL_HOST?.trim() && env.SQL_USER?.trim() && env.SQL_PASSWORD?.trim() && env.SQL_DB_NAME?.trim()
-  );
-  if (hasCloudSqlObjectVars && runtimeEnv !== "test") return false;
-  return Boolean(getExternalPostgresUrl(env));
+  if (hasCloudSqlObjectVars(env) && runtimeEnv !== "test") return false;
+  return Boolean(resolveExternalPostgresUrl(env));
 }
 function isCloudSqlConfigured(env = process.env) {
   const override = (env.STORAGE_ENGINE || "").trim().toLowerCase();
@@ -1353,28 +1549,26 @@ function isCloudSqlConfigured(env = process.env) {
   }
   const runtimeEnv = getAppRuntimeEnvironment(env);
   if (runtimeEnv === "test") {
-    return Boolean(getExternalPostgresUrl(env));
+    return Boolean(resolveExternalPostgresUrl(env));
   }
-  const hasObjectVars = Boolean(
-    env.SQL_HOST?.trim() && env.SQL_USER?.trim() && env.SQL_PASSWORD?.trim() && env.SQL_DB_NAME?.trim()
-  );
-  return hasObjectVars || Boolean(getExternalPostgresUrl(env));
+  return hasCloudSqlObjectVars(env) || Boolean(resolveExternalPostgresUrl(env));
 }
 var createPool = () => {
   if (!global._postgresPool) {
-    const hasObjectVars = Boolean(
-      process.env.SQL_HOST?.trim() && process.env.SQL_USER?.trim() && process.env.SQL_PASSWORD?.trim() && process.env.SQL_DB_NAME?.trim()
-    );
-    const externalUrl = hasObjectVars ? null : getExternalPostgresUrl(process.env);
+    const runtimeEnv = getAppRuntimeEnvironment(process.env);
+    const useCloudSqlVars = hasCloudSqlObjectVars(process.env) && runtimeEnv !== "test";
+    const externalUrl = useCloudSqlVars ? null : getExternalPostgresUrl(process.env);
     if (externalUrl) {
       const parsed = new URL(externalUrl);
       const sslDisabled = parsed.searchParams.get("sslmode") === "disable" || (process.env.SQL_SSL || "").trim().toLowerCase() === "false";
+      const pgOptions = parsed.searchParams.get("options")?.trim() || void 0;
       global._postgresPool = new Pool({
         host: parsed.hostname,
         port: parsed.port ? Number(parsed.port) : 5432,
         user: decodeURIComponent(parsed.username),
         password: decodeURIComponent(parsed.password),
         database: parsed.pathname.replace(/^\//, ""),
+        ...pgOptions ? { options: pgOptions } : {},
         ...sslDisabled ? {} : { ssl: { rejectUnauthorized: false } },
         max: process.env.VERCEL ? 3 : 10,
         idleTimeoutMillis: process.env.VERCEL ? 1e4 : 3e4,
@@ -1409,22 +1603,66 @@ var db = drizzle(pool, { schema: schema_exports });
 
 // src/db/postgresAdapter.ts
 import { and, asc, desc, eq, gte, notInArray, or, sql as sql2 } from "drizzle-orm";
+function getUnderlyingPgError(error) {
+  if (!error || typeof error !== "object") return null;
+  let current = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (current.cause && typeof current.cause === "object") {
+      current = current.cause;
+    } else {
+      break;
+    }
+  }
+  return current;
+}
 function getPgErrorCode(error) {
   if (!error || typeof error !== "object") return "";
-  const direct = error.code;
-  if (typeof direct === "string" && direct) return direct;
-  const cause = error.cause;
-  if (cause && typeof cause.code === "string") return cause.code;
+  let current = error;
+  for (let depth = 0; depth < 4 && current; depth += 1) {
+    if (typeof current.code === "string" && current.code) return current.code;
+    current = current.cause && typeof current.cause === "object" ? current.cause : void 0;
+  }
   return "";
+}
+function getPgCauseMessage(error) {
+  const underlying = getUnderlyingPgError(error);
+  if (underlying && typeof underlying.message === "string" && underlying.message) {
+    return underlying.message;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+function extractMissingColumnName(message) {
+  const match = message.match(
+    /column\s+["']?([a-zA-Z0-9_."']+)["']?\s+(?:of\s+relation\s+["']?[a-zA-Z0-9_."']+["']?\s+)?does not exist/i
+  );
+  return match?.[1]?.replaceAll('"', "").replaceAll("'", "");
+}
+function extractPgDiagnostics(error) {
+  const topMessage = error instanceof Error ? error.message : String(error);
+  const underlying = getUnderlyingPgError(error);
+  const causeMessage = getPgCauseMessage(error);
+  const code = getPgErrorCode(error) || void 0;
+  const missingColumn = typeof underlying?.column === "string" && underlying.column || extractMissingColumnName(causeMessage) || extractMissingColumnName(topMessage);
+  return {
+    pgCode: code,
+    pgCause: causeMessage,
+    ...missingColumn ? { missingColumn } : {},
+    ...typeof underlying?.table === "string" && underlying.table ? { pgTable: underlying.table } : {},
+    ...typeof underlying?.schema === "string" && underlying.schema ? { pgSchema: underlying.schema } : {},
+    ...typeof underlying?.detail === "string" && underlying.detail ? { pgDetail: underlying.detail } : {},
+    ...typeof underlying?.hint === "string" && underlying.hint ? { pgHint: underlying.hint } : {},
+    ...typeof underlying?.position === "string" && underlying.position ? { pgPosition: underlying.position } : {},
+    ...topMessage !== causeMessage ? { queryError: topMessage.slice(0, 400) } : {}
+  };
 }
 function isUndefinedTableError(error) {
   if (getPgErrorCode(error) === "42P01") return true;
-  const msg = error instanceof Error ? error.message : String(error);
+  const msg = `${error instanceof Error ? error.message : String(error)} ${getPgCauseMessage(error)}`;
   return /relation ["']?[a-z_]+["']? does not exist/i.test(msg);
 }
 function isUndefinedColumnError(error) {
   if (getPgErrorCode(error) === "42703") return true;
-  const msg = error instanceof Error ? error.message : String(error);
+  const msg = `${error instanceof Error ? error.message : String(error)} ${getPgCauseMessage(error)}`;
   return /column ["']?[a-z0-9_.]+["']? does not exist/i.test(msg);
 }
 function isTransientConnectionError(error) {
@@ -1432,7 +1670,7 @@ function isTransientConnectionError(error) {
   if (code === "ECONNRESET" || code === "ETIMEDOUT" || code === "EPIPE" || code === "57P01" || code === "08006" || code === "08003") {
     return true;
   }
-  const msg = error instanceof Error ? error.message : String(error);
+  const msg = `${error instanceof Error ? error.message : String(error)} ${getPgCauseMessage(error)}`;
   return /ECONNRESET|Connection terminated unexpectedly|terminating connection|socket hang up/i.test(
     msg
   );
@@ -1683,6 +1921,7 @@ var PostgresStateAdapter = class {
     this.externalSchemaReady = false;
     this.externalSchemaPromise = null;
     this.schemaVerificationCache = null;
+    this.connectionIdentityCache = null;
   }
   /**
    * Lazily provisions the 12 relational tables ONLY if a brand-new external Postgres database
@@ -1751,6 +1990,41 @@ var PostgresStateAdapter = class {
     return summary;
   }
   /**
+   * Read-only diagnostic lookup of connected DB identity (host, database name, current_schema, search_path).
+   * Safe for server-side logs only — never exposes credentials, usernames, or connection strings.
+   */
+  async getSafeConnectionDiagnostics() {
+    if (this.connectionIdentityCache) return this.connectionIdentityCache;
+    const envInfo = getDatabaseEnvironmentInfo();
+    const base = {
+      host: envInfo.host,
+      port: envInfo.port,
+      sourceEnvVar: envInfo.sourceEnvVar,
+      provider: envInfo.provider,
+      runtimeEnv: envInfo.runtimeEnv,
+      databaseName: envInfo.databaseName
+    };
+    try {
+      const pool2 = createPool();
+      const res = await pool2.query(
+        `SELECT current_database() AS database_name,
+                current_schema() AS current_schema,
+                current_setting('search_path') AS search_path`
+      );
+      const row = res.rows[0];
+      const identity = {
+        ...base,
+        databaseName: row?.database_name || base.databaseName,
+        currentSchema: row?.current_schema,
+        searchPath: row?.search_path
+      };
+      this.connectionIdentityCache = identity;
+      return identity;
+    } catch {
+      return base;
+    }
+  }
+  /**
    * Executes a Postgres operation without runtime ALTER TABLE / CREATE INDEX DDL.
    * Retries once on transient idle-socket resets (common when Neon compute wakes from scale-to-zero).
    */
@@ -1763,9 +2037,17 @@ var PostgresStateAdapter = class {
         return await operation();
       }
       if (isUndefinedColumnError(error)) {
+        const dbIdentity = await this.getSafeConnectionDiagnostics();
         logStructured("error", "cloud-sql", "schema_migration_required", {
-          code: getPgErrorCode(error) || "42703",
-          error: error instanceof Error ? error.message : String(error),
+          ...extractPgDiagnostics(error),
+          dbHost: dbIdentity.host,
+          dbPort: dbIdentity.port,
+          dbName: dbIdentity.databaseName,
+          dbSchema: dbIdentity.currentSchema,
+          searchPath: dbIdentity.searchPath,
+          dbSourceEnvVar: dbIdentity.sourceEnvVar,
+          dbProvider: dbIdentity.provider,
+          runtimeEnv: dbIdentity.runtimeEnv,
           hint: "Run database schema migration using the authorized database owner role."
         });
         throw error;
@@ -1920,9 +2202,18 @@ var PostgresStateAdapter = class {
         dbMs
       };
     } catch (error) {
+      const dbIdentity = await this.getSafeConnectionDiagnostics();
       logStructured("error", "cloud-sql", "load_public_bootstrap_failed", {
         durationMs: Date.now() - startedAt,
-        code: getPgErrorCode(error) || "unknown"
+        ...extractPgDiagnostics(error),
+        dbHost: dbIdentity.host,
+        dbPort: dbIdentity.port,
+        dbName: dbIdentity.databaseName,
+        dbSchema: dbIdentity.currentSchema,
+        searchPath: dbIdentity.searchPath,
+        dbSourceEnvVar: dbIdentity.sourceEnvVar,
+        dbProvider: dbIdentity.provider,
+        runtimeEnv: dbIdentity.runtimeEnv
       });
       throw error;
     }
@@ -2165,6 +2456,47 @@ var PostgresStateAdapter = class {
       (intent) => !(intent.orderId && matchedOrderIds.has(intent.orderId)) && !matchedRzpOrderIds.has(intent.razorpayOrderId) && !(intent.paymentId && matchedRzpPaymentIds.has(intent.paymentId))
     ).map((row) => this.mapPaymentIntentRow(row));
   }
+  /**
+   * Targeted read-only query for Admin Live Checkout Activity.
+   * Reads fresh Neon PostgreSQL payment_intents (with checkout_payload), linked orders, and catalog products.
+   */
+  async listCheckoutActivitySources(limit = 200) {
+    const startedAt = Date.now();
+    const safeLimit = Math.min(Math.max(Math.trunc(limit) || 200, 1), 500);
+    try {
+      const [intentRows, orderRows, productRows] = await this.runWithRecovery(
+        () => Promise.all([
+          db.select().from(paymentIntents).orderBy(desc(paymentIntents.createdAt)).limit(safeLimit),
+          db.select().from(orders).orderBy(desc(orders.createdAt)),
+          db.select().from(products)
+        ])
+      );
+      logStructured("info", "cloud-sql", "list_checkout_activity_success", {
+        intentCount: intentRows.length,
+        orderCount: orderRows.length,
+        durationMs: Date.now() - startedAt
+      });
+      return {
+        intents: intentRows.map((row) => this.mapPaymentIntentRow(row)),
+        orders: orderRows.map((row) => this.mapOrderRow(row)),
+        products: productRows.map((row) => this.mapProductRow(row))
+      };
+    } catch (error) {
+      const pgDiag = extractPgDiagnostics(error);
+      const connDiag = await this.getSafeConnectionDiagnostics();
+      logStructured("error", "cloud-sql", "list_checkout_activity_failed", {
+        durationMs: Date.now() - startedAt,
+        error: error instanceof Error ? error.message : String(error),
+        ...pgDiag,
+        ...connDiag
+      });
+      throw new StorePersistenceError("Unable to load live checkout activity right now.", {
+        code: "POSTGRES_CHECKOUT_ACTIVITY_READ_FAILED",
+        statusCode: 503,
+        retryable: true
+      });
+    }
+  }
   async cleanupApprovedTestRecords(params) {
     return this.runWithRecovery(
       () => db.transaction(async (tx) => {
@@ -2314,9 +2646,14 @@ var PostgresStateAdapter = class {
         maxOrderSeq
       };
     } catch (error) {
+      const dbIdentity = await this.getSafeConnectionDiagnostics();
       logStructured("error", "cloud-sql", "load_checkout_context_failed", {
         durationMs: Date.now() - startedAt,
-        error: error instanceof Error ? error.message : String(error)
+        ...extractPgDiagnostics(error),
+        dbHost: dbIdentity.host,
+        dbName: dbIdentity.databaseName,
+        searchPath: dbIdentity.searchPath,
+        dbSourceEnvVar: dbIdentity.sourceEnvVar
       });
       throw new StorePersistenceError("Database read failed during checkout. Please try again shortly.", {
         code: "POSTGRES_CHECKOUT_READ_FAILED",
@@ -2333,8 +2670,13 @@ var PostgresStateAdapter = class {
       );
       return rows[0] ? this.mapUserRow(rows[0]) : null;
     } catch (error) {
+      const dbIdentity = await this.getSafeConnectionDiagnostics();
       logStructured("error", "cloud-sql", "find_user_by_email_failed", {
-        error: error instanceof Error ? error.message : String(error)
+        ...extractPgDiagnostics(error),
+        dbHost: dbIdentity.host,
+        dbName: dbIdentity.databaseName,
+        searchPath: dbIdentity.searchPath,
+        dbSourceEnvVar: dbIdentity.sourceEnvVar
       });
       throw new StorePersistenceError("Database read failed. Please try again shortly.", {
         code: "POSTGRES_READ_FAILED",
@@ -2350,8 +2692,13 @@ var PostgresStateAdapter = class {
       );
       return rows[0] ? this.mapUserRow(rows[0]) : null;
     } catch (error) {
+      const dbIdentity = await this.getSafeConnectionDiagnostics();
       logStructured("error", "cloud-sql", "find_user_by_id_failed", {
-        error: error instanceof Error ? error.message : String(error)
+        ...extractPgDiagnostics(error),
+        dbHost: dbIdentity.host,
+        dbName: dbIdentity.databaseName,
+        searchPath: dbIdentity.searchPath,
+        dbSourceEnvVar: dbIdentity.sourceEnvVar
       });
       throw new StorePersistenceError("Database read failed. Please try again shortly.", {
         code: "POSTGRES_READ_FAILED",
@@ -2636,8 +2983,16 @@ var PostgresStateAdapter = class {
         dbMs: Date.now() - startedAt
       };
     } catch (error) {
+      const dbIdentity = await this.getSafeConnectionDiagnostics();
       logStructured("error", "cloud-sql", "load_state_failed", {
-        error: error instanceof Error ? error.message : String(error)
+        ...extractPgDiagnostics(error),
+        dbHost: dbIdentity.host,
+        dbName: dbIdentity.databaseName,
+        dbSchema: dbIdentity.currentSchema,
+        searchPath: dbIdentity.searchPath,
+        dbSourceEnvVar: dbIdentity.sourceEnvVar,
+        dbProvider: dbIdentity.provider,
+        runtimeEnv: dbIdentity.runtimeEnv
       });
       throw new StorePersistenceError("Database read failed. Please try again shortly.", {
         code: "POSTGRES_READ_FAILED",
@@ -4452,6 +4807,24 @@ var StoreRepository = class {
       (intent) => (intent.verified || Boolean(intent.paymentId)) && !(intent.orderId && matchedOrderIds.has(intent.orderId)) && !matchedRzpOrderIds.has(intent.razorpayOrderId) && !(intent.paymentId && matchedRzpPaymentIds.has(intent.paymentId))
     );
   }
+  async listLiveCheckoutActivity(limit = 200) {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit) || 200, 1), 500);
+    const pg = this.getPostgres();
+    if (pg) {
+      const sources = await pg.listCheckoutActivitySources(safeLimit);
+      return buildLiveCheckoutActivity({
+        intents: sources.intents,
+        orders: sources.orders,
+        products: sources.products
+      });
+    }
+    const intents = Object.values(this.state.paymentIntents).sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice(0, safeLimit);
+    return buildLiveCheckoutActivity({
+      intents,
+      orders: this.state.orders,
+      products: this.state.products
+    });
+  }
   async cleanupApprovedTestRecords(params) {
     const pg = this.getPostgres();
     if (pg) {
@@ -5337,6 +5710,7 @@ function validateRazorpayPaymentDetails(payment, expected) {
       ok: false,
       statusCode: 402,
       code: "RAZORPAY_PAYMENT_NOT_CAPTURED",
+      paymentStatus: payment.status,
       message: payment.status === "failed" ? payment.error_description || "Payment failed at the bank or gateway. Please try again." : `Payment has not been captured yet (status: ${payment.status || "unknown"}).`
     };
   }
@@ -5530,6 +5904,734 @@ async function fetchRazorpayOrderPayments(params) {
       message: "Unable to reach Razorpay API to inspect order payments."
     };
   }
+}
+async function fetchRazorpayOrderById(params) {
+  const fetchFn = params.fetchImpl ?? fetch;
+  try {
+    const res = await fetchFn(
+      `https://api.razorpay.com/v1/orders/${encodeURIComponent(params.razorpayOrderId)}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: buildBasicAuthHeader(params.config),
+          Accept: "application/json"
+        }
+      }
+    );
+    const payload = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        ok: false,
+        statusCode: res.status === 404 ? 404 : 502,
+        code: "RAZORPAY_ORDER_FETCH_FAILED",
+        message: payload.error?.description || "Could not fetch order from Razorpay."
+      };
+    }
+    return { ok: true, order: payload };
+  } catch {
+    return {
+      ok: false,
+      statusCode: 502,
+      code: "RAZORPAY_ORDER_FETCH_NETWORK_ERROR",
+      message: "Unable to reach Razorpay API to inspect order details."
+    };
+  }
+}
+
+// server/reconciliationRecovery.ts
+var REQUIRED_ADDRESS_FIELDS = [
+  "fullName",
+  "email",
+  "phone",
+  "line1",
+  "city",
+  "state",
+  "pincode"
+];
+function cleanText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+function normalizeEmail(value) {
+  return cleanText(value).toLowerCase();
+}
+function normalizeIndianPhone10(value) {
+  const digits = cleanText(value).replace(/\D/g, "");
+  if (!digits) return "";
+  if (digits.length === 12 && digits.startsWith("91")) return digits.slice(2);
+  if (digits.length === 11 && digits.startsWith("0")) return digits.slice(1);
+  return digits;
+}
+function normalizeNotesObject(raw) {
+  if (!raw || Array.isArray(raw) || typeof raw !== "object") return {};
+  const result = {};
+  for (const [k, v] of Object.entries(raw)) {
+    if (typeof v === "string" && v.trim()) {
+      result[k.trim().toLowerCase()] = v.trim();
+    } else if (typeof v === "number" && Number.isFinite(v)) {
+      result[k.trim().toLowerCase()] = String(v);
+    }
+  }
+  return result;
+}
+function pickNote(notes, keys) {
+  for (const key of keys) {
+    const val = notes[key.toLowerCase()];
+    if (val) return val;
+  }
+  return "";
+}
+function parseAddressFromNotes(notes) {
+  const address = {};
+  const fullName = pickNote(notes, ["customer_name", "full_name", "fullname", "name", "shipping_name"]);
+  const email = normalizeEmail(pickNote(notes, ["customer_email", "email", "shipping_email"]));
+  const phone = normalizeIndianPhone10(
+    pickNote(notes, ["customer_phone", "phone", "contact", "mobile", "shipping_phone"])
+  );
+  const houseFlatNumber = pickNote(notes, [
+    "house_flat_number",
+    "house_no",
+    "flat_no",
+    "house",
+    "apartment"
+  ]);
+  const line1 = pickNote(notes, [
+    "shipping_line1",
+    "address_line1",
+    "address_line_1",
+    "line1",
+    "street",
+    "address",
+    "shipping_address"
+  ]);
+  const line2 = pickNote(notes, ["shipping_line2", "address_line2", "address_line_2", "line2"]);
+  const landmark = pickNote(notes, ["landmark", "shipping_landmark"]);
+  const city = pickNote(notes, ["city", "shipping_city"]);
+  const state = pickNote(notes, ["state", "shipping_state"]);
+  const pincode = pickNote(notes, ["pincode", "pin_code", "postal_code", "zip", "shipping_pincode"]).replace(
+    /\D/g,
+    ""
+  );
+  if (fullName) address.fullName = fullName;
+  if (email) address.email = email;
+  if (phone) address.phone = phone;
+  if (houseFlatNumber) address.houseFlatNumber = houseFlatNumber;
+  if (line1) address.line1 = line1;
+  if (line2) address.line2 = line2;
+  if (landmark) address.landmark = landmark;
+  if (city) address.city = city;
+  if (state) address.state = state;
+  if (pincode) address.pincode = pincode;
+  return address;
+}
+function parseItemsFromNotes(notes, products2) {
+  const matchProductId = (token) => {
+    const normalized = token.trim().toLowerCase();
+    if (!normalized) return null;
+    const found = products2.find(
+      (p) => p.id.toLowerCase() === normalized || p.sku.toLowerCase() === normalized || p.slug.toLowerCase() === normalized
+    );
+    return found?.id ?? null;
+  };
+  const rawItems = pickNote(notes, ["items", "cart_items", "cart"]);
+  if (rawItems) {
+    if (rawItems.startsWith("[")) {
+      try {
+        const parsed = JSON.parse(rawItems);
+        if (Array.isArray(parsed)) {
+          const valid = [];
+          for (const entry of parsed) {
+            if (!entry || typeof entry !== "object") continue;
+            const rec = entry;
+            const id = matchProductId(String(rec.productId ?? rec.id ?? rec.sku ?? ""));
+            const qty = Math.floor(Number(rec.quantity ?? rec.qty ?? 0));
+            if (id && qty > 0 && qty <= 50) {
+              valid.push({ productId: id, quantity: qty });
+            }
+          }
+          if (valid.length > 0) return valid;
+        }
+      } catch {
+      }
+    }
+    const parts = rawItems.split(/[,;|]+/).map((s) => s.trim()).filter(Boolean);
+    const parsedCompact = [];
+    for (const part of parts) {
+      const [rawId, rawQty] = part.split(/[:x*]/i);
+      const productId = matchProductId(rawId || "");
+      const qty = rawQty ? Math.floor(Number(rawQty)) : 1;
+      if (productId && Number.isFinite(qty) && qty > 0 && qty <= 50) {
+        parsedCompact.push({ productId, quantity: qty });
+      }
+    }
+    if (parsedCompact.length > 0) return parsedCompact;
+  }
+  const singleProductToken = pickNote(notes, ["product_id", "productid", "sku", "product_sku"]);
+  if (singleProductToken) {
+    const productId = matchProductId(singleProductToken);
+    const qty = Math.floor(Number(pickNote(notes, ["quantity", "qty"]) || "1"));
+    if (productId && Number.isFinite(qty) && qty > 0 && qty <= 50) {
+      return [{ productId, quantity: qty }];
+    }
+  }
+  return [];
+}
+function isLikelyTestOrder(order) {
+  const haystack = [
+    order.orderNumber,
+    order.customerName,
+    order.customerEmail,
+    order.shippingAddress?.line1,
+    order.shippingAddress?.city
+  ].filter(Boolean).join(" ").toLowerCase();
+  return order.status === "Cancelled" || /\b(test|dummy|smoke|sandbox)\b/.test(haystack) || order.customerEmail.toLowerCase().endsWith("@example.com");
+}
+function recoverVerifiedCheckoutDetails(params) {
+  const {
+    livePayment,
+    liveOrder,
+    storedIntent,
+    allPaymentIntents = [],
+    users: users2,
+    orders: orders2,
+    products: products2,
+    settings,
+    coupons: coupons2,
+    promotions: promotions2,
+    verifiedMethod
+  } = params;
+  const checkedSources = [];
+  const fieldSources = {};
+  const partialAddress = {};
+  const applyAddressField = (field, rawValue, source) => {
+    if (partialAddress[field]) return;
+    let cleaned = cleanText(rawValue);
+    if (!cleaned) return;
+    if (field === "email") cleaned = normalizeEmail(cleaned);
+    if (field === "phone") cleaned = normalizeIndianPhone10(cleaned);
+    if (field === "pincode") cleaned = cleaned.replace(/\D/g, "");
+    if (!cleaned) return;
+    partialAddress[field] = cleaned;
+    fieldSources[field] = source;
+  };
+  const applyAddressObject = (addr, source) => {
+    if (!addr) return;
+    applyAddressField("fullName", addr.fullName, source);
+    applyAddressField("email", addr.email, source);
+    applyAddressField("phone", addr.phone, source);
+    applyAddressField("houseFlatNumber", addr.houseFlatNumber, source);
+    applyAddressField("line1", addr.line1, source);
+    applyAddressField("line2", addr.line2, source);
+    applyAddressField("landmark", addr.landmark, source);
+    applyAddressField("city", addr.city, source);
+    applyAddressField("state", addr.state, source);
+    applyAddressField("pincode", addr.pincode, source);
+  };
+  const amountPaise = typeof livePayment.amount === "number" ? Math.round(livePayment.amount) : 0;
+  const paymentTimestampMs = livePayment.created_at ? livePayment.created_at * 1e3 : storedIntent?.createdAt ? Date.parse(storedIntent.createdAt) || Date.now() : Date.now();
+  let items = [];
+  let itemsSource;
+  let shippingSpeed = "standard";
+  let couponCode;
+  let deliveryInstructions;
+  let matchedUserId;
+  const effectiveIntent = storedIntent || allPaymentIntents.find(
+    (i) => livePayment.order_id && i.razorpayOrderId === livePayment.order_id || livePayment.id && i.paymentId === livePayment.id
+  ) || null;
+  if (effectiveIntent?.checkoutPayload) {
+    const payload = effectiveIntent.checkoutPayload;
+    applyAddressObject(payload.shippingAddress, "payment_intent");
+    if (Array.isArray(payload.items) && payload.items.length > 0) {
+      items = payload.items.map((it) => ({ productId: it.productId, quantity: it.quantity }));
+      itemsSource = "payment_intent";
+      fieldSources.items = "payment_intent";
+    }
+    shippingSpeed = payload.shippingSpeed === "express" ? "express" : "standard";
+    if (payload.couponCode) couponCode = payload.couponCode;
+    if (payload.deliveryInstructions) deliveryInstructions = payload.deliveryInstructions;
+    if (payload.userId) matchedUserId = payload.userId;
+    checkedSources.push({
+      source: "payment_intent",
+      found: true,
+      detail: `Found payment intent (${effectiveIntent.razorpayOrderId}) with persisted checkout draft.`
+    });
+  } else if (effectiveIntent) {
+    checkedSources.push({
+      source: "payment_intent",
+      found: false,
+      detail: `Payment intent (${effectiveIntent.razorpayOrderId}) exists, but checkout_payload is empty (historical checkout).`
+    });
+  } else {
+    checkedSources.push({
+      source: "payment_intent",
+      found: false,
+      detail: "No matching payment_intent record found in database."
+    });
+  }
+  const orderNotes = normalizeNotesObject(liveOrder?.notes);
+  const orderNoteAddress = parseAddressFromNotes(orderNotes);
+  const orderNoteItems = parseItemsFromNotes(orderNotes, products2);
+  const hasOrderNoteData = Object.keys(orderNoteAddress).length > 0 || orderNoteItems.length > 0;
+  if (hasOrderNoteData) {
+    applyAddressObject(orderNoteAddress, "razorpay_order_notes");
+    if (items.length === 0 && orderNoteItems.length > 0) {
+      items = orderNoteItems;
+      itemsSource = "razorpay_order_notes";
+      fieldSources.items = "razorpay_order_notes";
+    }
+    const noteSpeed = pickNote(orderNotes, ["shipping_speed", "shippingspeed"]);
+    if (noteSpeed === "express") shippingSpeed = "express";
+    const noteCoupon = pickNote(orderNotes, ["coupon", "coupon_code", "couponcode"]);
+    if (!couponCode && noteCoupon) couponCode = noteCoupon;
+    const noteInstructions = pickNote(orderNotes, ["delivery_instructions", "instructions"]);
+    if (!deliveryInstructions && noteInstructions) deliveryInstructions = noteInstructions;
+  }
+  const orderNoteUserId = pickNote(orderNotes, ["user_id", "userid", "customer_id"]);
+  if (!matchedUserId && orderNoteUserId) matchedUserId = orderNoteUserId;
+  const orderNoteKeys = Object.keys(orderNotes);
+  checkedSources.push({
+    source: "razorpay_order_notes",
+    found: hasOrderNoteData,
+    detail: !liveOrder ? "Razorpay order details could not be loaded." : hasOrderNoteData ? `Recovered checkout fields from Razorpay order notes (${orderNoteKeys.join(", ")}).` : orderNoteKeys.length > 0 ? `Razorpay order notes only contain metadata keys (${orderNoteKeys.join(", ")}), with no customer shipping address or cart items.` : "Razorpay order has no notes."
+  });
+  const paymentNotes = normalizeNotesObject(livePayment.notes);
+  const paymentNoteAddress = parseAddressFromNotes(paymentNotes);
+  const paymentNoteItems = parseItemsFromNotes(paymentNotes, products2);
+  const hasPaymentNoteData = Object.keys(paymentNoteAddress).length > 0 || paymentNoteItems.length > 0;
+  if (hasPaymentNoteData) {
+    applyAddressObject(paymentNoteAddress, "razorpay_payment_notes");
+    if (items.length === 0 && paymentNoteItems.length > 0) {
+      items = paymentNoteItems;
+      itemsSource = "razorpay_payment_notes";
+      fieldSources.items = "razorpay_payment_notes";
+    }
+  }
+  const paymentNoteUserId = pickNote(paymentNotes, ["user_id", "userid", "customer_id"]);
+  if (!matchedUserId && paymentNoteUserId) matchedUserId = paymentNoteUserId;
+  const paymentNoteKeys = Object.keys(paymentNotes);
+  checkedSources.push({
+    source: "razorpay_payment_notes",
+    found: hasPaymentNoteData,
+    detail: hasPaymentNoteData ? `Recovered fields from Razorpay payment notes (${paymentNoteKeys.join(", ")}).` : paymentNoteKeys.length > 0 ? `Razorpay payment notes only contain keys (${paymentNoteKeys.join(", ")}), with no customer shipping address.` : "Razorpay payment has no notes."
+  });
+  const lookupEmail = normalizeEmail(partialAddress.email || livePayment.email);
+  const lookupPhone = normalizeIndianPhone10(partialAddress.phone || livePayment.contact);
+  let matchedUser = null;
+  let ambiguityWarning;
+  if (matchedUserId) {
+    matchedUser = users2.find((u) => u.id === matchedUserId) ?? null;
+  }
+  if (!matchedUser && lookupEmail) {
+    const emailMatches = users2.filter((u) => normalizeEmail(u.email) === lookupEmail);
+    if (emailMatches.length === 1) {
+      matchedUser = emailMatches[0];
+    } else if (emailMatches.length > 1) {
+      ambiguityWarning = `Multiple user profiles share email ${lookupEmail}; manual confirmation required.`;
+    }
+  }
+  if (!matchedUser && !ambiguityWarning && lookupPhone && lookupPhone.length === 10) {
+    const phoneMatches = users2.filter(
+      (u) => normalizeIndianPhone10(u.phone) === lookupPhone || normalizeIndianPhone10(u.defaultAddress?.phone) === lookupPhone
+    );
+    if (phoneMatches.length === 1) {
+      matchedUser = phoneMatches[0];
+    } else if (phoneMatches.length > 1) {
+      ambiguityWarning = `Multiple user profiles share phone ${lookupPhone}; manual confirmation required.`;
+    }
+  }
+  if (matchedUser) {
+    matchedUserId = matchedUser.id;
+    applyAddressField("fullName", matchedUser.defaultAddress?.fullName || matchedUser.name, "customer_profile");
+    applyAddressField("email", matchedUser.defaultAddress?.email || matchedUser.email, "customer_profile");
+    applyAddressField("phone", matchedUser.defaultAddress?.phone || matchedUser.phone, "customer_profile");
+    checkedSources.push({
+      source: "customer_profile",
+      found: true,
+      detail: `Matched registered customer profile (${matchedUser.name}, ${matchedUser.email}).`
+    });
+    if (matchedUser.defaultAddress) {
+      applyAddressObject(matchedUser.defaultAddress, "saved_address");
+      const hasAddressCore = Boolean(
+        cleanText(matchedUser.defaultAddress.line1) && cleanText(matchedUser.defaultAddress.city) && cleanText(matchedUser.defaultAddress.state) && cleanText(matchedUser.defaultAddress.pincode)
+      );
+      checkedSources.push({
+        source: "saved_address",
+        found: hasAddressCore,
+        detail: hasAddressCore ? `Recovered saved default address (${matchedUser.defaultAddress.city}, ${matchedUser.defaultAddress.state} ${matchedUser.defaultAddress.pincode}).` : "Customer profile has a partial saved default address."
+      });
+    } else {
+      checkedSources.push({
+        source: "saved_address",
+        found: false,
+        detail: "Matched customer profile has no saved default address."
+      });
+    }
+  } else {
+    checkedSources.push({
+      source: "customer_profile",
+      found: false,
+      detail: ambiguityWarning ? ambiguityWarning : lookupEmail || lookupPhone ? `No registered customer profile matches ${[lookupEmail, lookupPhone].filter(Boolean).join(" / ")}.` : "Razorpay payment has neither email nor phone to match a customer profile."
+    });
+    checkedSources.push({
+      source: "saved_address",
+      found: false,
+      detail: "No saved customer address available."
+    });
+  }
+  const missingBeforeOrders = REQUIRED_ADDRESS_FIELDS.filter((f) => !partialAddress[f]);
+  if (missingBeforeOrders.length > 0 && !ambiguityWarning) {
+    const candidateOrders = orders2.filter((o) => !isLikelyTestOrder(o)).filter((o) => {
+      if (matchedUserId && o.userId && o.userId === matchedUserId) return true;
+      if (lookupEmail && normalizeEmail(o.customerEmail) === lookupEmail) return true;
+      if (lookupPhone && lookupPhone.length === 10 && (normalizeIndianPhone10(o.customerPhone) === lookupPhone || normalizeIndianPhone10(o.shippingAddress?.phone) === lookupPhone)) {
+        return true;
+      }
+      return false;
+    }).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+    if (candidateOrders.length > 0) {
+      const latestOrder = candidateOrders[0];
+      const distinctEmails = new Set(
+        candidateOrders.map((o) => normalizeEmail(o.customerEmail)).filter(Boolean)
+      );
+      if (!matchedUserId && distinctEmails.size > 1) {
+        ambiguityWarning = "Multiple prior orders with different customer emails share this phone number; manual confirmation required.";
+        checkedSources.push({
+          source: "previous_order",
+          found: false,
+          detail: ambiguityWarning
+        });
+      } else {
+        applyAddressObject(latestOrder.shippingAddress, "previous_order");
+        if (!matchedUserId && latestOrder.userId) {
+          matchedUserId = latestOrder.userId;
+        }
+        checkedSources.push({
+          source: "previous_order",
+          found: true,
+          detail: `Recovered verified shipping details from prior order ${latestOrder.orderNumber}.`
+        });
+      }
+    } else {
+      checkedSources.push({
+        source: "previous_order",
+        found: false,
+        detail: "No prior customer orders found for this email or phone."
+      });
+    }
+  } else if (missingBeforeOrders.length === 0) {
+    checkedSources.push({
+      source: "previous_order",
+      found: false,
+      detail: "Skipped \u2014 complete shipping details already recovered from higher-priority source."
+    });
+  }
+  applyAddressField("email", livePayment.email, "razorpay_payment");
+  applyAddressField("phone", livePayment.contact, "razorpay_payment");
+  if (items.length === 0 && amountPaise >= 100) {
+    const activeProducts = products2.filter((p) => p.active);
+    const exactMatches = [];
+    for (const prod of activeProducts) {
+      for (let qty = 1; qty <= 10; qty += 1) {
+        const candidateItems = [{ productId: prod.id, quantity: qty }];
+        const calc = calculateCartTotals(candidateItems, products2, settings, {
+          shippingSpeed,
+          paymentMethod: verifiedMethod,
+          couponCode,
+          coupons: coupons2,
+          promotions: promotions2,
+          nowMs: paymentTimestampMs
+        });
+        if (Math.round(calc.grandTotal * 100) === amountPaise) {
+          exactMatches.push({ items: candidateItems, productName: prod.name, qty });
+        }
+      }
+    }
+    if (exactMatches.length === 1) {
+      items = exactMatches[0].items;
+      itemsSource = "exact_catalog_match";
+      fieldSources.items = "exact_catalog_match";
+      checkedSources.push({
+        source: "catalog_amount_match",
+        found: true,
+        detail: `Exact unambiguous catalog match for \u20B9${(amountPaise / 100).toFixed(2)}: ${exactMatches[0].qty} \xD7 ${exactMatches[0].productName}.`
+      });
+    } else if (exactMatches.length > 1) {
+      checkedSources.push({
+        source: "catalog_amount_match",
+        found: false,
+        detail: `Multiple product combinations match \u20B9${(amountPaise / 100).toFixed(2)}; manual item confirmation required.`
+      });
+    } else {
+      checkedSources.push({
+        source: "catalog_amount_match",
+        found: false,
+        detail: `No single active product matches \u20B9${(amountPaise / 100).toFixed(2)} without a coupon or multi-item cart.`
+      });
+    }
+  } else if (items.length > 0) {
+    checkedSources.push({
+      source: "catalog_amount_match",
+      found: true,
+      detail: `Cart items already recovered from ${itemsSource}.`
+    });
+  }
+  const candidateAddress = {
+    fullName: partialAddress.fullName || "",
+    email: partialAddress.email || "",
+    phone: partialAddress.phone || "",
+    houseFlatNumber: partialAddress.houseFlatNumber || void 0,
+    line1: partialAddress.line1 || "",
+    line2: partialAddress.line2 || void 0,
+    landmark: partialAddress.landmark || void 0,
+    city: partialAddress.city || "",
+    state: partialAddress.state || "",
+    pincode: partialAddress.pincode || ""
+  };
+  const validation = validateCheckoutForm(candidateAddress);
+  const missingFields = [];
+  for (const field of REQUIRED_ADDRESS_FIELDS) {
+    if (!partialAddress[field] || validation.errors[field]) {
+      missingFields.push(field);
+    }
+  }
+  if (items.length === 0) {
+    missingFields.push("items");
+  }
+  let amountMatches = false;
+  let calculatedTotalPaise;
+  if (items.length > 0) {
+    const calc = calculateCartTotals(items, products2, settings, {
+      shippingSpeed,
+      paymentMethod: verifiedMethod,
+      couponCode,
+      coupons: coupons2,
+      promotions: promotions2,
+      nowMs: paymentTimestampMs
+    });
+    calculatedTotalPaise = Math.round(calc.grandTotal * 100);
+    amountMatches = calculatedTotalPaise === amountPaise;
+    if (!amountMatches) {
+      missingFields.push("amountMismatch");
+    }
+  }
+  const complete = validation.valid && items.length > 0 && amountMatches && !ambiguityWarning;
+  const draft = complete ? {
+    items,
+    shippingAddress: candidateAddress,
+    deliveryInstructions,
+    shippingSpeed,
+    paymentMethod: verifiedMethod,
+    couponCode,
+    userId: matchedUserId
+  } : null;
+  return {
+    canAutoReconcile: complete,
+    complete,
+    draft,
+    partialAddress,
+    items,
+    itemsSource,
+    shippingSpeed,
+    couponCode,
+    deliveryInstructions,
+    matchedUserId,
+    matchedUserName: matchedUser?.name,
+    matchedUserEmail: matchedUser?.email,
+    fieldSources,
+    missingFields,
+    checkedSources,
+    ambiguityWarning,
+    amountMatches,
+    calculatedTotalPaise
+  };
+}
+function buildRazorpayOrderNotes(params) {
+  const notes = {
+    store: "HimRudra",
+    method: params.paymentMethod || "UPI",
+    shipping_speed: params.shippingSpeed,
+    items: params.items.map((i) => `${i.productId}:${i.quantity}`).join(",").slice(0, 250)
+  };
+  if (params.couponCode?.trim()) {
+    notes.coupon_code = params.couponCode.trim().slice(0, 64);
+  }
+  if (params.userId?.trim()) {
+    notes.user_id = params.userId.trim().slice(0, 100);
+  }
+  if (params.shippingAddress) {
+    const addr = params.shippingAddress;
+    if (addr.fullName?.trim()) notes.customer_name = addr.fullName.trim().slice(0, 120);
+    if (addr.email?.trim()) notes.customer_email = addr.email.trim().toLowerCase().slice(0, 120);
+    if (addr.phone?.trim()) notes.customer_phone = normalizeIndianPhone10(addr.phone).slice(0, 20);
+    if (addr.houseFlatNumber?.trim()) {
+      notes.house_flat_number = addr.houseFlatNumber.trim().slice(0, 100);
+    }
+    if (addr.line1?.trim()) notes.shipping_line1 = addr.line1.trim().slice(0, 240);
+    if (addr.landmark?.trim()) notes.landmark = addr.landmark.trim().slice(0, 120);
+    if (addr.city?.trim()) notes.city = addr.city.trim().slice(0, 80);
+    if (addr.state?.trim()) notes.state = addr.state.trim().slice(0, 80);
+    if (addr.pincode?.trim()) notes.pincode = addr.pincode.trim().slice(0, 10);
+  }
+  return notes;
+}
+
+// server/orderNotifications.ts
+function escapeHtml(value) {
+  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+}
+function formatInrPlain(amount) {
+  return `\u20B9${Math.round(amount).toLocaleString("en-IN")}`;
+}
+function formatAddressLines(order) {
+  const a = order.shippingAddress;
+  const line = [a.houseFlatNumber, a.line1, a.line2, a.landmark].filter(Boolean).join(", ");
+  return `${a.fullName}, ${line}, ${a.city}, ${a.state} - ${a.pincode} (Phone: ${a.phone})`;
+}
+async function sendViaResend(params) {
+  const fetchFn = params.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 4500);
+  try {
+    const res = await fetchFn("https://api.resend.com/emails", {
+      method: "POST",
+      signal: controller.signal,
+      headers: {
+        Authorization: `Bearer ${params.apiKey}`,
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        from: params.from,
+        to: [params.to],
+        ...params.replyTo ? { reply_to: params.replyTo } : {},
+        subject: params.subject,
+        html: params.html,
+        text: params.text
+      })
+    });
+    if (res.ok) {
+      return { ok: true };
+    }
+    const payload = await res.json().catch(() => ({}));
+    return { ok: false, error: payload.message || `HTTP ${res.status}` };
+  } catch (err) {
+    return {
+      ok: false,
+      error: err instanceof Error ? err.message : "Email provider unreachable"
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+async function sendAutomaticOrderEmails(params) {
+  const env = params.env ?? process.env;
+  const apiKey = env.RESEND_API_KEY?.trim();
+  const from = env.RESEND_FROM_EMAIL?.trim() || "HimRudra Orders <onboarding@resend.dev>";
+  const { order, settings, requestId, fetchImpl } = params;
+  if (!apiKey) {
+    logStructured("info", "notifications", "order_email_skipped_unconfigured", {
+      requestId,
+      orderNumber: order.orderNumber,
+      customerEmail: order.customerEmail,
+      adminNotificationEmail: settings.emailNotificationsEnabled ? settings.orderNotificationEmail : void 0
+    });
+    return {
+      customerEmailSent: false,
+      adminEmailSent: false,
+      skippedReason: "RESEND_API_KEY_NOT_CONFIGURED"
+    };
+  }
+  const itemsText = order.items.map((it) => `- ${it.name} (${it.netQuantity}) \xD7 ${it.quantity} \u2014 ${formatInrPlain(it.unitPrice * it.quantity)}`).join("\n");
+  const itemsHtml = order.items.map(
+    (it) => `<li>${escapeHtml(it.name)} (${escapeHtml(it.netQuantity)}) &times; ${it.quantity} &mdash; <strong>${escapeHtml(formatInrPlain(it.unitPrice * it.quantity))}</strong></li>`
+  ).join("");
+  const addressLine = formatAddressLines(order);
+  const paymentLine = order.paymentMethod === "COD" ? "Cash on Delivery (Payable at delivery)" : `${order.paymentMethod} (${order.paymentStatus}${order.razorpayPaymentId ? ` \xB7 Ref: ${order.razorpayPaymentId}` : ""})`;
+  const customerText = [
+    `Namaste ${order.customerName},`,
+    "",
+    `Thank you for your HimRudra order! Your order ${order.orderNumber} is confirmed.`,
+    "",
+    "Order Summary:",
+    itemsText,
+    `Total Amount: ${formatInrPlain(order.totalAmount)}`,
+    `Payment: ${paymentLine}`,
+    `Shipping Address: ${addressLine}`,
+    order.estimatedDelivery ? `Estimated Delivery: ${order.estimatedDelivery}` : "",
+    "",
+    `For assistance, reply to this email or contact ${settings.brandEmail}.`,
+    "\u2014 Team HimRudra"
+  ].filter(Boolean).join("\n");
+  const customerHtml = `
+    <div style="font-family: Georgia, serif; color: #281A15; max-width: 600px; margin: 0 auto;">
+      <h2 style="margin-bottom: 6px;">Order Confirmed \u2014 ${escapeHtml(order.orderNumber)}</h2>
+      <p>Namaste ${escapeHtml(order.customerName)},</p>
+      <p>Thank you for ordering from <strong>HimRudra</strong>. We have received your order and queued it for dispatch.</p>
+      <ul>${itemsHtml}</ul>
+      <p><strong>Total:</strong> ${escapeHtml(formatInrPlain(order.totalAmount))}<br/>
+         <strong>Payment:</strong> ${escapeHtml(paymentLine)}<br/>
+         <strong>Delivery Address:</strong> ${escapeHtml(addressLine)}${order.estimatedDelivery ? `<br/><strong>Estimated Delivery:</strong> ${escapeHtml(order.estimatedDelivery)}` : ""}</p>
+      <p style="font-size: 13px; color: #79543D;">Questions? Reach us at ${escapeHtml(settings.brandEmail)}.</p>
+    </div>
+  `.trim();
+  const customerRes = await sendViaResend({
+    apiKey,
+    from,
+    to: order.customerEmail,
+    replyTo: settings.brandEmail,
+    subject: `HimRudra Order Confirmed \u2014 ${order.orderNumber}`,
+    html: customerHtml,
+    text: customerText,
+    fetchImpl
+  });
+  logStructured(customerRes.ok ? "info" : "warn", "notifications", "customer_order_email", {
+    requestId,
+    orderNumber: order.orderNumber,
+    sent: customerRes.ok,
+    ...customerRes.error ? { error: customerRes.error } : {}
+  });
+  let adminEmailSent = false;
+  if (settings.emailNotificationsEnabled && settings.orderNotificationEmail?.trim()) {
+    const adminText = [
+      `New HimRudra Order: ${order.orderNumber}`,
+      `Customer: ${order.customerName} (${order.customerEmail} | ${order.customerPhone})`,
+      `Amount: ${formatInrPlain(order.totalAmount)}`,
+      `Payment: ${paymentLine}`,
+      `Shipping: ${addressLine}`,
+      "",
+      "Items:",
+      itemsText
+    ].join("\n");
+    const adminHtml = `
+      <div style="font-family: system-ui, sans-serif; color: #281A15; max-width: 600px;">
+        <h3>New Order Received \u2014 ${escapeHtml(order.orderNumber)}</h3>
+        <p><strong>Customer:</strong> ${escapeHtml(order.customerName)} (${escapeHtml(order.customerEmail)} \xB7 ${escapeHtml(order.customerPhone)})<br/>
+           <strong>Amount:</strong> ${escapeHtml(formatInrPlain(order.totalAmount))}<br/>
+           <strong>Payment:</strong> ${escapeHtml(paymentLine)}<br/>
+           <strong>Shipping:</strong> ${escapeHtml(addressLine)}</p>
+        <ul>${itemsHtml}</ul>
+      </div>
+    `.trim();
+    const adminRes = await sendViaResend({
+      apiKey,
+      from,
+      to: settings.orderNotificationEmail.trim(),
+      replyTo: order.customerEmail,
+      subject: `New HimRudra Order ${order.orderNumber} (${formatInrPlain(order.totalAmount)})`,
+      html: adminHtml,
+      text: adminText,
+      fetchImpl
+    });
+    adminEmailSent = adminRes.ok;
+    logStructured(adminRes.ok ? "info" : "warn", "notifications", "admin_order_email", {
+      requestId,
+      orderNumber: order.orderNumber,
+      sent: adminRes.ok,
+      ...adminRes.error ? { error: adminRes.error } : {}
+    });
+  }
+  return {
+    customerEmailSent: customerRes.ok,
+    adminEmailSent
+  };
 }
 
 // server.ts
@@ -6028,13 +7130,14 @@ function createApiApp() {
       }
     }
     const nowMs = createdAtOverride ? Date.parse(createdAtOverride) || Date.now() : Date.now();
+    const pricingNowMs = createdAtOverride ? nowMs : ctx.paymentIntent?.createdAt ? Date.parse(ctx.paymentIntent.createdAt) || nowMs : nowMs;
     const calc = calculateCartTotals(draft.items, ctx.products, ctx.settings, {
       shippingSpeed: draft.shippingSpeed || "standard",
       paymentMethod: verifiedMethod,
       couponCode: draft.couponCode,
       coupons: ctx.coupons,
       promotions: ctx.promotions,
-      nowMs
+      nowMs: pricingNowMs
     });
     const calculatedPaise = Math.round(calc.grandTotal * 100);
     if (calculatedPaise !== expectedAmountPaise) {
@@ -6054,10 +7157,11 @@ function createApiApp() {
       };
     }
     const normalizedEmail = draft.shippingAddress.email.trim().toLowerCase();
+    let matchedUser = existingUser ?? null;
     let resolvedUserId = existingUser?.id || draft.userId;
-    if (!resolvedUserId && normalizedEmail) {
-      const matchedUser = await storeRepo.findUserByEmail(normalizedEmail).catch(() => null);
-      if (matchedUser) {
+    if (!matchedUser && normalizedEmail) {
+      matchedUser = await storeRepo.findUserByEmail(normalizedEmail).catch(() => null);
+      if (matchedUser && !resolvedUserId) {
         resolvedUserId = matchedUser.id;
       }
     }
@@ -6148,8 +7252,8 @@ function createApiApp() {
       emailNotifiedTo: ctx.settings.emailNotificationsEnabled ? ctx.settings.orderNotificationEmail : void 0,
       createdAt: (/* @__PURE__ */ new Date()).toISOString()
     };
-    const hadDefaultAddress = Boolean(existingUser?.defaultAddress);
-    const userDefaultAddressUpdate = existingUser && !hadDefaultAddress ? { userId: existingUser.id, address: newOrder.shippingAddress } : void 0;
+    const hadDefaultAddress = Boolean(matchedUser?.defaultAddress);
+    const userDefaultAddressUpdate = matchedUser && !hadDefaultAddress ? { userId: matchedUser.id, address: newOrder.shippingAddress } : void 0;
     const state = storeRepo.getState();
     const stockSnapshots = /* @__PURE__ */ new Map();
     const appliedPromoInState = calc.appliedPromotion ? state.promotions.find((p) => p.id === calc.appliedPromotion.id) : void 0;
@@ -6169,8 +7273,8 @@ function createApiApp() {
       }
       state.orders.unshift(newOrder);
       state.adminNotifications.unshift(adminNotification);
-      if (existingUser && !hadDefaultAddress) {
-        existingUser.defaultAddress = newOrder.shippingAddress;
+      if (matchedUser && !hadDefaultAddress) {
+        matchedUser.defaultAddress = newOrder.shippingAddress;
       }
       const existingIntent = state.paymentIntents[razorpayOrderId];
       if (existingIntent) {
@@ -6218,12 +7322,17 @@ function createApiApp() {
           appliedPromoInState.usageCount += 1;
           appliedPromoInState.revenueGenerated += calc.grandTotal;
         }
-        if (existingUser && !hadDefaultAddress) {
-          existingUser.defaultAddress = newOrder.shippingAddress;
+        if (matchedUser && !hadDefaultAddress) {
+          matchedUser.defaultAddress = newOrder.shippingAddress;
         }
       }
       storeRepo.invalidateCaches();
       bootstrapCache.invalidate();
+      void sendAutomaticOrderEmails({
+        order: newOrder,
+        settings: ctx.settings,
+        requestId
+      });
       const updatedProductsList = isPostgres ? ctx.products.filter((p) => p.active) : state.products.filter((p) => p.active);
       return {
         ok: true,
@@ -6246,8 +7355,8 @@ function createApiApp() {
           appliedPromoInState.usageCount = prevPromoUsage;
           appliedPromoInState.revenueGenerated = prevPromoRevenue;
         }
-        if (existingUser && !hadDefaultAddress) {
-          existingUser.defaultAddress = void 0;
+        if (matchedUser && !hadDefaultAddress) {
+          matchedUser.defaultAddress = void 0;
         }
       }
       const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
@@ -6280,14 +7389,17 @@ function createApiApp() {
     if (paymentMethod === "COD") {
       return res.status(400).json({ error: "Cash on Delivery does not require an online payment order." });
     }
-    if (shippingAddress) {
-      const validation = validateCheckoutForm(shippingAddress);
-      if (!validation.valid) {
-        return res.status(400).json({
-          error: "Please check your shipping details before continuing to payment.",
-          fieldErrors: validation.errors
-        });
-      }
+    if (!shippingAddress) {
+      return res.status(400).json({
+        error: "Complete shipping address, contact details, and PIN code are required before initiating payment."
+      });
+    }
+    const validation = validateCheckoutForm(shippingAddress);
+    if (!validation.valid) {
+      return res.status(400).json({
+        error: "Please check your shipping details before continuing to payment.",
+        fieldErrors: validation.errors
+      });
     }
     const razorpayConfig = getRazorpayConfig();
     if (!razorpayConfig) {
@@ -6332,7 +7444,14 @@ function createApiApp() {
         amountPaise,
         currency: "INR",
         receipt: `hr_${Date.now()}`,
-        notes: { store: "HimRudra", method: paymentMethod || "UPI" }
+        notes: buildRazorpayOrderNotes({
+          paymentMethod,
+          items,
+          shippingSpeed,
+          couponCode,
+          shippingAddress,
+          userId: req.currentUser?.id
+        })
       });
       const razorpayMs = Date.now() - rzpStartedAt;
       if (!orderCreation.ok) {
@@ -6363,7 +7482,8 @@ function createApiApp() {
         shippingSpeed,
         paymentMethod: paymentMethod || "UPI",
         couponCode: couponCode?.trim() || void 0,
-        userId: req.currentUser?.id
+        userId: req.currentUser?.id,
+        gatewayStatus: "initiated"
       } : void 0;
       const dbWriteStartedAt = Date.now();
       await storeRepo.upsertPaymentIntent({
@@ -6505,6 +7625,36 @@ function createApiApp() {
         });
         razorpayApiMs = Date.now() - apiStartedAt;
         if (!apiCheck.ok) {
+          if (apiCheck.code === "RAZORPAY_PAYMENT_NOT_CAPTURED" && !intent.verified && !intent.orderId && effectiveDraft) {
+            const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+            if (apiCheck.paymentStatus === "failed") {
+              await storeRepo.upsertPaymentIntent({
+                ...intent,
+                checkoutPayload: {
+                  ...effectiveDraft,
+                  gatewayStatus: "failed",
+                  pendingPaymentId: void 0,
+                  paymentFailure: {
+                    paymentId: cleanPaymentId,
+                    reason: apiCheck.message,
+                    code: apiCheck.errorCode || apiCheck.code,
+                    failedAt: nowIso
+                  }
+                },
+                updatedAt: nowIso
+              }).catch(() => void 0);
+            } else if (apiCheck.paymentStatus === "authorized" || apiCheck.paymentStatus === "created") {
+              await storeRepo.upsertPaymentIntent({
+                ...intent,
+                checkoutPayload: {
+                  ...effectiveDraft,
+                  gatewayStatus: "pending",
+                  pendingPaymentId: cleanPaymentId
+                },
+                updatedAt: nowIso
+              }).catch(() => void 0);
+            }
+          }
           logStructured("warn", "payments", "razorpay_api_verification_failed", {
             requestId: req.requestId,
             razorpayOrderId: cleanOrderId,
@@ -6522,6 +7672,12 @@ function createApiApp() {
           intent.method
         );
         extractedFee = extractActualRazorpayFee(apiCheck.payment);
+        const capturedDraft = effectiveDraft ? {
+          ...effectiveDraft,
+          gatewayStatus: "captured",
+          pendingPaymentId: void 0,
+          paymentFailure: void 0
+        } : void 0;
         const dbWriteStartedAt = Date.now();
         await storeRepo.upsertPaymentIntent({
           ...intent,
@@ -6529,7 +7685,7 @@ function createApiApp() {
           verified: true,
           signatureVerified: true,
           paymentId: cleanPaymentId,
-          checkoutPayload: effectiveDraft,
+          checkoutPayload: capturedDraft,
           gatewayFeePaise: extractedFee.gatewayFeePaise,
           gatewayTaxPaise: extractedFee.gatewayTaxPaise,
           updatedAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -6545,6 +7701,8 @@ function createApiApp() {
       let confirmedOrder;
       let updatedProducts;
       let orderIdempotent = false;
+      let orderError;
+      let orderErrorCode;
       if (effectiveDraft) {
         const orderResult = await createOrReturnVerifiedOnlineOrder({
           draft: effectiveDraft,
@@ -6563,6 +7721,8 @@ function createApiApp() {
           updatedProducts = orderResult.updatedProducts;
           orderIdempotent = orderResult.idempotent;
         } else {
+          orderError = orderResult.error;
+          orderErrorCode = orderResult.code;
           logStructured("warn", "payments", "verify_inline_order_creation_skipped", {
             requestId: req.requestId,
             razorpayOrderId: cleanOrderId,
@@ -6598,7 +7758,8 @@ function createApiApp() {
         verifiedAt: (/* @__PURE__ */ new Date()).toISOString(),
         order: confirmedOrder,
         updatedProducts,
-        orderIdempotent
+        orderIdempotent,
+        ...orderError ? { orderError, orderErrorCode } : {}
       });
     } catch (err) {
       const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
@@ -6773,6 +7934,12 @@ function createApiApp() {
             verified: true,
             signatureVerified: true,
             paymentId: razorpayPaymentId,
+            checkoutPayload: activeIntent.checkoutPayload ? {
+              ...activeIntent.checkoutPayload,
+              gatewayStatus: "captured",
+              pendingPaymentId: void 0,
+              paymentFailure: void 0
+            } : void 0,
             gatewayFeePaise: extractedFee.gatewayFeePaise ?? activeIntent.gatewayFeePaise,
             gatewayTaxPaise: extractedFee.gatewayTaxPaise ?? activeIntent.gatewayTaxPaise,
             updatedAt: (/* @__PURE__ */ new Date()).toISOString()
@@ -6781,22 +7948,109 @@ function createApiApp() {
           intentReconciled = true;
         }
       }
+    } else if (event === "payment.authorized" && activeIntent && !activeIntent.verified && !activeIntent.orderId && activeIntent.checkoutPayload) {
+      const nowIso2 = (/* @__PURE__ */ new Date()).toISOString();
+      activeIntent = {
+        ...activeIntent,
+        checkoutPayload: {
+          ...activeIntent.checkoutPayload,
+          gatewayStatus: "pending",
+          pendingPaymentId: razorpayPaymentId ?? activeIntent.checkoutPayload.pendingPaymentId
+        },
+        updatedAt: nowIso2
+      };
+      await storeRepo.upsertPaymentIntent(activeIntent);
+      intentReconciled = true;
+    } else if (event === "payment.failed" && activeIntent && !activeIntent.verified && !activeIntent.orderId && activeIntent.checkoutPayload) {
+      const nowIso2 = (/* @__PURE__ */ new Date()).toISOString();
+      const failureEntity = paymentEntity;
+      activeIntent = {
+        ...activeIntent,
+        checkoutPayload: {
+          ...activeIntent.checkoutPayload,
+          gatewayStatus: "failed",
+          pendingPaymentId: void 0,
+          paymentFailure: {
+            paymentId: razorpayPaymentId,
+            reason: failureEntity?.error_description || failureEntity?.error_reason || "Payment failed at Razorpay gateway",
+            code: failureEntity?.error_code,
+            failedAt: nowIso2
+          }
+        },
+        updatedAt: nowIso2
+      };
+      await storeRepo.upsertPaymentIntent(activeIntent);
+      intentReconciled = true;
     }
     const existingOrder = await storeRepo.findOrderByRazorpayReference({
       razorpayOrderId,
       razorpayPaymentId
     });
     if (!existingOrder && (event === "payment.captured" || event === "order.paid")) {
-      if (activeIntent && activeIntent.verified && activeIntent.checkoutPayload && razorpayOrderId && razorpayPaymentId && entityCurrency === "INR" && (entityAmountPaise === void 0 || entityAmountPaise === activeIntent.amountPaise)) {
+      const resolvedMethod = normalizeRazorpayPaymentMethod(
+        paymentEntity?.method,
+        activeIntent?.method
+      );
+      let recoveryDraft = activeIntent?.checkoutPayload ?? null;
+      const expectedPaise = activeIntent?.amountPaise ?? entityAmountPaise;
+      if (!recoveryDraft && razorpayOrderId && razorpayPaymentId && entityCurrency === "INR" && typeof expectedPaise === "number" && expectedPaise >= 100) {
+        if (storeRepo.isPostgresEnabled()) {
+          await storeRepo.ensureLoaded({ forceRefresh: true }).catch(() => void 0);
+        }
+        const stateSnapshot = storeRepo.getState();
+        const recoveredFromSources = recoverVerifiedCheckoutDetails({
+          livePayment: {
+            id: razorpayPaymentId,
+            order_id: razorpayOrderId,
+            amount: expectedPaise,
+            currency: entityCurrency,
+            status: "captured",
+            method: paymentEntity?.method,
+            fee: paymentEntity?.fee,
+            tax: paymentEntity?.tax,
+            email: paymentEntity?.email,
+            contact: paymentEntity?.contact,
+            notes: paymentEntity?.notes
+          },
+          liveOrder: orderEntity ? {
+            id: orderEntity.id,
+            amount: orderEntity.amount,
+            notes: orderEntity.notes
+          } : null,
+          storedIntent: activeIntent,
+          allPaymentIntents: Object.values(stateSnapshot.paymentIntents),
+          users: stateSnapshot.users,
+          orders: stateSnapshot.orders,
+          products: stateSnapshot.products,
+          settings: stateSnapshot.settings,
+          coupons: stateSnapshot.coupons,
+          promotions: stateSnapshot.promotions,
+          verifiedMethod: resolvedMethod
+        });
+        if (recoveredFromSources.canAutoReconcile && recoveredFromSources.draft) {
+          recoveryDraft = recoveredFromSources.draft;
+          await storeRepo.upsertPaymentIntent({
+            razorpayOrderId,
+            amountPaise: expectedPaise,
+            verified: true,
+            signatureVerified: true,
+            paymentId: razorpayPaymentId,
+            method: resolvedMethod,
+            checkoutPayload: recoveryDraft,
+            gatewayFeePaise: extractedFee.gatewayFeePaise ?? activeIntent?.gatewayFeePaise,
+            gatewayTaxPaise: extractedFee.gatewayTaxPaise ?? activeIntent?.gatewayTaxPaise,
+            createdAt: activeIntent?.createdAt || (/* @__PURE__ */ new Date()).toISOString(),
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          }).catch(() => void 0);
+        }
+      }
+      if (recoveryDraft && razorpayOrderId && razorpayPaymentId && entityCurrency === "INR" && typeof expectedPaise === "number" && (entityAmountPaise === void 0 || entityAmountPaise === expectedPaise)) {
         const created = await createOrReturnVerifiedOnlineOrder({
-          draft: activeIntent.checkoutPayload,
+          draft: recoveryDraft,
           razorpayOrderId,
           razorpayPaymentId,
-          verifiedMethod: normalizeRazorpayPaymentMethod(
-            paymentEntity?.method,
-            activeIntent.method
-          ),
-          expectedAmountPaise: activeIntent.amountPaise,
+          verifiedMethod: resolvedMethod,
+          expectedAmountPaise: expectedPaise,
           actualFee: extractedFee,
           source: "webhook",
           requestId: req.requestId,
@@ -7015,6 +8269,13 @@ function createApiApp() {
           });
         }
         const resolvedMethod = normalizeRazorpayPaymentMethod(intent.method, paymentMethod);
+        const intentFee = typeof intent.gatewayFeePaise === "number" ? {
+          gatewayFeePaise: intent.gatewayFeePaise,
+          gatewayTaxPaise: intent.gatewayTaxPaise,
+          gatewayFeeAmount: Math.round(intent.gatewayFeePaise) / 100,
+          gatewayTaxAmount: typeof intent.gatewayTaxPaise === "number" ? Math.round(intent.gatewayTaxPaise) / 100 : void 0,
+          gatewayFeeSource: "razorpay_actual"
+        } : { gatewayFeeSource: "estimated" };
         const result = await createOrReturnVerifiedOnlineOrder({
           draft: {
             items,
@@ -7029,10 +8290,11 @@ function createApiApp() {
           razorpayPaymentId,
           verifiedMethod: resolvedMethod,
           expectedAmountPaise: intent.amountPaise,
+          actualFee: intentFee,
           source: "orders_api",
           existingUser: req.currentUser,
           requestId: req.requestId,
-          allowLowStockRecovery: false
+          allowLowStockRecovery: true
         });
         if (!result.ok) {
           return res.status(result.statusCode).json({
@@ -7177,6 +8439,19 @@ function createApiApp() {
       createdAt: now.toISOString()
     };
     const promotionUpdate = calc.appliedPromotion ? { promotionId: calc.appliedPromotion.id, revenueDelta: calc.grandTotal } : void 0;
+    const codAdminNotification = {
+      id: `notif-${crypto6.randomUUID().slice(0, 8)}`,
+      type: "new_paid_order",
+      title: "New COD Order Received!",
+      message: `${newOrder.orderNumber} from ${newOrder.customerName} (\u20B9${newOrder.totalAmount} \xB7 COD)`,
+      orderId: newOrder.id,
+      orderNumber: newOrder.orderNumber,
+      customerName: newOrder.customerName,
+      amount: newOrder.totalAmount,
+      read: false,
+      emailNotifiedTo: ctx.settings.emailNotificationsEnabled ? ctx.settings.orderNotificationEmail : void 0,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
     const hadDefaultAddress = Boolean(req.currentUser?.defaultAddress);
     const userDefaultAddressUpdate = req.currentUser && !hadDefaultAddress ? { userId: req.currentUser.id, address: newOrder.shippingAddress } : void 0;
     const state = storeRepo.getState();
@@ -7197,6 +8472,7 @@ function createApiApp() {
         appliedPromoInState.revenueGenerated += calc.grandTotal;
       }
       state.orders.unshift(newOrder);
+      state.adminNotifications.unshift(codAdminNotification);
       if (req.currentUser && !hadDefaultAddress) {
         req.currentUser.defaultAddress = newOrder.shippingAddress;
       }
@@ -7208,6 +8484,7 @@ function createApiApp() {
         try {
           commitResult = await storeRepo.commitOrderAtomic(newOrder, stockDecrements, {
             promotionUpdate,
+            adminNotification: codAdminNotification,
             userDefaultAddressUpdate
           });
           break;
@@ -7215,6 +8492,8 @@ function createApiApp() {
           if (isPostgres && attempt < 2 && attemptErr instanceof StorePersistenceError && attemptErr.code === "ORDER_NUMBER_CONFLICT") {
             nextOrderSeq += 1;
             newOrder.orderNumber = buildOrderNumber(nextOrderSeq);
+            codAdminNotification.orderNumber = newOrder.orderNumber;
+            codAdminNotification.message = `${newOrder.orderNumber} from ${newOrder.customerName} (\u20B9${newOrder.totalAmount} \xB7 COD)`;
             continue;
           }
           throw attemptErr;
@@ -7239,6 +8518,11 @@ function createApiApp() {
       }
       storeRepo.invalidateCaches();
       bootstrapCache.invalidate();
+      void sendAutomaticOrderEmails({
+        order: newOrder,
+        settings: ctx.settings,
+        requestId: req.requestId
+      });
       res.setHeader(
         "Server-Timing",
         `context;dur=${contextMs}, tx;dur=${txMs}, total;dur=${totalMs}`
@@ -7257,6 +8541,9 @@ function createApiApp() {
     } catch (err) {
       if (!isPostgres) {
         state.orders = state.orders.filter((o) => o.id !== newOrder.id);
+        state.adminNotifications = state.adminNotifications.filter(
+          (n) => n.id !== codAdminNotification.id
+        );
         for (const [prodId, prevStock] of stockSnapshots.entries()) {
           const product = state.products.find((p) => p.id === prodId);
           if (product) product.stock = prevStock;
@@ -7571,6 +8858,30 @@ Concierge:` : message.trim();
       serverNow: new Date(nowMs).toISOString()
     });
   });
+  app2.get("/api/admin/checkout-activity", requireAdmin, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    try {
+      const rawLimit = Number(req.query.limit);
+      const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(Math.trunc(rawLimit), 500) : 200;
+      const activity = await storeRepo.listLiveCheckoutActivity(limit);
+      const rawStatus = typeof req.query.status === "string" ? req.query.status.trim().toLowerCase() : "all";
+      const allowedStatuses = /* @__PURE__ */ new Set(["initiated", "pending", "failed", "captured", "confirmed"]);
+      const filteredItems = allowedStatuses.has(rawStatus) ? activity.items.filter((item) => item.status === rawStatus) : activity.items;
+      res.json({
+        items: filteredItems,
+        counts: activity.counts,
+        refreshedAt: activity.refreshedAt
+      });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const code = err instanceof StorePersistenceError ? err.code : "CHECKOUT_ACTIVITY_LOAD_FAILED";
+      res.status(statusCode).json({
+        error: "Unable to load live checkout activity right now. Please try again.",
+        code
+      });
+    }
+  });
   app2.get("/api/admin/payments/unreconciled", requireAdmin, async (_req, res) => {
     res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
     const unreconciled = await storeRepo.listUnreconciledCapturedIntents();
@@ -7588,10 +8899,11 @@ Concierge:` : message.trim();
       shippingAddress,
       items,
       deliveryInstructions,
-      shippingSpeed = "standard",
+      shippingSpeed,
       couponCode,
       createdAtOverride,
-      verifyOnly = false
+      verifyOnly = false,
+      autoReconcile = false
     } = req.body;
     const razorpayConfig = getRazorpayConfig();
     if (!razorpayConfig) {
@@ -7683,8 +8995,27 @@ Concierge:` : message.trim();
       });
     }
     const storedIntent = await storeRepo.findPaymentIntent(verifiedOrderId).catch(() => null);
+    const liveOrderRes = await fetchRazorpayOrderById({
+      config: razorpayConfig,
+      razorpayOrderId: verifiedOrderId
+    }).catch(() => null);
+    const liveOrder = liveOrderRes && liveOrderRes.ok ? liveOrderRes.order : null;
+    const state = storeRepo.getState();
     const verifiedMethod = normalizeRazorpayPaymentMethod(livePayment.method, storedIntent?.method);
     const extractedFee = extractActualRazorpayFee(livePayment);
+    const recovered = recoverVerifiedCheckoutDetails({
+      livePayment,
+      liveOrder,
+      storedIntent,
+      allPaymentIntents: Object.values(state.paymentIntents),
+      users: state.users,
+      orders: state.orders,
+      products: state.products,
+      settings: state.settings,
+      coupons: state.coupons,
+      promotions: state.promotions,
+      verifiedMethod
+    });
     const capturedPaymentSummary = {
       razorpayPaymentId: verifiedPaymentId,
       razorpayOrderId: verifiedOrderId,
@@ -7706,29 +9037,50 @@ Concierge:` : message.trim();
         reconciled: false,
         alreadyExisted: false,
         capturedPayment: capturedPaymentSummary,
-        persistedDraft: storedIntent?.checkoutPayload ?? null
+        persistedDraft: recovered.draft ?? storedIntent?.checkoutPayload ?? null,
+        recoveredCheckout: recovered
       });
     }
-    const draft = storedIntent?.checkoutPayload ? {
-      ...storedIntent.checkoutPayload,
-      shippingAddress: shippingAddress ?? storedIntent.checkoutPayload.shippingAddress,
-      items: items?.length ? items : storedIntent.checkoutPayload.items,
-      deliveryInstructions: deliveryInstructions ?? storedIntent.checkoutPayload.deliveryInstructions,
-      shippingSpeed: shippingSpeed || storedIntent.checkoutPayload.shippingSpeed,
-      couponCode: couponCode !== void 0 ? couponCode || void 0 : storedIntent.checkoutPayload.couponCode
-    } : shippingAddress && Array.isArray(items) && items.length > 0 ? {
-      items,
-      shippingAddress,
-      deliveryInstructions,
-      shippingSpeed,
-      paymentMethod: verifiedMethod,
-      couponCode: couponCode || void 0
-    } : null;
+    const hasManualInput = Boolean(shippingAddress || Array.isArray(items) && items.length > 0);
+    let draft = null;
+    let recoveryMode = "admin_confirmed";
+    if (autoReconcile && !hasManualInput) {
+      if (recovered.canAutoReconcile && recovered.draft) {
+        draft = recovered.draft;
+        recoveryMode = "automatic";
+      }
+    } else if (!hasManualInput && recovered.canAutoReconcile && recovered.draft) {
+      draft = recovered.draft;
+      recoveryMode = "automatic";
+    } else if (storedIntent?.checkoutPayload || recovered.draft) {
+      const baseDraft = storedIntent?.checkoutPayload ?? recovered.draft;
+      draft = {
+        ...baseDraft,
+        shippingAddress: shippingAddress ?? baseDraft.shippingAddress,
+        items: items?.length ? items : baseDraft.items,
+        deliveryInstructions: deliveryInstructions ?? baseDraft.deliveryInstructions,
+        shippingSpeed: shippingSpeed ?? baseDraft.shippingSpeed,
+        couponCode: couponCode !== void 0 ? couponCode || void 0 : baseDraft.couponCode,
+        userId: baseDraft.userId ?? recovered.matchedUserId
+      };
+    } else if (shippingAddress && Array.isArray(items) && items.length > 0) {
+      draft = {
+        items,
+        shippingAddress,
+        deliveryInstructions: deliveryInstructions ?? recovered.deliveryInstructions,
+        shippingSpeed: shippingSpeed ?? recovered.shippingSpeed,
+        paymentMethod: verifiedMethod,
+        couponCode: couponCode !== void 0 ? couponCode || void 0 : recovered.couponCode,
+        userId: recovered.matchedUserId
+      };
+    }
     if (!draft) {
       return res.status(400).json({
-        error: "No persisted checkout draft exists for this historical payment. Provide verified customer shippingAddress and items matching the exact captured amount.",
+        error: recovered.ambiguityWarning || `Automatic reconciliation requires complete verified checkout details. Missing: ${recovered.missingFields.join(", ")}. Provide verified customer shipping details matching the exact captured amount.`,
         code: "RECONCILE_CUSTOMER_DETAILS_REQUIRED",
-        capturedPayment: capturedPaymentSummary
+        missingFields: recovered.missingFields,
+        capturedPayment: capturedPaymentSummary,
+        recoveredCheckout: recovered
       });
     }
     await storeRepo.upsertPaymentIntent({
@@ -7771,13 +9123,17 @@ Concierge:` : message.trim();
       razorpayPaymentId: verifiedPaymentId,
       amount: reconciled.order.totalAmount,
       gatewayFeeAmount: reconciled.order.gatewayFeeAmount,
-      gatewayFeeSource: reconciled.order.gatewayFeeSource
+      gatewayFeeSource: reconciled.order.gatewayFeeSource,
+      recoveryMode,
+      fieldSources: recovered.fieldSources
     });
     res.status(reconciled.statusCode).json({
       reconciled: true,
       alreadyExisted: reconciled.idempotent,
+      recoveryMode,
       order: reconciled.order,
-      updatedProducts: reconciled.updatedProducts
+      updatedProducts: reconciled.updatedProducts,
+      recoveredCheckout: recovered
     });
   });
   app2.get("/api/admin/maintenance/test-data-preview", requireAdmin, async (req, res) => {

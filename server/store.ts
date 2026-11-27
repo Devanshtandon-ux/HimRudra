@@ -9,6 +9,7 @@ import type {
   Coupon,
   Expense,
   LabReport,
+  LiveCheckoutActivityResponse,
   Order,
   PersistedCheckoutDraft,
   Product,
@@ -18,6 +19,7 @@ import type {
   StoreSettings,
   User,
 } from '../src/types.ts';
+import { buildLiveCheckoutActivity } from './checkoutActivity.ts';
 import {
   FREE_SHIPPING_PROMO_END_ISO,
   getActivePromotions,
@@ -1357,6 +1359,29 @@ class StoreRepository {
         !matchedRzpOrderIds.has(intent.razorpayOrderId) &&
         !(intent.paymentId && matchedRzpPaymentIds.has(intent.paymentId))
     );
+  }
+
+  async listLiveCheckoutActivity(limit = 200): Promise<LiveCheckoutActivityResponse> {
+    const safeLimit = Math.min(Math.max(Math.trunc(limit) || 200, 1), 500);
+    const pg = this.getPostgres();
+    if (pg) {
+      const sources = await pg.listCheckoutActivitySources(safeLimit);
+      return buildLiveCheckoutActivity({
+        intents: sources.intents,
+        orders: sources.orders,
+        products: sources.products,
+      });
+    }
+
+    const intents = Object.values(this.state.paymentIntents)
+      .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
+      .slice(0, safeLimit);
+
+    return buildLiveCheckoutActivity({
+      intents,
+      orders: this.state.orders,
+      products: this.state.products,
+    });
   }
 
   async cleanupApprovedTestRecords(params: {
