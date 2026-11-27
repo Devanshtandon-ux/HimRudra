@@ -24,6 +24,18 @@ export interface RazorpayPaymentEntity {
   error_description?: string;
 }
 
+export interface RazorpayOrderEntity {
+  id?: string;
+  amount?: number;
+  amount_paid?: number;
+  amount_due?: number;
+  currency?: string;
+  receipt?: string;
+  status?: string;
+  notes?: Record<string, string> | unknown[];
+  created_at?: number;
+}
+
 export interface ExtractedRazorpayFee {
   gatewayFeePaise?: number;
   gatewayTaxPaise?: number;
@@ -502,6 +514,48 @@ export async function fetchRazorpayOrderPayments(params: {
       statusCode: 502,
       code: 'RAZORPAY_ORDER_PAYMENTS_NETWORK_ERROR',
       message: 'Unable to reach Razorpay API to inspect order payments.',
+    };
+  }
+}
+
+export async function fetchRazorpayOrderById(params: {
+  config: RazorpayConfig;
+  razorpayOrderId: string;
+  fetchImpl?: typeof fetch;
+}): Promise<
+  | { ok: true; order: RazorpayOrderEntity }
+  | { ok: false; statusCode: number; code: string; message: string }
+> {
+  const fetchFn = params.fetchImpl ?? fetch;
+  try {
+    const res = await fetchFn(
+      `https://api.razorpay.com/v1/orders/${encodeURIComponent(params.razorpayOrderId)}`,
+      {
+        method: 'GET',
+        headers: {
+          Authorization: buildBasicAuthHeader(params.config),
+          Accept: 'application/json',
+        },
+      }
+    );
+    const payload = (await res.json().catch(() => ({}))) as RazorpayOrderEntity & {
+      error?: { description?: string };
+    };
+    if (!res.ok) {
+      return {
+        ok: false,
+        statusCode: res.status === 404 ? 404 : 502,
+        code: 'RAZORPAY_ORDER_FETCH_FAILED',
+        message: payload.error?.description || 'Could not fetch order from Razorpay.',
+      };
+    }
+    return { ok: true, order: payload };
+  } catch {
+    return {
+      ok: false,
+      statusCode: 502,
+      code: 'RAZORPAY_ORDER_FETCH_NETWORK_ERROR',
+      message: 'Unable to reach Razorpay API to inspect order details.',
     };
   }
 }

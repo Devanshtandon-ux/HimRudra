@@ -37,6 +37,33 @@ interface VerifiedCapturedPayment {
   createdAt?: string;
 }
 
+interface CheckedRecoverySource {
+  source: string;
+  found: boolean;
+  detail: string;
+}
+
+interface RecoveredCheckoutInfo {
+  canAutoReconcile: boolean;
+  complete: boolean;
+  draft: PersistedCheckoutDraft | null;
+  partialAddress: Partial<ShippingAddress>;
+  items: CartItem[];
+  itemsSource?: string;
+  shippingSpeed: 'standard' | 'express';
+  couponCode?: string;
+  deliveryInstructions?: string;
+  matchedUserId?: string;
+  matchedUserName?: string;
+  matchedUserEmail?: string;
+  fieldSources: Record<string, string>;
+  missingFields: string[];
+  checkedSources: CheckedRecoverySource[];
+  ambiguityWarning?: string;
+  amountMatches: boolean;
+  calculatedTotalPaise?: number;
+}
+
 interface AdminPaymentReconciliationPanelProps {
   unreconciledPayments: UnreconciledPaymentIntent[];
   products: Product[];
@@ -93,6 +120,7 @@ export const AdminPaymentReconciliationPanel: React.FC<
   const [existingOrder, setExistingOrder] = useState<Order | null>(null);
   const [createdOrder, setCreatedOrder] = useState<Order | null>(null);
   const [verifiedPayment, setVerifiedPayment] = useState<VerifiedCapturedPayment | null>(null);
+  const [recoveredCheckout, setRecoveredCheckout] = useState<RecoveredCheckoutInfo | null>(null);
 
   const activeProducts = useMemo(() => products.filter((p) => p.active), [products]);
   const [selectedProductId, setSelectedProductId] = useState<string>(
@@ -139,46 +167,54 @@ export const AdminPaymentReconciliationPanel: React.FC<
 
   const applyDraftToForm = (
     draft: PersistedCheckoutDraft | null | undefined,
-    captured: VerifiedCapturedPayment
+    captured: VerifiedCapturedPayment,
+    recovered?: RecoveredCheckoutInfo | null
   ) => {
-    if (draft) {
+    const effectiveDraft = recovered?.draft ?? draft ?? null;
+    if (effectiveDraft) {
       setHasPersistedDraft(true);
-      const firstItem = draft.items?.[0];
+      const firstItem = effectiveDraft.items?.[0];
       if (firstItem) {
         setSelectedProductId(firstItem.productId);
         setQuantity(firstItem.quantity);
       }
-      setShippingSpeed(draft.shippingSpeed || 'standard');
-      setCouponCode(draft.couponCode || '');
-      setDeliveryInstructions(draft.deliveryInstructions || '');
+      setShippingSpeed(effectiveDraft.shippingSpeed || 'standard');
+      setCouponCode(effectiveDraft.couponCode || '');
+      setDeliveryInstructions(effectiveDraft.deliveryInstructions || '');
       setAddress({
         ...EMPTY_ADDRESS,
-        ...draft.shippingAddress,
+        ...effectiveDraft.shippingAddress,
       });
     } else {
       setHasPersistedDraft(false);
-      // Pick best matching product/qty for captured amount
-      const exactMatchProduct = activeProducts.find(
-        (p) => Math.round(p.price * 100) === captured.amountPaise
-      );
-      if (exactMatchProduct) {
-        setSelectedProductId(exactMatchProduct.id);
-        setQuantity(1);
-      } else if (activeProducts[0]) {
-        const inferredQty = Math.max(
-          1,
-          Math.round(captured.amountInr / Math.max(1, activeProducts[0].price))
+      const recoveredFirstItem = recovered?.items?.[0];
+      if (recoveredFirstItem) {
+        setSelectedProductId(recoveredFirstItem.productId);
+        setQuantity(recoveredFirstItem.quantity);
+      } else {
+        const exactMatchProduct = activeProducts.find(
+          (p) => Math.round(p.price * 100) === captured.amountPaise
         );
-        setSelectedProductId(activeProducts[0].id);
-        setQuantity(inferredQty);
+        if (exactMatchProduct) {
+          setSelectedProductId(exactMatchProduct.id);
+          setQuantity(1);
+        } else if (activeProducts[0]) {
+          const inferredQty = Math.max(
+            1,
+            Math.round(captured.amountInr / Math.max(1, activeProducts[0].price))
+          );
+          setSelectedProductId(activeProducts[0].id);
+          setQuantity(inferredQty);
+        }
       }
-      setShippingSpeed('standard');
-      setCouponCode('');
-      setDeliveryInstructions('');
+      setShippingSpeed(recovered?.shippingSpeed || 'standard');
+      setCouponCode(recovered?.couponCode || '');
+      setDeliveryInstructions(recovered?.deliveryInstructions || '');
       setAddress({
         ...EMPTY_ADDRESS,
-        email: captured.email || '',
-        phone: sanitizePhone10(captured.contact),
+        ...(recovered?.partialAddress ?? {}),
+        email: recovered?.partialAddress?.email || captured.email || '',
+        phone: sanitizePhone10(recovered?.partialAddress?.phone || captured.contact),
       });
     }
   };
@@ -219,6 +255,7 @@ export const AdminPaymentReconciliationPanel: React.FC<
     setExistingOrder(null);
     setCreatedOrder(null);
     setVerifiedPayment(null);
+    setRecoveredCheckout(null);
 
     try {
       const res = await adminFetch('/api/admin/payments/reconcile', {
@@ -238,6 +275,7 @@ export const AdminPaymentReconciliationPanel: React.FC<
             order?: Order;
             capturedPayment?: VerifiedCapturedPayment;
             persistedDraft?: PersistedCheckoutDraft | null;
+            recoveredCheckout?: RecoveredCheckoutInfo | null;
             error?: string;
           }
         | null;
@@ -252,14 +290,71 @@ export const AdminPaymentReconciliationPanel: React.FC<
       }
       if (json?.capturedPayment) {
         setVerifiedPayment(json.capturedPayment);
+        setRecoveredCheckout(json.recoveredCheckout ?? null);
         setLookupPaymentId(json.capturedPayment.razorpayPaymentId);
         setLookupOrderId(json.capturedPayment.razorpayOrderId);
-        applyDraftToForm(json.persistedDraft, json.capturedPayment);
+        applyDraftToForm(json.persistedDraft, json.capturedPayment, json.recoveredCheckout);
       }
     } catch {
       setErrorMsg('Network error while verifying payment with Razorpay.');
     } finally {
       setVerifying(false);
+    }
+  };
+
+  const handleAutoReconcile = async () => {
+    if (!verifiedPayment || !recoveredCheckout?.canAutoReconcile || submitting) return;
+    setSubmitting(true);
+    setErrorMsg('');
+    setFieldErrors({});
+    try {
+      const res = await adminFetch('/api/admin/payments/reconcile', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          razorpayPaymentId: verifiedPayment.razorpayPaymentId,
+          razorpayOrderId: verifiedPayment.razorpayOrderId,
+          autoReconcile: true,
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | {
+            reconciled?: boolean;
+            alreadyExisted?: boolean;
+            order?: Order;
+            error?: string;
+            fieldErrors?: Record<string, string>;
+          }
+        | null;
+
+      if (!res.ok) {
+        setErrorMsg(json?.error || `Automatic reconciliation failed (HTTP ${res.status}).`);
+        if (json?.fieldErrors) setFieldErrors(json.fieldErrors);
+        return;
+      }
+
+      if (json?.order) {
+        if (json.alreadyExisted) {
+          setExistingOrder(json.order);
+        } else {
+          setCreatedOrder(json.order);
+        }
+        setVerifiedPayment(null);
+        setRecoveredCheckout(null);
+        setQueue((prev) =>
+          prev.filter(
+            (item) =>
+              item.razorpayOrderId !== json.order?.razorpayOrderId &&
+              item.paymentId !== json.order?.razorpayPaymentId
+          )
+        );
+        await onReconciled(json.order, Boolean(json.alreadyExisted));
+      }
+    } catch {
+      setErrorMsg('Network error during automatic reconciliation. No duplicate order was submitted.');
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -332,6 +427,7 @@ export const AdminPaymentReconciliationPanel: React.FC<
           setCreatedOrder(json.order);
         }
         setVerifiedPayment(null);
+        setRecoveredCheckout(null);
         setQueue((prev) =>
           prev.filter(
             (item) =>
@@ -570,6 +666,66 @@ export const AdminPaymentReconciliationPanel: React.FC<
                 </div>
               </div>
 
+              {/* Automatic Recovery Source Inspection */}
+              {recoveredCheckout && (
+                <div
+                  className={`rounded-lg border p-3.5 space-y-2.5 ${
+                    recoveredCheckout.canAutoReconcile
+                      ? 'border-emerald-300 bg-emerald-50/70'
+                      : 'border-amber-300/80 bg-amber-50/60'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="font-semibold text-[#281A15]">
+                        {recoveredCheckout.canAutoReconcile
+                          ? 'Complete Verified Checkout Details Recovered — Automatic Reconciliation Ready'
+                          : 'Partial Recovery Inspection — Missing Verified Details Must Be Confirmed'}
+                      </p>
+                      <p className="text-[11px] text-[#79543D]">
+                        {recoveredCheckout.canAutoReconcile
+                          ? 'All required shipping and item details were recovered from verified records and match the exact captured amount. You can reconcile immediately with one click (no manual entry needed).'
+                          : recoveredCheckout.ambiguityWarning ||
+                            `Missing verified fields: ${recoveredCheckout.missingFields.join(', ')}. Missing customer details are never invented automatically.`}
+                      </p>
+                    </div>
+                    {recoveredCheckout.canAutoReconcile && (
+                      <button
+                        type="button"
+                        disabled={submitting}
+                        onClick={() => void handleAutoReconcile()}
+                        className="rounded-lg bg-emerald-800 px-3.5 py-2 text-xs font-semibold text-white hover:bg-emerald-900 disabled:opacity-50"
+                      >
+                        {submitting
+                          ? 'Auto-Reconciling...'
+                          : 'Auto-Reconcile Order (No Manual Entry)'}
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-[11px]">
+                    {recoveredCheckout.checkedSources.map((src) => (
+                      <div
+                        key={src.source}
+                        className="flex items-start gap-1.5 rounded bg-[#FAF8F4]/80 px-2.5 py-1.5 border border-[#79543D]/15"
+                      >
+                        <span
+                          className={`mt-0.5 inline-block h-2 w-2 rounded-full shrink-0 ${
+                            src.found ? 'bg-emerald-600' : 'bg-[#79543D]/35'
+                          }`}
+                        />
+                        <div>
+                          <span className="font-mono text-[10px] uppercase text-[#79543D]">
+                            {src.source.replaceAll('_', ' ')}:
+                          </span>{' '}
+                          <span className="text-[#281A15]">{src.detail}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* Order Item & Amount Verification */}
               <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                 <div className="sm:col-span-2">
@@ -778,6 +934,7 @@ export const AdminPaymentReconciliationPanel: React.FC<
                     type="button"
                     onClick={() => {
                       setVerifiedPayment(null);
+                      setRecoveredCheckout(null);
                       setErrorMsg('');
                       setFieldErrors({});
                     }}

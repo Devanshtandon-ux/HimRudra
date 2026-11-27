@@ -37,6 +37,7 @@ import {
   createRazorpayServerOrder,
   extractActualRazorpayFee,
   fetchAndVerifyCapturedRazorpayPayment,
+  fetchRazorpayOrderById,
   fetchRazorpayOrderPayments,
   fetchRazorpayPaymentById,
   getRazorpayConfig,
@@ -47,6 +48,10 @@ import {
   verifyRazorpayWebhookSignature,
   type ExtractedRazorpayFee,
 } from './server/razorpay.ts';
+import {
+  buildRazorpayOrderNotes,
+  recoverVerifiedCheckoutDetails,
+} from './server/reconciliationRecovery.ts';
 import type {
   AdminNotification,
   BannerTheme,
@@ -1119,7 +1124,14 @@ export function createApiApp(): express.Express {
         amountPaise,
         currency: 'INR',
         receipt: `hr_${Date.now()}`,
-        notes: { store: 'HimRudra', method: paymentMethod || 'UPI' },
+        notes: buildRazorpayOrderNotes({
+          paymentMethod,
+          items,
+          shippingSpeed,
+          couponCode,
+          shippingAddress,
+          userId: req.currentUser?.id,
+        }),
       });
       const razorpayMs = Date.now() - rzpStartedAt;
 
@@ -2746,10 +2758,11 @@ ${labContext}`;
       shippingAddress,
       items,
       deliveryInstructions,
-      shippingSpeed = 'standard',
+      shippingSpeed,
       couponCode,
       createdAtOverride,
       verifyOnly = false,
+      autoReconcile = false,
     } = req.body as {
       razorpayOrderId?: string;
       razorpayPaymentId?: string;
@@ -2760,6 +2773,7 @@ ${labContext}`;
       couponCode?: string;
       createdAtOverride?: string;
       verifyOnly?: boolean;
+      autoReconcile?: boolean;
     };
 
     const razorpayConfig = getRazorpayConfig();
@@ -2872,8 +2886,30 @@ ${labContext}`;
     }
 
     const storedIntent = await storeRepo.findPaymentIntent(verifiedOrderId).catch(() => null);
+    const liveOrderRes = await fetchRazorpayOrderById({
+      config: razorpayConfig,
+      razorpayOrderId: verifiedOrderId,
+    }).catch(() => null);
+    const liveOrder = liveOrderRes && liveOrderRes.ok ? liveOrderRes.order : null;
+
+    const state = storeRepo.getState();
     const verifiedMethod = normalizeRazorpayPaymentMethod(livePayment.method, storedIntent?.method);
     const extractedFee = extractActualRazorpayFee(livePayment);
+
+    const recovered = recoverVerifiedCheckoutDetails({
+      livePayment,
+      liveOrder,
+      storedIntent,
+      allPaymentIntents: Object.values(state.paymentIntents),
+      users: state.users,
+      orders: state.orders,
+      products: state.products,
+      settings: state.settings,
+      coupons: state.coupons,
+      promotions: state.promotions,
+      verifiedMethod,
+    });
+
     const capturedPaymentSummary = {
       razorpayPaymentId: verifiedPaymentId,
       razorpayOrderId: verifiedOrderId,
@@ -2898,38 +2934,58 @@ ${labContext}`;
         reconciled: false,
         alreadyExisted: false,
         capturedPayment: capturedPaymentSummary,
-        persistedDraft: storedIntent?.checkoutPayload ?? null,
+        persistedDraft: recovered.draft ?? storedIntent?.checkoutPayload ?? null,
+        recoveredCheckout: recovered,
       });
     }
 
-    // Resolve checkout draft: prefer persisted draft, allow admin-verified details for historical payments without draft
-    const draft: PersistedCheckoutDraft | null = storedIntent?.checkoutPayload
-      ? {
-          ...storedIntent.checkoutPayload,
-          shippingAddress: shippingAddress ?? storedIntent.checkoutPayload.shippingAddress,
-          items: items?.length ? items : storedIntent.checkoutPayload.items,
-          deliveryInstructions:
-            deliveryInstructions ?? storedIntent.checkoutPayload.deliveryInstructions,
-          shippingSpeed: shippingSpeed || storedIntent.checkoutPayload.shippingSpeed,
-          couponCode: couponCode !== undefined ? couponCode || undefined : storedIntent.checkoutPayload.couponCode,
-        }
-      : shippingAddress && Array.isArray(items) && items.length > 0
-      ? {
-          items,
-          shippingAddress,
-          deliveryInstructions,
-          shippingSpeed,
-          paymentMethod: verifiedMethod,
-          couponCode: couponCode || undefined,
-        }
-      : null;
+    // Resolve checkout draft:
+    // 1. If autoReconcile is requested (or no manual inputs were supplied), only proceed when complete verified details were recovered (never invent missing fields).
+    // 2. If admin supplied verified customer details, merge them cleanly with any recovered fields.
+    const hasManualInput = Boolean(shippingAddress || (Array.isArray(items) && items.length > 0));
+    let draft: PersistedCheckoutDraft | null = null;
+    let recoveryMode: 'automatic' | 'admin_confirmed' = 'admin_confirmed';
+
+    if (autoReconcile && !hasManualInput) {
+      if (recovered.canAutoReconcile && recovered.draft) {
+        draft = recovered.draft;
+        recoveryMode = 'automatic';
+      }
+    } else if (!hasManualInput && recovered.canAutoReconcile && recovered.draft) {
+      draft = recovered.draft;
+      recoveryMode = 'automatic';
+    } else if (storedIntent?.checkoutPayload || recovered.draft) {
+      const baseDraft = storedIntent?.checkoutPayload ?? recovered.draft!;
+      draft = {
+        ...baseDraft,
+        shippingAddress: shippingAddress ?? baseDraft.shippingAddress,
+        items: items?.length ? items : baseDraft.items,
+        deliveryInstructions: deliveryInstructions ?? baseDraft.deliveryInstructions,
+        shippingSpeed: shippingSpeed ?? baseDraft.shippingSpeed,
+        couponCode: couponCode !== undefined ? couponCode || undefined : baseDraft.couponCode,
+        userId: baseDraft.userId ?? recovered.matchedUserId,
+      };
+    } else if (shippingAddress && Array.isArray(items) && items.length > 0) {
+      draft = {
+        items,
+        shippingAddress,
+        deliveryInstructions: deliveryInstructions ?? recovered.deliveryInstructions,
+        shippingSpeed: shippingSpeed ?? recovered.shippingSpeed,
+        paymentMethod: verifiedMethod,
+        couponCode: couponCode !== undefined ? couponCode || undefined : recovered.couponCode,
+        userId: recovered.matchedUserId,
+      };
+    }
 
     if (!draft) {
       return res.status(400).json({
         error:
-          'No persisted checkout draft exists for this historical payment. Provide verified customer shippingAddress and items matching the exact captured amount.',
+          recovered.ambiguityWarning ||
+          `Automatic reconciliation requires complete verified checkout details. Missing: ${recovered.missingFields.join(', ')}. Provide verified customer shipping details matching the exact captured amount.`,
         code: 'RECONCILE_CUSTOMER_DETAILS_REQUIRED',
+        missingFields: recovered.missingFields,
         capturedPayment: capturedPaymentSummary,
+        recoveredCheckout: recovered,
       });
     }
 
@@ -2985,13 +3041,17 @@ ${labContext}`;
       amount: reconciled.order.totalAmount,
       gatewayFeeAmount: reconciled.order.gatewayFeeAmount,
       gatewayFeeSource: reconciled.order.gatewayFeeSource,
+      recoveryMode,
+      fieldSources: recovered.fieldSources,
     });
 
     res.status(reconciled.statusCode).json({
       reconciled: true,
       alreadyExisted: reconciled.idempotent,
+      recoveryMode,
       order: reconciled.order,
       updatedProducts: reconciled.updatedProducts,
+      recoveredCheckout: recovered,
     });
   });
 
