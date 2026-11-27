@@ -134,13 +134,40 @@ function resolveProductLines(
   return [];
 }
 
+function detectTestCheckoutCandidateReason(params: {
+  razorpayOrderId: string;
+  customerName?: string;
+  customerEmail?: string;
+  ownerEmail?: string;
+}): string | undefined {
+  const reasons: string[] = [];
+  const lowerEmail = params.customerEmail?.trim().toLowerCase() || '';
+  const lowerName = params.customerName?.trim().toLowerCase() || '';
+  const normalizedOwner = params.ownerEmail?.trim().toLowerCase() || '';
+
+  if (normalizedOwner && lowerEmail && lowerEmail === normalizedOwner) {
+    reasons.push('Store owner email');
+  }
+  if (lowerEmail.includes('test') || lowerEmail.endsWith('@example.com')) {
+    reasons.push('Test/example email');
+  }
+  if (lowerName.includes('test')) {
+    reasons.push('Test customer name');
+  }
+  if (params.razorpayOrderId.toLowerCase().startsWith('order_test')) {
+    reasons.push('Test Razorpay order ID');
+  }
+  return reasons.length > 0 ? reasons.join(' · ') : undefined;
+}
+
 export function buildLiveCheckoutActivity(params: {
   intents: PaymentIntentRecord[];
   orders: Order[];
   products: Product[];
+  ownerEmail?: string;
   refreshedAt?: string;
 }): LiveCheckoutActivityResponse {
-  const { intents, orders, products } = params;
+  const { intents, orders, products, ownerEmail } = params;
   const refreshedAt = params.refreshedAt ?? new Date().toISOString();
 
   const orderById = new Map<string, Order>();
@@ -194,6 +221,27 @@ export function buildLiveCheckoutActivity(params: {
         : 0;
     const amountInr = Math.round(amountPaise) / 100;
 
+    const customerName = shippingAddress?.fullName?.trim() || matchedOrder?.customerName;
+    const customerEmail = shippingAddress?.email?.trim() || matchedOrder?.customerEmail;
+    const customerPhone = shippingAddress?.phone?.trim() || matchedOrder?.customerPhone;
+
+    // Strictly allow cleanup selection ONLY for unpaid attempts (never captured payments like pay_U4m5a9iAVX2oU4 or confirmed orders)
+    const canSelectForTestCleanup =
+      (status === 'initiated' || status === 'pending' || status === 'failed') &&
+      !intent.verified &&
+      !intent.signatureVerified &&
+      !intent.paymentId &&
+      !matchedOrder;
+
+    const testCandidateReason = canSelectForTestCleanup
+      ? detectTestCheckoutCandidateReason({
+          razorpayOrderId: intent.razorpayOrderId,
+          customerName,
+          customerEmail,
+          ownerEmail,
+        })
+      : undefined;
+
     return {
       razorpayOrderId: intent.razorpayOrderId,
       razorpayPaymentId: intent.paymentId ?? matchedOrder?.razorpayPaymentId,
@@ -207,9 +255,9 @@ export function buildLiveCheckoutActivity(params: {
       verified: Boolean(intent.verified),
       signatureVerified: Boolean(intent.signatureVerified),
       hasCheckoutPayload: Boolean(payload),
-      customerName: shippingAddress?.fullName?.trim() || matchedOrder?.customerName,
-      customerEmail: shippingAddress?.email?.trim() || matchedOrder?.customerEmail,
-      customerPhone: shippingAddress?.phone?.trim() || matchedOrder?.customerPhone,
+      customerName,
+      customerEmail,
+      customerPhone,
       shippingAddress,
       formattedAddress: formatShippingAddressReadable(shippingAddress),
       pincode: shippingAddress?.pincode?.trim() || undefined,
@@ -224,6 +272,8 @@ export function buildLiveCheckoutActivity(params: {
       linkedOrderPaymentStatus: matchedOrder?.paymentStatus,
       failureReason: payload?.paymentFailure?.reason,
       failureCode: payload?.paymentFailure?.code,
+      canSelectForTestCleanup,
+      testCandidateReason,
       createdAt: intent.createdAt,
       updatedAt: intent.updatedAt,
     };

@@ -2,12 +2,15 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   AlertCircle,
+  AlertTriangle,
   ArrowUpRight,
   Check,
   CheckCircle2,
   Clock,
   Copy,
   CreditCard,
+  Download,
+  Lock,
   Mail,
   MapPin,
   Package,
@@ -15,6 +18,7 @@ import {
   RefreshCw,
   Search,
   ShieldAlert,
+  Trash2,
   User as UserIcon,
   XCircle,
 } from 'lucide-react';
@@ -29,9 +33,11 @@ interface AdminLiveCheckoutActivitySectionProps {
   adminFetch: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
   onOpenOrders: () => void;
   onOpenRecovery: () => void;
+  onCleanupComplete?: (deletedCount: number) => Promise<void> | void;
 }
 
 const AUTO_REFRESH_INTERVAL_MS = 7000;
+const REQUIRED_APPROVAL_PHRASE = 'APPROVE CLEANUP';
 
 type StatusFilter = 'all' | CheckoutActivityStatus;
 
@@ -94,7 +100,11 @@ function formatIstDateTime(iso?: string): string {
 function buildCopyableAddress(item: LiveCheckoutActivityItem): string {
   const addr = item.shippingAddress;
   if (!addr) {
-    return [item.customerName, item.formattedAddress, item.customerPhone ? `Phone: ${item.customerPhone}` : '']
+    return [
+      item.customerName,
+      item.formattedAddress,
+      item.customerPhone ? `Phone: ${item.customerPhone}` : '',
+    ]
       .filter(Boolean)
       .join('\n');
   }
@@ -135,7 +145,7 @@ function StatusIcon({ status }: { status: CheckoutActivityStatus }) {
 
 export const AdminLiveCheckoutActivitySection: React.FC<
   AdminLiveCheckoutActivitySectionProps
-> = ({ adminFetch, onOpenOrders, onOpenRecovery }) => {
+> = ({ adminFetch, onOpenOrders, onOpenRecovery, onCleanupComplete }) => {
   const [activity, setActivity] = useState<LiveCheckoutActivityResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -143,6 +153,16 @@ export const AdminLiveCheckoutActivitySection: React.FC<
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
   const [searchQuery, setSearchQuery] = useState('');
   const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Safe Bulk Test Checkout Cleanup state (unpaid test payment_intents only)
+  const [selectedIntentIds, setSelectedIntentIds] = useState<string[]>([]);
+  const [exportingBackup, setExportingBackup] = useState(false);
+  const [backupExportedAt, setBackupExportedAt] = useState<string | null>(null);
+  const [ownerConfirmed, setOwnerConfirmed] = useState(false);
+  const [approvalPhrase, setApprovalPhrase] = useState('');
+  const [cleaning, setCleaning] = useState(false);
+  const [cleanupError, setCleanupError] = useState('');
+  const [cleanupSuccess, setCleanupSuccess] = useState('');
 
   const authBlockedRef = useRef(false);
   const inFlightRef = useRef(false);
@@ -190,6 +210,15 @@ export const AdminLiveCheckoutActivitySection: React.FC<
         authBlockedRef.current = false;
         setError('');
         setActivity(json);
+
+        // Automatically prune any selected IDs that are no longer eligible or no longer exist
+        const eligibleIdSet = new Set(
+          json.items.filter((i) => i.canSelectForTestCleanup).map((i) => i.razorpayOrderId)
+        );
+        setSelectedIntentIds((prev) => {
+          const next = prev.filter((id) => eligibleIdSet.has(id));
+          return next.length === prev.length ? prev : next;
+        });
       } catch {
         if (!silent) {
           setError('Network error while loading live checkout activity.');
@@ -280,6 +309,160 @@ export const AdminLiveCheckoutActivitySection: React.FC<
     });
   }, [activity, statusFilter, searchQuery]);
 
+  const selectedSet = useMemo(() => new Set(selectedIntentIds), [selectedIntentIds]);
+
+  const visibleEligibleUnpaid = useMemo(
+    () => filteredItems.filter((item) => item.canSelectForTestCleanup),
+    [filteredItems]
+  );
+
+  const testCandidateUnpaid = useMemo(
+    () =>
+      (activity?.items ?? []).filter(
+        (item) => item.canSelectForTestCleanup && Boolean(item.testCandidateReason)
+      ),
+    [activity]
+  );
+
+  const selectedItems = useMemo(
+    () =>
+      (activity?.items ?? []).filter(
+        (item) => item.canSelectForTestCleanup && selectedSet.has(item.razorpayOrderId)
+      ),
+    [activity, selectedSet]
+  );
+
+  const selectedBreakdown = useMemo(() => {
+    const summary = { initiated: 0, pending: 0, failed: 0 };
+    for (const item of selectedItems) {
+      if (item.status === 'initiated' || item.status === 'pending' || item.status === 'failed') {
+        summary[item.status] += 1;
+      }
+    }
+    return summary;
+  }, [selectedItems]);
+
+  const toggleSelection = (razorpayOrderId: string) => {
+    setSelectedIntentIds((prev) =>
+      prev.includes(razorpayOrderId)
+        ? prev.filter((id) => id !== razorpayOrderId)
+        : [...prev, razorpayOrderId]
+    );
+    setOwnerConfirmed(false);
+    setCleanupError('');
+    setCleanupSuccess('');
+  };
+
+  const selectTestCandidates = () => {
+    setSelectedIntentIds(testCandidateUnpaid.map((i) => i.razorpayOrderId));
+    setOwnerConfirmed(false);
+    setCleanupError('');
+    setCleanupSuccess('');
+  };
+
+  const selectAllVisibleUnpaid = () => {
+    setSelectedIntentIds(visibleEligibleUnpaid.map((i) => i.razorpayOrderId));
+    setOwnerConfirmed(false);
+    setCleanupError('');
+    setCleanupSuccess('');
+  };
+
+  const clearSelection = () => {
+    setSelectedIntentIds([]);
+    setOwnerConfirmed(false);
+    setApprovalPhrase('');
+    setCleanupError('');
+  };
+
+  const handleExportBackup = async () => {
+    setExportingBackup(true);
+    setCleanupError('');
+    try {
+      const res = await adminFetch('/api/admin/maintenance/backup-export', {
+        method: 'POST',
+        cache: 'no-store',
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { exportedAt?: string; snapshot?: unknown; error?: string }
+        | null;
+      if (!res.ok || !json?.exportedAt) {
+        setCleanupError(json?.error || `Backup export failed (HTTP ${res.status}).`);
+        return;
+      }
+
+      const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      const stamp = json.exportedAt.replace(/[:.]/g, '-');
+      a.href = url;
+      a.download = `himrudra-checkout-backup-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+
+      setBackupExportedAt(json.exportedAt);
+    } catch {
+      setCleanupError('Network error exporting backup JSON.');
+    } finally {
+      setExportingBackup(false);
+    }
+  };
+
+  const canExecuteBulkCleanup =
+    selectedItems.length > 0 &&
+    Boolean(backupExportedAt) &&
+    ownerConfirmed &&
+    approvalPhrase.trim().toUpperCase() === REQUIRED_APPROVAL_PHRASE &&
+    !cleaning;
+
+  const handleExecuteBulkCleanup = async () => {
+    if (!canExecuteBulkCleanup) return;
+    setCleaning(true);
+    setCleanupError('');
+    setCleanupSuccess('');
+    try {
+      const res = await adminFetch('/api/admin/maintenance/cleanup-approved', {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          confirmOwnerApproval: true,
+          backupTaken: true,
+          orderIds: [],
+          paymentIntentIds: selectedItems.map((i) => i.razorpayOrderId),
+          notificationIds: [],
+          restoreInventory: false,
+        }),
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { ok?: boolean; deletedPaymentIntentIds?: string[]; error?: string }
+        | null;
+      if (!res.ok || !json?.ok) {
+        setCleanupError(json?.error || `Cleanup failed (HTTP ${res.status}).`);
+        return;
+      }
+
+      const removedCount = json.deletedPaymentIntentIds?.length ?? selectedItems.length;
+      setSelectedIntentIds([]);
+      setOwnerConfirmed(false);
+      setApprovalPhrase('');
+      setCleanupSuccess(
+        `Removed ${removedCount} approved unpaid test checkout attempt${
+          removedCount === 1 ? '' : 's'
+        } and reset activity counters from remaining database records. All captured payments and confirmed orders remain preserved.`
+      );
+      await fetchActivity(false, true);
+      if (onCleanupComplete) {
+        await onCleanupComplete(removedCount);
+      }
+    } catch {
+      setCleanupError('Network error executing approved test checkout cleanup.');
+    } finally {
+      setCleaning(false);
+    }
+  };
+
   const handleCopyAddress = async (item: LiveCheckoutActivityItem) => {
     try {
       await navigator.clipboard.writeText(buildCopyableAddress(item));
@@ -356,7 +539,7 @@ export const AdminLiveCheckoutActivitySection: React.FC<
           </div>
           <p className="text-xs text-[#79543D]">
             Live read from Neon PostgreSQL <span className="font-mono">payment_intents</span> &amp;{' '}
-            <span className="font-mono">checkout_payload</span>. Unpaid checkouts (Initiated, Pending, Failed) are never counted as paid orders or revenue; confirmed orders remain in Orders &amp; Dispatch.
+            <span className="font-mono">checkout_payload</span>. Unpaid checkouts (Initiated, Pending, Failed) are never counted as paid orders or revenue; captured customer payments and confirmed orders are strictly protected.
           </p>
         </div>
 
@@ -418,47 +601,221 @@ export const AdminLiveCheckoutActivitySection: React.FC<
         })}
       </div>
 
-      {/* Search & Status Filter Toolbar */}
-      <div className="rounded-xl border border-[#79543D]/18 bg-[#F3EDE5]/45 p-3.5 flex flex-wrap items-center gap-3">
-        <div className="relative flex-1 min-w-[240px]">
-          <Search className="h-4 w-4 text-[#79543D] absolute left-3 top-1/2 -translate-y-1/2" />
-          <input
-            type="search"
-            aria-label="Search live checkout activity"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search customer, email, phone, address, PIN code, Razorpay ID, product..."
-            className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] pl-9 pr-3 py-2 text-xs"
-          />
+      {/* Search, Filter & Bulk Selection Toolbar */}
+      <div className="rounded-xl border border-[#79543D]/18 bg-[#F3EDE5]/45 p-3.5 space-y-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative flex-1 min-w-[240px]">
+            <Search className="h-4 w-4 text-[#79543D] absolute left-3 top-1/2 -translate-y-1/2" />
+            <input
+              type="search"
+              aria-label="Search live checkout activity"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search customer, email, phone, address, PIN code, Razorpay ID, product..."
+              className="w-full rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] pl-9 pr-3 py-2 text-xs"
+            />
+          </div>
+
+          <select
+            aria-label="Filter checkout activity by status"
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+            className="rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 text-xs font-medium text-[#281A15]"
+          >
+            <option value="all">All Statuses ({counts.total})</option>
+            <option value="initiated">Initiated ({counts.initiated})</option>
+            <option value="pending">Pending ({counts.pending})</option>
+            <option value="failed">Failed ({counts.failed})</option>
+            <option value="captured">Captured — No Order Yet ({counts.captured})</option>
+            <option value="confirmed">Confirmed Orders ({counts.confirmed})</option>
+          </select>
+
+          {(statusFilter !== 'all' || searchQuery.trim()) && (
+            <button
+              type="button"
+              onClick={() => {
+                setStatusFilter('all');
+                setSearchQuery('');
+              }}
+              className="rounded-lg border border-[#79543D]/25 bg-[#FAF8F4] px-3 py-2 text-xs font-medium text-[#79543D] hover:bg-[#EAE1D4]"
+            >
+              Clear Filters
+            </button>
+          )}
         </div>
 
-        <select
-          aria-label="Filter checkout activity by status"
-          value={statusFilter}
-          onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
-          className="rounded-lg border border-[#79543D]/30 bg-[#FAF8F4] px-3 py-2 text-xs font-medium text-[#281A15]"
-        >
-          <option value="all">All Statuses ({counts.total})</option>
-          <option value="initiated">Initiated ({counts.initiated})</option>
-          <option value="pending">Pending ({counts.pending})</option>
-          <option value="failed">Failed ({counts.failed})</option>
-          <option value="captured">Captured — No Order Yet ({counts.captured})</option>
-          <option value="confirmed">Confirmed Orders ({counts.confirmed})</option>
-        </select>
-
-        {(statusFilter !== 'all' || searchQuery.trim()) && (
-          <button
-            type="button"
-            onClick={() => {
-              setStatusFilter('all');
-              setSearchQuery('');
-            }}
-            className="rounded-lg border border-[#79543D]/25 bg-[#FAF8F4] px-3 py-2 text-xs font-medium text-[#79543D] hover:bg-[#EAE1D4]"
-          >
-            Clear Filters
-          </button>
+        {/* Bulk Test Cleanup Selection Bar */}
+        {(visibleEligibleUnpaid.length > 0 || testCandidateUnpaid.length > 0 || selectedItems.length > 0) && (
+          <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#79543D]/12 text-[11px]">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="font-semibold text-[#281A15]">Test Checkout Cleanup:</span>
+              {testCandidateUnpaid.length > 0 && (
+                <button
+                  type="button"
+                  onClick={selectTestCandidates}
+                  data-testid="select-test-checkout-candidates-btn"
+                  className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 font-semibold text-amber-950 hover:bg-amber-100"
+                >
+                  Select Test Candidates ({testCandidateUnpaid.length})
+                </button>
+              )}
+              {visibleEligibleUnpaid.length > 0 && (
+                <button
+                  type="button"
+                  onClick={selectAllVisibleUnpaid}
+                  data-testid="select-all-visible-unpaid-btn"
+                  className="rounded-lg border border-[#79543D]/25 bg-[#FAF8F4] px-2.5 py-1 font-medium text-[#281A15] hover:bg-[#EAE1D4]"
+                >
+                  Select Visible Unpaid ({visibleEligibleUnpaid.length})
+                </button>
+              )}
+              {selectedItems.length > 0 && (
+                <button
+                  type="button"
+                  onClick={clearSelection}
+                  className="rounded-lg border border-[#79543D]/20 bg-[#FAF8F4] px-2.5 py-1 font-medium text-[#79543D] hover:bg-[#EAE1D4]"
+                >
+                  Clear Selection ({selectedItems.length})
+                </button>
+              )}
+            </div>
+            <span className="inline-flex items-center gap-1 text-[#79543D]">
+              <Lock className="h-3 w-3" />
+              <span>Captured payments &amp; confirmed orders are locked and never selectable</span>
+            </span>
+          </div>
         )}
       </div>
+
+      {/* Cleanup Feedback Banners */}
+      {cleanupSuccess && (
+        <div
+          data-testid="checkout-cleanup-success"
+          className="rounded-xl border border-emerald-300 bg-emerald-50 p-4 flex items-start gap-2.5 text-xs text-emerald-950"
+        >
+          <CheckCircle2 className="h-4 w-4 text-emerald-700 shrink-0 mt-0.5" />
+          <span>{cleanupSuccess}</span>
+        </div>
+      )}
+
+      {cleanupError && (
+        <div className="rounded-xl border border-red-200 bg-red-50 p-4 flex items-start gap-2.5 text-xs text-red-900">
+          <AlertTriangle className="h-4 w-4 text-red-700 shrink-0 mt-0.5" />
+          <span>{cleanupError}</span>
+        </div>
+      )}
+
+      {/* Owner-Approved Bulk Cleanup Drawer (appears only when unpaid test checkout records are selected) */}
+      {selectedItems.length > 0 && (
+        <section
+          data-testid="bulk-checkout-cleanup-drawer"
+          className="rounded-xl border border-red-200 bg-[#FAF8F4] p-4 space-y-3.5 text-xs shadow-xs"
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1">
+              <div className="flex items-center gap-2 font-semibold text-red-950">
+                <Trash2 className="h-4 w-4 text-red-700" />
+                <span>
+                  Bulk Cleanup Selected Unpaid Test Checkouts ({selectedItems.length} selected)
+                </span>
+              </div>
+              <p className="text-[11px] text-[#79543D]">
+                Selected breakdown:{' '}
+                <strong className="font-mono text-[#281A15]">
+                  {selectedBreakdown.initiated} initiated · {selectedBreakdown.pending} pending ·{' '}
+                  {selectedBreakdown.failed} failed
+                </strong>
+                . Preserved strictly: <strong>0 captured payments</strong> (including{' '}
+                <span className="font-mono">pay_U4m5a9iAVX2oU4</span>),{' '}
+                <strong>0 confirmed orders</strong>, and all customers, products, inventory, offers, and settings.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={clearSelection}
+              className="rounded-lg border border-[#79543D]/25 bg-[#F3EDE5] px-2.5 py-1 text-[11px] font-medium text-[#281A15] hover:bg-[#EAE1D4]"
+            >
+              Cancel
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {/* Step 1: Mandatory JSON Backup */}
+            <div className="rounded-lg border border-[#C69B51]/55 bg-[#F3EDE5]/55 p-3.5 flex flex-wrap items-center justify-between gap-2.5">
+              <div>
+                <div className="font-semibold text-[#281A15]">
+                  Step 1 — Export Backup JSON (Required)
+                </div>
+                <p className="text-[11px] text-[#79543D]">
+                  {backupExportedAt
+                    ? `Backup downloaded at ${formatIstDateTime(backupExportedAt)}.`
+                    : 'Download a full timestamped JSON backup before deleting selected test intents.'}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={exportingBackup}
+                onClick={() => void handleExportBackup()}
+                data-testid="checkout-cleanup-backup-btn"
+                className="inline-flex items-center gap-1.5 rounded-lg bg-[#79543D] px-3 py-2 text-xs font-semibold text-[#FAF8F4] hover:bg-[#61422F] disabled:opacity-50"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>
+                  {exportingBackup
+                    ? 'Exporting...'
+                    : backupExportedAt
+                    ? 'Re-Download Backup'
+                    : 'Export Backup JSON'}
+                </span>
+              </button>
+            </div>
+
+            {/* Step 2: Explicit Owner Approval */}
+            <div className="rounded-lg border border-red-200 bg-red-50/45 p-3.5 space-y-2.5">
+              <div className="font-semibold text-red-950">
+                Step 2 — Explicit Owner Approval
+              </div>
+              <label className="flex items-start gap-2 text-[11px] text-red-950">
+                <input
+                  type="checkbox"
+                  disabled={!backupExportedAt}
+                  checked={ownerConfirmed}
+                  onChange={(e) => setOwnerConfirmed(e.target.checked)}
+                  className="mt-0.5 h-3.5 w-3.5 accent-red-800"
+                />
+                <span>
+                  I exported a backup and confirm all <strong>{selectedItems.length}</strong> selected unpaid attempt(s) are test records safe to remove.
+                </span>
+              </label>
+              <div className="flex flex-wrap items-center gap-2">
+                <input
+                  type="text"
+                  disabled={!backupExportedAt}
+                  value={approvalPhrase}
+                  onChange={(e) => setApprovalPhrase(e.target.value)}
+                  placeholder={`Type ${REQUIRED_APPROVAL_PHRASE}`}
+                  aria-label="Type APPROVE CLEANUP to confirm test checkout cleanup"
+                  className="flex-1 min-w-[160px] rounded-lg border border-red-300 bg-[#FAF8F4] px-2.5 py-1.5 font-mono text-xs disabled:opacity-50"
+                />
+                <button
+                  type="button"
+                  disabled={!canExecuteBulkCleanup}
+                  onClick={() => void handleExecuteBulkCleanup()}
+                  data-testid="execute-bulk-checkout-cleanup-btn"
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-red-800 px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-red-900 disabled:opacity-45"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  <span>
+                    {cleaning
+                      ? 'Removing...'
+                      : `Delete ${selectedItems.length} Selected`}
+                  </span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+      )}
 
       {/* Loading / Error / Empty / Data */}
       {loading && !activity ? (
@@ -496,16 +853,37 @@ export const AdminLiveCheckoutActivitySection: React.FC<
             const style = STATUS_STYLE[item.status];
             const paymentRef =
               item.razorpayPaymentId || item.pendingPaymentId || item.failedPaymentId;
+            const isSelected = selectedSet.has(item.razorpayOrderId);
 
             return (
               <article
                 key={item.razorpayOrderId}
                 data-testid={`checkout-activity-card-${item.razorpayOrderId}`}
-                className="rounded-xl border border-[#79543D]/20 bg-[#FAF8F4] shadow-xs overflow-hidden"
+                className={`rounded-xl border bg-[#FAF8F4] shadow-xs overflow-hidden ${
+                  isSelected ? 'border-red-400 ring-1 ring-red-200' : 'border-[#79543D]/20'
+                }`}
               >
                 {/* Top Status & Payment Bar */}
                 <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#79543D]/14 bg-[#F3EDE5]/55 px-4 py-3">
                   <div className="flex flex-wrap items-center gap-2">
+                    {item.canSelectForTestCleanup ? (
+                      <input
+                        type="checkbox"
+                        aria-label={`Select unpaid checkout ${item.razorpayOrderId} for test cleanup`}
+                        checked={isSelected}
+                        onChange={() => toggleSelection(item.razorpayOrderId)}
+                        className="h-4 w-4 accent-[#281A15] cursor-pointer"
+                      />
+                    ) : (
+                      <span
+                        title="Protected record — cannot be deleted from Live Checkout Activity"
+                        className="inline-flex items-center gap-1 rounded border border-emerald-300/80 bg-emerald-50/90 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-900"
+                      >
+                        <Lock className="h-2.5 w-2.5" />
+                        <span>Protected</span>
+                      </span>
+                    )}
+
                     <span
                       className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1 text-xs font-semibold ${style.badge}`}
                     >
@@ -531,6 +909,12 @@ export const AdminLiveCheckoutActivitySection: React.FC<
                     {item.linkedOrderNumber && (
                       <span className="font-mono text-[11px] font-semibold text-emerald-900 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded">
                         Order {item.linkedOrderNumber}
+                      </span>
+                    )}
+
+                    {item.testCandidateReason && (
+                      <span className="rounded border border-amber-300 bg-amber-50 px-2 py-0.5 text-[10px] font-semibold text-amber-900">
+                        Test candidate: {item.testCandidateReason}
                       </span>
                     )}
                   </div>

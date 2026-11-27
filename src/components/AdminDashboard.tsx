@@ -41,6 +41,7 @@ import type {
   CmsSection,
   ContactInquiry,
   Coupon,
+  CouponRedemptionSummary,
   Expense,
   InquiryReplyChannel,
   LabReport,
@@ -50,6 +51,7 @@ import type {
   PaymentSettlementStatus,
   Product,
   Promotion,
+  PromotionAnalyticsAudit,
   StoreSettings,
   UnreconciledPaymentIntent,
   User,
@@ -74,6 +76,8 @@ interface AdminOverviewData {
   notifications: AdminNotification[];
   customers: User[];
   analytics: ProfitSummary;
+  couponRedemptions?: CouponRedemptionSummary;
+  promotionAnalyticsAudit?: PromotionAnalyticsAudit;
   unreconciledPayments?: UnreconciledPaymentIntent[];
   serverNow: string;
 }
@@ -463,6 +467,58 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       showToast('Promotion removed');
       await fetchOverview(true);
       onStorefrontDataChanged();
+    }
+  };
+
+  const exportMaintenanceBackup = async (): Promise<boolean> => {
+    const res = await adminFetch('/api/admin/maintenance/backup-export', {
+      method: 'POST',
+      cache: 'no-store',
+    });
+    const json = (await res.json().catch(() => null)) as
+      | { exportedAt?: string; snapshot?: unknown; error?: string }
+      | null;
+    if (!res.ok || !json?.exportedAt) {
+      showToast(json?.error || 'Could not export backup JSON.');
+      return false;
+    }
+    const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const stamp = json.exportedAt.replace(/[:.]/g, '-');
+    a.href = url;
+    a.download = `himrudra-backup-${stamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    showToast('Backup JSON downloaded');
+    return true;
+  };
+
+  const recalculatePromotionAnalytics = async () => {
+    const res = await adminFetch('/api/admin/promotions/recalculate', {
+      method: 'POST',
+      cache: 'no-store',
+    });
+    const json = (await res.json().catch(() => null)) as
+      | {
+          ok?: boolean;
+          recalculatedTotalRedemptions?: number;
+          recalculatedTotalRevenue?: number;
+          error?: string;
+        }
+      | null;
+    if (res.ok && json?.ok) {
+      showToast(
+        `Promotional analytics recalculated: ${json.recalculatedTotalRedemptions ?? 0} uses · ${formatINR(
+          json.recalculatedTotalRevenue ?? 0
+        )}`
+      );
+      await fetchOverview(false, true);
+      onStorefrontDataChanged();
+    } else {
+      showToast(json?.error || 'Failed to recalculate promotional analytics');
     }
   };
 
@@ -1079,6 +1135,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       setSection('orders');
                       setAdvancedMaintenanceOpen(true);
                     }}
+                    onCleanupComplete={async (deletedCount) => {
+                      showToast(
+                        `Removed ${deletedCount} approved unpaid test checkout attempt${
+                          deletedCount === 1 ? '' : 's'
+                        }.`
+                      );
+                      await fetchOverview(false, true);
+                    }}
                   />
                 )}
 
@@ -1086,10 +1150,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 {section === 'promotions' && (
                   <AdminPromotionsSection
                     promotions={data.promotions ?? []}
+                    couponRedemptions={data.couponRedemptions}
+                    promotionAnalyticsAudit={data.promotionAnalyticsAudit}
                     serverNow={data.serverNow}
                     onCreatePromotion={createPromotion}
                     onUpdatePromotion={updatePromotion}
                     onDeletePromotion={deletePromotion}
+                    onRecalculateAnalytics={recalculatePromotionAnalytics}
+                    onExportBackup={exportMaintenanceBackup}
                   />
                 )}
 

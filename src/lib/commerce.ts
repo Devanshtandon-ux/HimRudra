@@ -699,6 +699,178 @@ export function calculateProfitMetrics(
   };
 }
 
+/**
+ * Returns true only for legitimate confirmed orders (excludes Cancelled, Refunded, Failed, and Pending Payment).
+ */
+export function isLegitimateConfirmedOrder(order: Order): boolean {
+  if (
+    order.status === 'Cancelled' ||
+    order.status === 'Refunded' ||
+    order.status === 'Pending Payment'
+  ) {
+    return false;
+  }
+  if (
+    order.paymentStatus === 'Failed' ||
+    order.paymentStatus === 'Refunded' ||
+    order.paymentStatus === 'Pending Payment'
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Recalculates promotional usage counts, attributed promotional revenue, and coupon redemptions
+ * strictly from legitimate confirmed orders while preserving all active offers, coupons, discounts,
+ * and free-shipping settings.
+ */
+export function recalculatePromotionAndCouponAnalytics(
+  promotions: Promotion[],
+  coupons: Coupon[],
+  orders: Order[]
+): {
+  recalculatedPromotions: Promotion[];
+  audit: import('../types').PromotionAnalyticsAudit;
+  couponRedemptions: import('../types').CouponRedemptionSummary;
+} {
+  const legitimateOrders = orders.filter(isLegitimateConfirmedOrder);
+
+  const promoUsageMap = new Map<string, { count: number; revenue: number }>();
+  for (const promo of promotions) {
+    promoUsageMap.set(promo.id, { count: 0, revenue: 0 });
+  }
+
+  const couponMap = new Map<
+    string,
+    {
+      code: string;
+      description: string;
+      active: boolean;
+      redemptions: number;
+      totalDiscountGiven: number;
+      attributedRevenue: number;
+    }
+  >();
+
+  for (const c of coupons) {
+    const codeKey = c.code.trim().toUpperCase();
+    if (!codeKey) continue;
+    couponMap.set(codeKey, {
+      code: codeKey,
+      description: c.description,
+      active: c.active,
+      redemptions: 0,
+      totalDiscountGiven: 0,
+      attributedRevenue: 0,
+    });
+  }
+
+  for (const order of legitimateOrders) {
+    const orderRevenue = Number.isFinite(order.totalAmount) ? order.totalAmount : 0;
+    const normalizedOrderCoupon = order.couponCode?.trim().toUpperCase() || '';
+
+    // Attribute to promotion by explicit promotionId, or fallback to promoCode match when promotionId was not recorded
+    let matchedPromoId: string | undefined;
+    if (order.promotionId && promoUsageMap.has(order.promotionId)) {
+      matchedPromoId = order.promotionId;
+    } else if (!order.promotionId && normalizedOrderCoupon) {
+      const promoByCode = promotions.find(
+        (p) => p.promoCode && p.promoCode.trim().toUpperCase() === normalizedOrderCoupon
+      );
+      if (promoByCode) {
+        matchedPromoId = promoByCode.id;
+      }
+    }
+
+    if (matchedPromoId) {
+      const bucket = promoUsageMap.get(matchedPromoId)!;
+      bucket.count += 1;
+      bucket.revenue = Math.round((bucket.revenue + orderRevenue) * 100) / 100;
+    }
+
+    if (normalizedOrderCoupon) {
+      const existingCoupon = couponMap.get(normalizedOrderCoupon) ?? {
+        code: normalizedOrderCoupon,
+        description: 'Historical coupon',
+        active: false,
+        redemptions: 0,
+        totalDiscountGiven: 0,
+        attributedRevenue: 0,
+      };
+      existingCoupon.redemptions += 1;
+      existingCoupon.totalDiscountGiven =
+        Math.round((existingCoupon.totalDiscountGiven + (order.couponDiscount || 0)) * 100) / 100;
+      existingCoupon.attributedRevenue =
+        Math.round((existingCoupon.attributedRevenue + orderRevenue) * 100) / 100;
+      couponMap.set(normalizedOrderCoupon, existingCoupon);
+    }
+  }
+
+  let storedTotalRedemptions = 0;
+  let storedTotalRevenue = 0;
+  let computedTotalRedemptions = 0;
+  let computedTotalRevenue = 0;
+  let hasDiscrepancy = false;
+
+  const perPromotion: import('../types').PromotionAnalyticsAudit['perPromotion'] = [];
+  const recalculatedPromotions: Promotion[] = promotions.map((promo) => {
+    const bucket = promoUsageMap.get(promo.id) ?? { count: 0, revenue: 0 };
+    const storedUsage = Number(promo.usageCount) || 0;
+    const storedRev = Math.round((Number(promo.revenueGenerated) || 0) * 100) / 100;
+    const computedUsage = bucket.count;
+    const computedRev = Math.round(bucket.revenue * 100) / 100;
+
+    storedTotalRedemptions += storedUsage;
+    storedTotalRevenue = Math.round((storedTotalRevenue + storedRev) * 100) / 100;
+    computedTotalRedemptions += computedUsage;
+    computedTotalRevenue = Math.round((computedTotalRevenue + computedRev) * 100) / 100;
+
+    const promoDiffers = storedUsage !== computedUsage || Math.abs(storedRev - computedRev) > 0.009;
+    if (promoDiffers) hasDiscrepancy = true;
+
+    perPromotion.push({
+      id: promo.id,
+      title: promo.title,
+      storedUsageCount: storedUsage,
+      storedRevenueGenerated: storedRev,
+      computedUsageCount: computedUsage,
+      computedRevenueGenerated: computedRev,
+      hasDiscrepancy: promoDiffers,
+    });
+
+    return {
+      ...promo,
+      usageCount: computedUsage,
+      revenueGenerated: computedRev,
+    };
+  });
+
+  const byCoupon = Array.from(couponMap.values());
+  const couponRedemptions: import('../types').CouponRedemptionSummary = {
+    totalRedemptions: byCoupon.reduce((s, c) => s + c.redemptions, 0),
+    totalDiscountGiven:
+      Math.round(byCoupon.reduce((s, c) => s + c.totalDiscountGiven, 0) * 100) / 100,
+    totalAttributedRevenue:
+      Math.round(byCoupon.reduce((s, c) => s + c.attributedRevenue, 0) * 100) / 100,
+    byCoupon,
+  };
+
+  return {
+    recalculatedPromotions,
+    audit: {
+      storedTotalRedemptions,
+      storedTotalRevenue,
+      computedTotalRedemptions,
+      computedTotalRevenue,
+      legitimateOrderCount: legitimateOrders.length,
+      hasDiscrepancy,
+      perPromotion,
+    },
+    couponRedemptions,
+  };
+}
+
 export function formatINR(amount: number): string {
   return new Intl.NumberFormat('en-IN', {
     style: 'currency',

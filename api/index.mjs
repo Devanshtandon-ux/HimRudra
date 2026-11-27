@@ -407,6 +407,122 @@ function calculateProfitMetrics(orders2, expenses2, options) {
     expenseByCategory
   };
 }
+function isLegitimateConfirmedOrder(order) {
+  if (order.status === "Cancelled" || order.status === "Refunded" || order.status === "Pending Payment") {
+    return false;
+  }
+  if (order.paymentStatus === "Failed" || order.paymentStatus === "Refunded" || order.paymentStatus === "Pending Payment") {
+    return false;
+  }
+  return true;
+}
+function recalculatePromotionAndCouponAnalytics(promotions2, coupons2, orders2) {
+  const legitimateOrders = orders2.filter(isLegitimateConfirmedOrder);
+  const promoUsageMap = /* @__PURE__ */ new Map();
+  for (const promo of promotions2) {
+    promoUsageMap.set(promo.id, { count: 0, revenue: 0 });
+  }
+  const couponMap = /* @__PURE__ */ new Map();
+  for (const c of coupons2) {
+    const codeKey = c.code.trim().toUpperCase();
+    if (!codeKey) continue;
+    couponMap.set(codeKey, {
+      code: codeKey,
+      description: c.description,
+      active: c.active,
+      redemptions: 0,
+      totalDiscountGiven: 0,
+      attributedRevenue: 0
+    });
+  }
+  for (const order of legitimateOrders) {
+    const orderRevenue = Number.isFinite(order.totalAmount) ? order.totalAmount : 0;
+    const normalizedOrderCoupon = order.couponCode?.trim().toUpperCase() || "";
+    let matchedPromoId;
+    if (order.promotionId && promoUsageMap.has(order.promotionId)) {
+      matchedPromoId = order.promotionId;
+    } else if (!order.promotionId && normalizedOrderCoupon) {
+      const promoByCode = promotions2.find(
+        (p) => p.promoCode && p.promoCode.trim().toUpperCase() === normalizedOrderCoupon
+      );
+      if (promoByCode) {
+        matchedPromoId = promoByCode.id;
+      }
+    }
+    if (matchedPromoId) {
+      const bucket = promoUsageMap.get(matchedPromoId);
+      bucket.count += 1;
+      bucket.revenue = Math.round((bucket.revenue + orderRevenue) * 100) / 100;
+    }
+    if (normalizedOrderCoupon) {
+      const existingCoupon = couponMap.get(normalizedOrderCoupon) ?? {
+        code: normalizedOrderCoupon,
+        description: "Historical coupon",
+        active: false,
+        redemptions: 0,
+        totalDiscountGiven: 0,
+        attributedRevenue: 0
+      };
+      existingCoupon.redemptions += 1;
+      existingCoupon.totalDiscountGiven = Math.round((existingCoupon.totalDiscountGiven + (order.couponDiscount || 0)) * 100) / 100;
+      existingCoupon.attributedRevenue = Math.round((existingCoupon.attributedRevenue + orderRevenue) * 100) / 100;
+      couponMap.set(normalizedOrderCoupon, existingCoupon);
+    }
+  }
+  let storedTotalRedemptions = 0;
+  let storedTotalRevenue = 0;
+  let computedTotalRedemptions = 0;
+  let computedTotalRevenue = 0;
+  let hasDiscrepancy = false;
+  const perPromotion = [];
+  const recalculatedPromotions = promotions2.map((promo) => {
+    const bucket = promoUsageMap.get(promo.id) ?? { count: 0, revenue: 0 };
+    const storedUsage = Number(promo.usageCount) || 0;
+    const storedRev = Math.round((Number(promo.revenueGenerated) || 0) * 100) / 100;
+    const computedUsage = bucket.count;
+    const computedRev = Math.round(bucket.revenue * 100) / 100;
+    storedTotalRedemptions += storedUsage;
+    storedTotalRevenue = Math.round((storedTotalRevenue + storedRev) * 100) / 100;
+    computedTotalRedemptions += computedUsage;
+    computedTotalRevenue = Math.round((computedTotalRevenue + computedRev) * 100) / 100;
+    const promoDiffers = storedUsage !== computedUsage || Math.abs(storedRev - computedRev) > 9e-3;
+    if (promoDiffers) hasDiscrepancy = true;
+    perPromotion.push({
+      id: promo.id,
+      title: promo.title,
+      storedUsageCount: storedUsage,
+      storedRevenueGenerated: storedRev,
+      computedUsageCount: computedUsage,
+      computedRevenueGenerated: computedRev,
+      hasDiscrepancy: promoDiffers
+    });
+    return {
+      ...promo,
+      usageCount: computedUsage,
+      revenueGenerated: computedRev
+    };
+  });
+  const byCoupon = Array.from(couponMap.values());
+  const couponRedemptions = {
+    totalRedemptions: byCoupon.reduce((s, c) => s + c.redemptions, 0),
+    totalDiscountGiven: Math.round(byCoupon.reduce((s, c) => s + c.totalDiscountGiven, 0) * 100) / 100,
+    totalAttributedRevenue: Math.round(byCoupon.reduce((s, c) => s + c.attributedRevenue, 0) * 100) / 100,
+    byCoupon
+  };
+  return {
+    recalculatedPromotions,
+    audit: {
+      storedTotalRedemptions,
+      storedTotalRevenue,
+      computedTotalRedemptions,
+      computedTotalRevenue,
+      legitimateOrderCount: legitimateOrders.length,
+      hasDiscrepancy,
+      perPromotion
+    },
+    couponRedemptions
+  };
+}
 function isAuthorizedAdmin(user, ownerEmail) {
   if (!user || !ownerEmail) return false;
   return user.role === "admin" && typeof user.email === "string" && user.email.trim().toLowerCase() === ownerEmail.trim().toLowerCase();
@@ -566,8 +682,27 @@ function resolveProductLines(intent, matchedOrder, productById) {
   }
   return [];
 }
+function detectTestCheckoutCandidateReason(params) {
+  const reasons = [];
+  const lowerEmail = params.customerEmail?.trim().toLowerCase() || "";
+  const lowerName = params.customerName?.trim().toLowerCase() || "";
+  const normalizedOwner = params.ownerEmail?.trim().toLowerCase() || "";
+  if (normalizedOwner && lowerEmail && lowerEmail === normalizedOwner) {
+    reasons.push("Store owner email");
+  }
+  if (lowerEmail.includes("test") || lowerEmail.endsWith("@example.com")) {
+    reasons.push("Test/example email");
+  }
+  if (lowerName.includes("test")) {
+    reasons.push("Test customer name");
+  }
+  if (params.razorpayOrderId.toLowerCase().startsWith("order_test")) {
+    reasons.push("Test Razorpay order ID");
+  }
+  return reasons.length > 0 ? reasons.join(" \xB7 ") : void 0;
+}
 function buildLiveCheckoutActivity(params) {
-  const { intents, orders: orders2, products: products2 } = params;
+  const { intents, orders: orders2, products: products2, ownerEmail } = params;
   const refreshedAt = params.refreshedAt ?? (/* @__PURE__ */ new Date()).toISOString();
   const orderById = /* @__PURE__ */ new Map();
   const orderByRzpOrderId = /* @__PURE__ */ new Map();
@@ -604,6 +739,16 @@ function buildLiveCheckoutActivity(params) {
     const totalQuantity = resolvedItems.reduce((sum, line) => sum + line.quantity, 0);
     const amountPaise = typeof intent.amountPaise === "number" && Number.isFinite(intent.amountPaise) ? Math.round(intent.amountPaise) : matchedOrder ? Math.round(matchedOrder.totalAmount * 100) : 0;
     const amountInr = Math.round(amountPaise) / 100;
+    const customerName = shippingAddress?.fullName?.trim() || matchedOrder?.customerName;
+    const customerEmail = shippingAddress?.email?.trim() || matchedOrder?.customerEmail;
+    const customerPhone = shippingAddress?.phone?.trim() || matchedOrder?.customerPhone;
+    const canSelectForTestCleanup = (status === "initiated" || status === "pending" || status === "failed") && !intent.verified && !intent.signatureVerified && !intent.paymentId && !matchedOrder;
+    const testCandidateReason = canSelectForTestCleanup ? detectTestCheckoutCandidateReason({
+      razorpayOrderId: intent.razorpayOrderId,
+      customerName,
+      customerEmail,
+      ownerEmail
+    }) : void 0;
     return {
       razorpayOrderId: intent.razorpayOrderId,
       razorpayPaymentId: intent.paymentId ?? matchedOrder?.razorpayPaymentId,
@@ -617,9 +762,9 @@ function buildLiveCheckoutActivity(params) {
       verified: Boolean(intent.verified),
       signatureVerified: Boolean(intent.signatureVerified),
       hasCheckoutPayload: Boolean(payload),
-      customerName: shippingAddress?.fullName?.trim() || matchedOrder?.customerName,
-      customerEmail: shippingAddress?.email?.trim() || matchedOrder?.customerEmail,
-      customerPhone: shippingAddress?.phone?.trim() || matchedOrder?.customerPhone,
+      customerName,
+      customerEmail,
+      customerPhone,
       shippingAddress,
       formattedAddress: formatShippingAddressReadable(shippingAddress),
       pincode: shippingAddress?.pincode?.trim() || void 0,
@@ -634,6 +779,8 @@ function buildLiveCheckoutActivity(params) {
       linkedOrderPaymentStatus: matchedOrder?.paymentStatus,
       failureReason: payload?.paymentFailure?.reason,
       failureCode: payload?.paymentFailure?.code,
+      canSelectForTestCleanup,
+      testCandidateReason,
       createdAt: intent.createdAt,
       updatedAt: intent.updatedAt
     };
@@ -2542,11 +2689,105 @@ var PostgresStateAdapter = class {
           const del = await tx.delete(adminNotifications).where(eq(adminNotifications.id, notifId)).returning({ id: adminNotifications.id });
           if (del[0]) deletedNotificationIds.push(del[0].id);
         }
+        const [remainingOrderRows, currentPromoRows] = await Promise.all([
+          tx.select().from(orders),
+          tx.select().from(promotions)
+        ]);
+        const mappedRemainingOrders = remainingOrderRows.map((r) => this.mapOrderRow(r));
+        const mappedCurrentPromos = currentPromoRows.map((row) => ({
+          id: row.id,
+          title: row.title,
+          description: row.description,
+          bannerHeadline: row.bannerHeadline,
+          bannerSubtext: row.bannerSubtext,
+          bannerTheme: row.bannerTheme,
+          startsAt: row.startsAt,
+          endsAt: row.endsAt,
+          freeShipping: row.freeShipping,
+          freeShippingSpeed: row.freeShippingSpeed === "all" ? "all" : "standard",
+          discountPercent: row.discountPercent,
+          promoCode: row.promoCode ?? void 0,
+          enabled: row.enabled,
+          usageCount: row.usageCount,
+          revenueGenerated: row.revenueGenerated,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt
+        }));
+        const promoSync = recalculatePromotionAndCouponAnalytics(
+          mappedCurrentPromos,
+          [],
+          mappedRemainingOrders
+        );
+        const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+        for (const recalcPromo of promoSync.recalculatedPromotions) {
+          await tx.update(promotions).set({
+            usageCount: recalcPromo.usageCount,
+            revenueGenerated: recalcPromo.revenueGenerated,
+            updatedAt: nowIso
+          }).where(eq(promotions.id, recalcPromo.id));
+        }
         return {
           deletedOrderNumbers,
           deletedPaymentIntentIds,
           deletedNotificationIds,
           restoredStock
+        };
+      })
+    );
+  }
+  /**
+   * Atomically recalculates promotions.usage_count and promotions.revenue_generated from
+   * legitimate confirmed orders in PostgreSQL while preserving all active offers, discounts,
+   * schedules, and free-shipping settings.
+   */
+  async recalculatePromotionsFromConfirmedOrders() {
+    return this.runWithRecovery(
+      () => db.transaction(async (tx) => {
+        const [orderRows, promoRows] = await Promise.all([
+          tx.select().from(orders),
+          tx.select().from(promotions)
+        ]);
+        const mappedOrders = orderRows.map((r) => this.mapOrderRow(r));
+        const mappedPromos = promoRows.map((row) => ({
+          id: row.id,
+          title: row.title,
+          description: row.description,
+          bannerHeadline: row.bannerHeadline,
+          bannerSubtext: row.bannerSubtext,
+          bannerTheme: row.bannerTheme,
+          startsAt: row.startsAt,
+          endsAt: row.endsAt,
+          freeShipping: row.freeShipping,
+          freeShippingSpeed: row.freeShippingSpeed === "all" ? "all" : "standard",
+          discountPercent: row.discountPercent,
+          promoCode: row.promoCode ?? void 0,
+          enabled: row.enabled,
+          usageCount: row.usageCount,
+          revenueGenerated: row.revenueGenerated,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt
+        }));
+        const { recalculatedPromotions, audit } = recalculatePromotionAndCouponAnalytics(
+          mappedPromos,
+          [],
+          mappedOrders
+        );
+        const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+        let updatedPromotionsCount = 0;
+        for (const promo of recalculatedPromotions) {
+          await tx.update(promotions).set({
+            usageCount: promo.usageCount,
+            revenueGenerated: promo.revenueGenerated,
+            updatedAt: nowIso
+          }).where(eq(promotions.id, promo.id));
+          updatedPromotionsCount += 1;
+        }
+        return {
+          previousTotalRedemptions: audit.storedTotalRedemptions,
+          previousTotalRevenue: audit.storedTotalRevenue,
+          recalculatedTotalRedemptions: audit.computedTotalRedemptions,
+          recalculatedTotalRevenue: audit.computedTotalRevenue,
+          updatedPromotionsCount
         };
       })
     );
@@ -4809,21 +5050,51 @@ var StoreRepository = class {
   }
   async listLiveCheckoutActivity(limit = 200) {
     const safeLimit = Math.min(Math.max(Math.trunc(limit) || 200, 1), 500);
+    const ownerEmail = getAdminOwnerEmail();
     const pg = this.getPostgres();
     if (pg) {
       const sources = await pg.listCheckoutActivitySources(safeLimit);
       return buildLiveCheckoutActivity({
         intents: sources.intents,
         orders: sources.orders,
-        products: sources.products
+        products: sources.products,
+        ownerEmail
       });
     }
     const intents = Object.values(this.state.paymentIntents).sort((a, b) => (b.createdAt || "").localeCompare(a.createdAt || "")).slice(0, safeLimit);
     return buildLiveCheckoutActivity({
       intents,
       orders: this.state.orders,
-      products: this.state.products
+      products: this.state.products,
+      ownerEmail
     });
+  }
+  async recalculatePromotionAnalytics() {
+    const pg = this.getPostgres();
+    if (pg) {
+      const result = await pg.recalculatePromotionsFromConfirmedOrders();
+      this.invalidateCaches();
+      await this.ensureLoaded({ forceRefresh: true });
+      return result;
+    }
+    const { recalculatedPromotions, audit } = recalculatePromotionAndCouponAnalytics(
+      this.state.promotions,
+      this.state.coupons,
+      this.state.orders
+    );
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    this.state.promotions = recalculatedPromotions.map((p) => ({
+      ...p,
+      updatedAt: nowIso
+    }));
+    this.commit();
+    return {
+      previousTotalRedemptions: audit.storedTotalRedemptions,
+      previousTotalRevenue: audit.storedTotalRevenue,
+      recalculatedTotalRedemptions: audit.computedTotalRedemptions,
+      recalculatedTotalRevenue: audit.computedTotalRevenue,
+      updatedPromotionsCount: this.state.promotions.length
+    };
   }
   async cleanupApprovedTestRecords(params) {
     const pg = this.getPostgres();
@@ -4864,6 +5135,16 @@ var StoreRepository = class {
     const notifSet = new Set(params.notificationIds);
     const deletedNotificationIds = this.state.adminNotifications.filter((n) => notifSet.has(n.id)).map((n) => n.id);
     this.state.adminNotifications = this.state.adminNotifications.filter((n) => !notifSet.has(n.id));
+    const { recalculatedPromotions } = recalculatePromotionAndCouponAnalytics(
+      this.state.promotions,
+      this.state.coupons,
+      this.state.orders
+    );
+    const nowIso = (/* @__PURE__ */ new Date()).toISOString();
+    this.state.promotions = recalculatedPromotions.map((p) => ({
+      ...p,
+      updatedAt: nowIso
+    }));
     this.commit();
     return {
       deletedOrderNumbers,
@@ -6769,7 +7050,7 @@ function createApiApp() {
   app2.use("/api", async (req, res, next) => {
     try {
       const isMutation = req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS";
-      const isDirectPostgresRoute = storeRepo.isPostgresEnabled() && (req.path === "/auth/login" || req.path === "/auth/register" || req.path === "/auth/google" || req.path === "/auth/logout" || req.path === "/auth/profile" || req.path === "/auth/wishlist" || req.path === "/payments/create-order" || req.path === "/payments/verify" || req.path === "/payments/order-status" || req.path === "/payments/webhook" || req.path === "/orders/mine" || req.method === "POST" && req.path === "/orders");
+      const isDirectPostgresRoute = storeRepo.isPostgresEnabled() && (req.path === "/auth/login" || req.path === "/auth/register" || req.path === "/auth/google" || req.path === "/auth/logout" || req.path === "/auth/profile" || req.path === "/auth/wishlist" || req.path === "/payments/create-order" || req.path === "/payments/verify" || req.path === "/payments/order-status" || req.path === "/payments/webhook" || req.path === "/orders/mine" || req.path === "/admin/checkout-activity" || req.method === "POST" && req.path === "/orders");
       const requiresFreshAdminRead = req.path === "/admin/overview" || req.path.startsWith("/admin/payments/") || req.path.startsWith("/admin/maintenance/");
       if (!isDirectPostgresRoute) {
         await storeRepo.ensureLoaded({ forceRefresh: isMutation || requiresFreshAdminRead });
@@ -8840,6 +9121,11 @@ Concierge:` : message.trim();
       nowMs
     });
     const unreconciledPayments = await storeRepo.listUnreconciledCapturedIntents().catch(() => []);
+    const promoAnalysis = recalculatePromotionAndCouponAnalytics(
+      state.promotions,
+      state.coupons,
+      state.orders
+    );
     res.json({
       products: state.products,
       settings: state.settings,
@@ -8853,6 +9139,8 @@ Concierge:` : message.trim();
       notifications: state.adminNotifications,
       customers: state.users.map((u) => storeRepo.sanitizeUser(u)),
       analytics,
+      couponRedemptions: promoAnalysis.couponRedemptions,
+      promotionAnalyticsAudit: promoAnalysis.audit,
       unreconciledPayments,
       databaseEnvironment: storeRepo.getDatabaseEnvironment(),
       serverNow: new Date(nowMs).toISOString()
@@ -9321,13 +9609,33 @@ Concierge:` : message.trim();
     const approvedRzpOrderIds = new Set(
       currentState.orders.filter((o) => approvedOrderSet.has(o.id) && o.razorpayOrderId).map((o) => o.razorpayOrderId)
     );
+    const approvedRzpPaymentIds = new Set(
+      currentState.orders.filter((o) => approvedOrderSet.has(o.id) && o.razorpayPaymentId).map((o) => o.razorpayPaymentId)
+    );
     for (const piId of cleanPaymentIntentIds) {
-      const intent = currentState.paymentIntents[piId];
-      if (!intent) continue;
-      const linkedToApprovedOrder = intent.orderId && approvedOrderSet.has(intent.orderId) || approvedRzpOrderIds.has(intent.razorpayOrderId);
-      if (intent.verified && !linkedToApprovedOrder) {
+      const liveIntent = await storeRepo.findPaymentIntent(piId).catch(() => null) ?? currentState.paymentIntents[piId];
+      if (!liveIntent) continue;
+      const matchedOrder = currentState.orders.find(
+        (o) => liveIntent.orderId && o.id === liveIntent.orderId || o.razorpayOrderId === liveIntent.razorpayOrderId || liveIntent.paymentId && o.razorpayPaymentId === liveIntent.paymentId
+      ) ?? await storeRepo.findOrderByRazorpayReference({
+        razorpayOrderId: liveIntent.razorpayOrderId,
+        razorpayPaymentId: liveIntent.paymentId
+      }).catch(() => null);
+      const linkedToApprovedOrder = Boolean(
+        liveIntent.orderId && approvedOrderSet.has(liveIntent.orderId) || approvedRzpOrderIds.has(liveIntent.razorpayOrderId) || liveIntent.paymentId && approvedRzpPaymentIds.has(liveIntent.paymentId) || matchedOrder && approvedOrderSet.has(matchedOrder.id)
+      );
+      if (matchedOrder && !approvedOrderSet.has(matchedOrder.id)) {
         return res.status(400).json({
-          error: `Cleanup blocked: verified captured payment intent (${piId}) is not linked to an approved test order and is protected from deletion.`,
+          error: `Cleanup blocked: payment intent (${piId}) belongs to confirmed order ${matchedOrder.orderNumber} and is protected from deletion.`,
+          code: "PROTECTED_CONFIRMED_ORDER"
+        });
+      }
+      const isCapturedOrVerified = Boolean(
+        liveIntent.verified || liveIntent.signatureVerified || liveIntent.paymentId || liveIntent.checkoutPayload?.gatewayStatus === "captured"
+      );
+      if (isCapturedOrVerified && !linkedToApprovedOrder) {
+        return res.status(400).json({
+          error: `Cleanup blocked: captured customer payment (${liveIntent.paymentId || piId}) is protected and cannot be deleted.`,
           code: "PROTECTED_CAPTURED_PAYMENT"
         });
       }
@@ -9351,10 +9659,20 @@ Concierge:` : message.trim();
       gatewayFeePercent: refreshedState.settings.gatewayFeePercent,
       defaultShippingCostPerOrder: refreshedState.settings.defaultShippingCostPerOrder
     });
+    const promoAnalysis = recalculatePromotionAndCouponAnalytics(
+      refreshedState.promotions,
+      refreshedState.coupons,
+      refreshedState.orders
+    );
+    const refreshedActivity = await storeRepo.listLiveCheckoutActivity(200).catch(() => null);
     res.json({
       ok: true,
       ...result,
       updatedProducts: refreshedState.products,
+      promotions: refreshedState.promotions,
+      couponRedemptions: promoAnalysis.couponRedemptions,
+      promotionAnalyticsAudit: promoAnalysis.audit,
+      checkoutActivityCounts: refreshedActivity?.counts,
       postCleanupAnalytics: {
         grossRevenue: analytics.grossRevenue,
         totalPaidOrders: analytics.totalPaidOrders,
@@ -9697,11 +10015,68 @@ Concierge:` : message.trim();
         note: note?.trim() || (order.trackingNumber ? `Status updated to ${status} (${order.courierPartner || "Courier"}: ${order.trackingNumber})` : enteringRestockState ? `Order marked as ${status} by store administrator (inventory restored)` : `Order marked as ${status} by store administrator`)
       });
     }
+    const syncedPromos = recalculatePromotionAndCouponAnalytics(
+      state.promotions,
+      state.coupons,
+      state.orders
+    );
+    if (syncedPromos.audit.hasDiscrepancy) {
+      state.promotions = syncedPromos.recalculatedPromotions.map((p) => ({
+        ...p,
+        updatedAt: nowIso
+      }));
+    }
     storeRepo.commit();
     res.json({ order });
   });
   app2.get("/api/admin/promotions", requireAdmin, (_req, res) => {
-    res.json({ promotions: storeRepo.getState().promotions });
+    const state = storeRepo.getState();
+    const promoAnalysis = recalculatePromotionAndCouponAnalytics(
+      state.promotions,
+      state.coupons,
+      state.orders
+    );
+    res.json({
+      promotions: state.promotions,
+      couponRedemptions: promoAnalysis.couponRedemptions,
+      promotionAnalyticsAudit: promoAnalysis.audit
+    });
+  });
+  app2.post("/api/admin/promotions/recalculate", requireAdmin, async (req, res) => {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    try {
+      const summary = await storeRepo.recalculatePromotionAnalytics();
+      bootstrapCache.invalidate();
+      const refreshedState = storeRepo.getState();
+      const promoAnalysis = recalculatePromotionAndCouponAnalytics(
+        refreshedState.promotions,
+        refreshedState.coupons,
+        refreshedState.orders
+      );
+      logStructured("info", "admin", "promotions_analytics_recalculated", {
+        requestId: req.requestId,
+        previousTotalRedemptions: summary.previousTotalRedemptions,
+        previousTotalRevenue: summary.previousTotalRevenue,
+        recalculatedTotalRedemptions: summary.recalculatedTotalRedemptions,
+        recalculatedTotalRevenue: summary.recalculatedTotalRevenue,
+        updatedPromotionsCount: summary.updatedPromotionsCount
+      });
+      res.json({
+        ok: true,
+        ...summary,
+        promotions: refreshedState.promotions,
+        couponRedemptions: promoAnalysis.couponRedemptions,
+        promotionAnalyticsAudit: promoAnalysis.audit
+      });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const code = err instanceof StorePersistenceError ? err.code : "PROMO_RECALC_FAILED";
+      res.status(statusCode).json({
+        error: "Unable to recalculate promotional analytics right now. Please try again.",
+        code
+      });
+    }
   });
   app2.post("/api/admin/promotions", requireAdmin, (req, res) => {
     const state = storeRepo.getState();

@@ -35,6 +35,7 @@ import type {
 } from '../types.ts';
 import { StorePersistenceError } from '../../server/validation.ts';
 import { logStructured } from '../../server/logger.ts';
+import { recalculatePromotionAndCouponAnalytics } from '../lib/commerce.ts';
 
 export interface PublicBootstrapDbData {
   products: Product[];
@@ -1206,11 +1207,123 @@ export class PostgresStateAdapter {
           if (del[0]) deletedNotificationIds.push(del[0].id);
         }
 
+        // Recalculate promotion usage_count and revenue_generated from remaining legitimate confirmed orders
+        const [remainingOrderRows, currentPromoRows] = await Promise.all([
+          tx.select().from(orders),
+          tx.select().from(promotions),
+        ]);
+        const mappedRemainingOrders = remainingOrderRows.map((r) => this.mapOrderRow(r));
+        const mappedCurrentPromos: Promotion[] = currentPromoRows.map((row) => ({
+          id: row.id,
+          title: row.title,
+          description: row.description,
+          bannerHeadline: row.bannerHeadline,
+          bannerSubtext: row.bannerSubtext,
+          bannerTheme: row.bannerTheme as BannerTheme,
+          startsAt: row.startsAt,
+          endsAt: row.endsAt,
+          freeShipping: row.freeShipping,
+          freeShippingSpeed: row.freeShippingSpeed === 'all' ? 'all' : 'standard',
+          discountPercent: row.discountPercent,
+          promoCode: row.promoCode ?? undefined,
+          enabled: row.enabled,
+          usageCount: row.usageCount,
+          revenueGenerated: row.revenueGenerated,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        }));
+        const promoSync = recalculatePromotionAndCouponAnalytics(
+          mappedCurrentPromos,
+          [],
+          mappedRemainingOrders
+        );
+        const nowIso = new Date().toISOString();
+        for (const recalcPromo of promoSync.recalculatedPromotions) {
+          await tx
+            .update(promotions)
+            .set({
+              usageCount: recalcPromo.usageCount,
+              revenueGenerated: recalcPromo.revenueGenerated,
+              updatedAt: nowIso,
+            })
+            .where(eq(promotions.id, recalcPromo.id));
+        }
+
         return {
           deletedOrderNumbers,
           deletedPaymentIntentIds,
           deletedNotificationIds,
           restoredStock,
+        };
+      })
+    );
+  }
+
+  /**
+   * Atomically recalculates promotions.usage_count and promotions.revenue_generated from
+   * legitimate confirmed orders in PostgreSQL while preserving all active offers, discounts,
+   * schedules, and free-shipping settings.
+   */
+  async recalculatePromotionsFromConfirmedOrders(): Promise<{
+    previousTotalRedemptions: number;
+    previousTotalRevenue: number;
+    recalculatedTotalRedemptions: number;
+    recalculatedTotalRevenue: number;
+    updatedPromotionsCount: number;
+  }> {
+    return this.runWithRecovery(() =>
+      db.transaction(async (tx) => {
+        const [orderRows, promoRows] = await Promise.all([
+          tx.select().from(orders),
+          tx.select().from(promotions),
+        ]);
+        const mappedOrders = orderRows.map((r) => this.mapOrderRow(r));
+        const mappedPromos: Promotion[] = promoRows.map((row) => ({
+          id: row.id,
+          title: row.title,
+          description: row.description,
+          bannerHeadline: row.bannerHeadline,
+          bannerSubtext: row.bannerSubtext,
+          bannerTheme: row.bannerTheme as BannerTheme,
+          startsAt: row.startsAt,
+          endsAt: row.endsAt,
+          freeShipping: row.freeShipping,
+          freeShippingSpeed: row.freeShippingSpeed === 'all' ? 'all' : 'standard',
+          discountPercent: row.discountPercent,
+          promoCode: row.promoCode ?? undefined,
+          enabled: row.enabled,
+          usageCount: row.usageCount,
+          revenueGenerated: row.revenueGenerated,
+          createdAt: row.createdAt,
+          updatedAt: row.updatedAt,
+        }));
+
+        const { recalculatedPromotions, audit } = recalculatePromotionAndCouponAnalytics(
+          mappedPromos,
+          [],
+          mappedOrders
+        );
+        const nowIso = new Date().toISOString();
+        let updatedPromotionsCount = 0;
+
+        for (const promo of recalculatedPromotions) {
+          await tx
+            .update(promotions)
+            .set({
+              usageCount: promo.usageCount,
+              revenueGenerated: promo.revenueGenerated,
+              updatedAt: nowIso,
+            })
+            .where(eq(promotions.id, promo.id));
+          updatedPromotionsCount += 1;
+        }
+
+        return {
+          previousTotalRedemptions: audit.storedTotalRedemptions,
+          previousTotalRevenue: audit.storedTotalRevenue,
+          recalculatedTotalRedemptions: audit.computedTotalRedemptions,
+          recalculatedTotalRevenue: audit.computedTotalRevenue,
+          updatedPromotionsCount,
         };
       })
     );

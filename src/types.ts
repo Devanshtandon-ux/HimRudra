@@ -382,6 +382,8 @@ export interface LiveCheckoutActivityItem {
   linkedOrderPaymentStatus?: OrderPaymentStatus;
   failureReason?: string;
   failureCode?: string;
+  canSelectForTestCleanup: boolean;
+  testCandidateReason?: string;
   createdAt: string;
   updatedAt?: string;
 }
@@ -399,4 +401,38 @@ export interface LiveCheckoutActivityResponse {
   items: LiveCheckoutActivityItem[];
   counts: LiveCheckoutActivitySummary;
   refreshedAt: string;
+}
+
+export interface CouponRedemptionRow {
+  code: string;
+  description: string;
+  active: boolean;
+  redemptions: number;
+  totalDiscountGiven: number;
+  attributedRevenue: number;
+}
+
+export interface CouponRedemptionSummary {
+  totalRedemptions: number;
+  totalDiscountGiven: number;
+  totalAttributedRevenue: number;
+  byCoupon: CouponRedemptionRow[];
+}
+
+export interface PromotionAnalyticsAudit {
+  storedTotalRedemptions: number;
+  storedTotalRevenue: number;
+  computedTotalRedemptions: number;
+  computedTotalRevenue: number;
+  legitimateOrderCount: number;
+  hasDiscrepancy: boolean;
+  perPromotion: Array<{
+    id: string;
+    title: string;
+    storedUsageCount: number;
+    storedRevenueGenerated: number;
+    computedUsageCount: number;
+    computedRevenueGenerated: number;
+    hasDiscrepancy: boolean;
+  }>;
 }

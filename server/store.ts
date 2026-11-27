@@ -24,6 +24,7 @@ import {
   FREE_SHIPPING_PROMO_END_ISO,
   getActivePromotions,
   normalizeLegacyOrderStatus,
+  recalculatePromotionAndCouponAnalytics,
 } from '../src/lib/commerce.ts';
 import {
   DynamoStateAdapter,
@@ -1363,6 +1364,7 @@ class StoreRepository {
 
   async listLiveCheckoutActivity(limit = 200): Promise<LiveCheckoutActivityResponse> {
     const safeLimit = Math.min(Math.max(Math.trunc(limit) || 200, 1), 500);
+    const ownerEmail = getAdminOwnerEmail();
     const pg = this.getPostgres();
     if (pg) {
       const sources = await pg.listCheckoutActivitySources(safeLimit);
@@ -1370,6 +1372,7 @@ class StoreRepository {
         intents: sources.intents,
         orders: sources.orders,
         products: sources.products,
+        ownerEmail,
       });
     }
 
@@ -1381,7 +1384,43 @@ class StoreRepository {
       intents,
       orders: this.state.orders,
       products: this.state.products,
+      ownerEmail,
     });
+  }
+
+  async recalculatePromotionAnalytics(): Promise<{
+    previousTotalRedemptions: number;
+    previousTotalRevenue: number;
+    recalculatedTotalRedemptions: number;
+    recalculatedTotalRevenue: number;
+    updatedPromotionsCount: number;
+  }> {
+    const pg = this.getPostgres();
+    if (pg) {
+      const result = await pg.recalculatePromotionsFromConfirmedOrders();
+      this.invalidateCaches();
+      await this.ensureLoaded({ forceRefresh: true });
+      return result;
+    }
+
+    const { recalculatedPromotions, audit } = recalculatePromotionAndCouponAnalytics(
+      this.state.promotions,
+      this.state.coupons,
+      this.state.orders
+    );
+    const nowIso = new Date().toISOString();
+    this.state.promotions = recalculatedPromotions.map((p) => ({
+      ...p,
+      updatedAt: nowIso,
+    }));
+    this.commit();
+    return {
+      previousTotalRedemptions: audit.storedTotalRedemptions,
+      previousTotalRevenue: audit.storedTotalRevenue,
+      recalculatedTotalRedemptions: audit.computedTotalRedemptions,
+      recalculatedTotalRevenue: audit.computedTotalRevenue,
+      updatedPromotionsCount: this.state.promotions.length,
+    };
   }
 
   async cleanupApprovedTestRecords(params: {
@@ -1439,6 +1478,18 @@ class StoreRepository {
       .filter((n) => notifSet.has(n.id))
       .map((n) => n.id);
     this.state.adminNotifications = this.state.adminNotifications.filter((n) => !notifSet.has(n.id));
+
+    // Recalculate promotion usage & attributed revenue from remaining legitimate confirmed orders
+    const { recalculatedPromotions } = recalculatePromotionAndCouponAnalytics(
+      this.state.promotions,
+      this.state.coupons,
+      this.state.orders
+    );
+    const nowIso = new Date().toISOString();
+    this.state.promotions = recalculatedPromotions.map((p) => ({
+      ...p,
+      updatedAt: nowIso,
+    }));
 
     this.commit();
     return {

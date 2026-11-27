@@ -12,6 +12,7 @@ import {
   calculateProfitMetrics,
   getActivePromotions,
   isAuthorizedAdmin,
+  recalculatePromotionAndCouponAnalytics,
   validateCheckoutForm,
 } from './src/lib/commerce.ts';
 import {
@@ -260,6 +261,7 @@ export function createApiApp(): express.Express {
           req.path === '/payments/order-status' ||
           req.path === '/payments/webhook' ||
           req.path === '/orders/mine' ||
+          req.path === '/admin/checkout-activity' ||
           (req.method === 'POST' && req.path === '/orders'));
 
       const requiresFreshAdminRead =
@@ -2962,6 +2964,11 @@ ${labContext}`;
       nowMs,
     });
     const unreconciledPayments = await storeRepo.listUnreconciledCapturedIntents().catch(() => []);
+    const promoAnalysis = recalculatePromotionAndCouponAnalytics(
+      state.promotions,
+      state.coupons,
+      state.orders
+    );
     res.json({
       products: state.products,
       settings: state.settings,
@@ -2975,6 +2982,8 @@ ${labContext}`;
       notifications: state.adminNotifications,
       customers: state.users.map((u) => storeRepo.sanitizeUser(u)),
       analytics,
+      couponRedemptions: promoAnalysis.couponRedemptions,
+      promotionAnalyticsAudit: promoAnalysis.audit,
       unreconciledPayments,
       databaseEnvironment: storeRepo.getDatabaseEnvironment(),
       serverNow: new Date(nowMs).toISOString(),
@@ -3554,7 +3563,8 @@ ${labContext}`;
       });
     }
 
-    // Safety guard: never delete a verified captured payment intent unless it belongs to an explicitly approved test order being removed
+    // Safety guard: NEVER delete a verified/captured payment intent (e.g. pay_U4m5a9iAVX2oU4)
+    // or any payment intent linked to a confirmed order unless that order is explicitly approved in cleanOrderIds
     const currentState = storeRepo.getState();
     const approvedOrderSet = new Set(cleanOrderIds);
     const approvedRzpOrderIds = new Set(
@@ -3562,15 +3572,55 @@ ${labContext}`;
         .filter((o) => approvedOrderSet.has(o.id) && o.razorpayOrderId)
         .map((o) => o.razorpayOrderId as string)
     );
+    const approvedRzpPaymentIds = new Set(
+      currentState.orders
+        .filter((o) => approvedOrderSet.has(o.id) && o.razorpayPaymentId)
+        .map((o) => o.razorpayPaymentId as string)
+    );
     for (const piId of cleanPaymentIntentIds) {
-      const intent = currentState.paymentIntents[piId];
-      if (!intent) continue;
-      const linkedToApprovedOrder =
-        (intent.orderId && approvedOrderSet.has(intent.orderId)) ||
-        approvedRzpOrderIds.has(intent.razorpayOrderId);
-      if (intent.verified && !linkedToApprovedOrder) {
+      const liveIntent =
+        (await storeRepo.findPaymentIntent(piId).catch(() => null)) ??
+        currentState.paymentIntents[piId];
+      if (!liveIntent) continue;
+
+      const matchedOrder =
+        currentState.orders.find(
+          (o) =>
+            (liveIntent.orderId && o.id === liveIntent.orderId) ||
+            o.razorpayOrderId === liveIntent.razorpayOrderId ||
+            (liveIntent.paymentId && o.razorpayPaymentId === liveIntent.paymentId)
+        ) ??
+        (await storeRepo
+          .findOrderByRazorpayReference({
+            razorpayOrderId: liveIntent.razorpayOrderId,
+            razorpayPaymentId: liveIntent.paymentId,
+          })
+          .catch(() => null));
+
+      const linkedToApprovedOrder = Boolean(
+        (liveIntent.orderId && approvedOrderSet.has(liveIntent.orderId)) ||
+          approvedRzpOrderIds.has(liveIntent.razorpayOrderId) ||
+          (liveIntent.paymentId && approvedRzpPaymentIds.has(liveIntent.paymentId)) ||
+          (matchedOrder && approvedOrderSet.has(matchedOrder.id))
+      );
+
+      if (matchedOrder && !approvedOrderSet.has(matchedOrder.id)) {
         return res.status(400).json({
-          error: `Cleanup blocked: verified captured payment intent (${piId}) is not linked to an approved test order and is protected from deletion.`,
+          error: `Cleanup blocked: payment intent (${piId}) belongs to confirmed order ${matchedOrder.orderNumber} and is protected from deletion.`,
+          code: 'PROTECTED_CONFIRMED_ORDER',
+        });
+      }
+
+      const isCapturedOrVerified = Boolean(
+        liveIntent.verified ||
+          liveIntent.signatureVerified ||
+          liveIntent.paymentId ||
+          liveIntent.checkoutPayload?.gatewayStatus === 'captured'
+      );
+
+      if (isCapturedOrVerified && !linkedToApprovedOrder) {
+        return res.status(400).json({
+          error: `Cleanup blocked: captured customer payment (${liveIntent.paymentId || piId}) is protected and cannot be deleted.`,
           code: 'PROTECTED_CAPTURED_PAYMENT',
         });
       }
@@ -3597,11 +3647,21 @@ ${labContext}`;
       gatewayFeePercent: refreshedState.settings.gatewayFeePercent,
       defaultShippingCostPerOrder: refreshedState.settings.defaultShippingCostPerOrder,
     });
+    const promoAnalysis = recalculatePromotionAndCouponAnalytics(
+      refreshedState.promotions,
+      refreshedState.coupons,
+      refreshedState.orders
+    );
+    const refreshedActivity = await storeRepo.listLiveCheckoutActivity(200).catch(() => null);
 
     res.json({
       ok: true,
       ...result,
       updatedProducts: refreshedState.products,
+      promotions: refreshedState.promotions,
+      couponRedemptions: promoAnalysis.couponRedemptions,
+      promotionAnalyticsAudit: promoAnalysis.audit,
+      checkoutActivityCounts: refreshedActivity?.counts,
       postCleanupAnalytics: {
         grossRevenue: analytics.grossRevenue,
         totalPaidOrders: analytics.totalPaidOrders,
@@ -4028,13 +4088,77 @@ ${labContext}`;
       });
     }
 
+    // Keep promotion analytics accurate whenever an order transitions to/from Cancelled, Refunded, or Paid
+    const syncedPromos = recalculatePromotionAndCouponAnalytics(
+      state.promotions,
+      state.coupons,
+      state.orders
+    );
+    if (syncedPromos.audit.hasDiscrepancy) {
+      state.promotions = syncedPromos.recalculatedPromotions.map((p) => ({
+        ...p,
+        updatedAt: nowIso,
+      }));
+    }
+
     storeRepo.commit();
     res.json({ order });
   });
 
   // Promotions & Offers CMS
   app.get('/api/admin/promotions', requireAdmin, (_req, res) => {
-    res.json({ promotions: storeRepo.getState().promotions });
+    const state = storeRepo.getState();
+    const promoAnalysis = recalculatePromotionAndCouponAnalytics(
+      state.promotions,
+      state.coupons,
+      state.orders
+    );
+    res.json({
+      promotions: state.promotions,
+      couponRedemptions: promoAnalysis.couponRedemptions,
+      promotionAnalyticsAudit: promoAnalysis.audit,
+    });
+  });
+
+  // Admin: Recalculate promotional usage & attributed revenue strictly from legitimate confirmed orders
+  app.post('/api/admin/promotions/recalculate', requireAdmin, async (req: AuthRequest, res) => {
+    res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    try {
+      const summary = await storeRepo.recalculatePromotionAnalytics();
+      bootstrapCache.invalidate();
+
+      const refreshedState = storeRepo.getState();
+      const promoAnalysis = recalculatePromotionAndCouponAnalytics(
+        refreshedState.promotions,
+        refreshedState.coupons,
+        refreshedState.orders
+      );
+
+      logStructured('info', 'admin', 'promotions_analytics_recalculated', {
+        requestId: req.requestId,
+        previousTotalRedemptions: summary.previousTotalRedemptions,
+        previousTotalRevenue: summary.previousTotalRevenue,
+        recalculatedTotalRedemptions: summary.recalculatedTotalRedemptions,
+        recalculatedTotalRevenue: summary.recalculatedTotalRevenue,
+        updatedPromotionsCount: summary.updatedPromotionsCount,
+      });
+
+      res.json({
+        ok: true,
+        ...summary,
+        promotions: refreshedState.promotions,
+        couponRedemptions: promoAnalysis.couponRedemptions,
+        promotionAnalyticsAudit: promoAnalysis.audit,
+      });
+    } catch (err) {
+      const statusCode = err instanceof StorePersistenceError ? err.statusCode : 503;
+      const code = err instanceof StorePersistenceError ? err.code : 'PROMO_RECALC_FAILED';
+      res.status(statusCode).json({
+        error: 'Unable to recalculate promotional analytics right now. Please try again.',
+        code,
+      });
+    }
   });
 
   app.post('/api/admin/promotions', requireAdmin, (req, res) => {

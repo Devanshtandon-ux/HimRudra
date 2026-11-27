@@ -1,22 +1,35 @@
 import React, { useState } from 'react';
-import { Calendar, Plus, Sparkles, Trash2 } from 'lucide-react';
+import { AlertTriangle, Calendar, CheckCircle2, Download, Plus, RefreshCw, Sparkles, Tag, Trash2 } from 'lucide-react';
 import { formatINR, isPromotionActive } from '../../lib/commerce';
-import type { BannerTheme, Promotion } from '../../types';
+import type {
+  BannerTheme,
+  CouponRedemptionSummary,
+  Promotion,
+  PromotionAnalyticsAudit,
+} from '../../types';
 
 interface AdminPromotionsSectionProps {
   promotions: Promotion[];
+  couponRedemptions?: CouponRedemptionSummary;
+  promotionAnalyticsAudit?: PromotionAnalyticsAudit;
   serverNow?: string;
   onCreatePromotion: (payload: Partial<Promotion>) => Promise<void>;
   onUpdatePromotion: (id: string, patch: Partial<Promotion>) => Promise<void>;
   onDeletePromotion: (id: string) => Promise<void>;
+  onRecalculateAnalytics?: () => Promise<void>;
+  onExportBackup?: () => Promise<boolean>;
 }
 
 export const AdminPromotionsSection: React.FC<AdminPromotionsSectionProps> = ({
   promotions,
+  couponRedemptions,
+  promotionAnalyticsAudit,
   serverNow,
   onCreatePromotion,
   onUpdatePromotion,
   onDeletePromotion,
+  onRecalculateAnalytics,
+  onExportBackup,
 }) => {
   const nowMs = serverNow ? Date.parse(serverNow) : Date.now();
   const [title, setTitle] = useState('');
@@ -31,6 +44,9 @@ export const AdminPromotionsSection: React.FC<AdminPromotionsSectionProps> = ({
   const [discountPercent, setDiscountPercent] = useState('0');
   const [promoCode, setPromoCode] = useState('');
   const [saving, setSaving] = useState(false);
+  const [recalculating, setRecalculating] = useState(false);
+  const [exportingBackup, setExportingBackup] = useState(false);
+  const [backupTaken, setBackupTaken] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,14 +78,36 @@ export const AdminPromotionsSection: React.FC<AdminPromotionsSectionProps> = ({
     }
   };
 
+  const handleBackupClick = async () => {
+    if (!onExportBackup || exportingBackup) return;
+    setExportingBackup(true);
+    try {
+      const ok = await onExportBackup();
+      if (ok) setBackupTaken(true);
+    } finally {
+      setExportingBackup(false);
+    }
+  };
+
+  const handleRecalculateClick = async () => {
+    if (!onRecalculateAnalytics || recalculating) return;
+    setRecalculating(true);
+    try {
+      await onRecalculateAnalytics();
+    } finally {
+      setRecalculating(false);
+    }
+  };
+
   const totalRedemptions = promotions.reduce((s, p) => s + p.usageCount, 0);
   const totalPromoRevenue = promotions.reduce((s, p) => s + p.revenueGenerated, 0);
   const activeCount = promotions.filter((p) => isPromotionActive(p, nowMs)).length;
+  const hasStaleMetrics = Boolean(promotionAnalyticsAudit?.hasDiscrepancy);
 
   return (
     <div className="space-y-6" data-testid="admin-promotions-section">
       {/* Performance Metrics */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="rounded-xl border border-[#79543D]/18 bg-[#F3EDE5]/60 p-4">
           <div className="text-xs text-[#79543D] font-medium">Active Live Offers</div>
           <div className="mt-1 font-mono text-2xl font-semibold text-[#281A15]">{activeCount}</div>
@@ -86,7 +124,144 @@ export const AdminPromotionsSection: React.FC<AdminPromotionsSectionProps> = ({
             {formatINR(totalPromoRevenue)}
           </div>
         </div>
+        <div className="rounded-xl border border-[#79543D]/18 bg-[#F3EDE5]/60 p-4">
+          <div className="text-xs text-[#79543D] font-medium">Coupon Redemptions</div>
+          <div className="mt-1 font-mono text-2xl font-semibold text-[#281A15] tabular-nums">
+            {couponRedemptions?.totalRedemptions ?? 0}
+          </div>
+          {couponRedemptions && couponRedemptions.totalDiscountGiven > 0 && (
+            <div className="mt-0.5 text-[11px] font-mono text-[#79543D]">
+              {formatINR(couponRedemptions.totalDiscountGiven)} total discount
+            </div>
+          )}
+        </div>
       </div>
+
+      {/* Stale Promotional Analytics Detection & Owner-Triggered Recalculation */}
+      {onRecalculateAnalytics && (
+        <div
+          data-testid="promo-analytics-recalculate-card"
+          className={`rounded-xl border p-4 flex flex-wrap items-center justify-between gap-3 text-xs ${
+            hasStaleMetrics
+              ? 'border-amber-300 bg-amber-50/85 text-amber-950'
+              : 'border-[#79543D]/18 bg-[#F3EDE5]/45 text-[#281A15]'
+          }`}
+        >
+          <div className="space-y-1 max-w-2xl">
+            <div className="flex items-center gap-2 font-semibold">
+              {hasStaleMetrics ? (
+                <>
+                  <AlertTriangle className="h-4 w-4 text-amber-700 shrink-0" />
+                  <span>Stale Test Revenue / Redemption Count Detected</span>
+                </>
+              ) : (
+                <>
+                  <CheckCircle2 className="h-4 w-4 text-emerald-700 shrink-0" />
+                  <span>Promotional Analytics Synced with Legitimate Confirmed Orders</span>
+                </>
+              )}
+            </div>
+            {promotionAnalyticsAudit && (
+              <p className={hasStaleMetrics ? 'text-amber-900' : 'text-[#79543D]'}>
+                Stored in database:{' '}
+                <strong className="font-mono">
+                  {promotionAnalyticsAudit.storedTotalRedemptions} uses ·{' '}
+                  {formatINR(promotionAnalyticsAudit.storedTotalRevenue)}
+                </strong>{' '}
+                → Legitimate confirmed orders ({promotionAnalyticsAudit.legitimateOrderCount}):{' '}
+                <strong className="font-mono">
+                  {promotionAnalyticsAudit.computedTotalRedemptions} uses ·{' '}
+                  {formatINR(promotionAnalyticsAudit.computedTotalRevenue)}
+                </strong>
+                . All active offers, coupons, discounts, and free-shipping settings are preserved.
+              </p>
+            )}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {hasStaleMetrics && onExportBackup && (
+              <button
+                type="button"
+                disabled={exportingBackup}
+                onClick={() => void handleBackupClick()}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-amber-400 bg-white px-3 py-2 font-semibold text-amber-950 hover:bg-amber-100 disabled:opacity-50"
+              >
+                <Download className="h-3.5 w-3.5" />
+                <span>
+                  {exportingBackup
+                    ? 'Exporting...'
+                    : backupTaken
+                    ? 'Backup Exported ✓'
+                    : 'Export Backup JSON'}
+                </span>
+              </button>
+            )}
+            <button
+              type="button"
+              disabled={recalculating}
+              onClick={() => void handleRecalculateClick()}
+              data-testid="recalculate-promotions-btn"
+              className={`inline-flex items-center gap-1.5 rounded-lg px-3.5 py-2 font-semibold disabled:opacity-50 ${
+                hasStaleMetrics
+                  ? 'bg-[#281A15] text-[#FAF8F4] hover:bg-[#3A2720]'
+                  : 'border border-[#79543D]/30 bg-[#FAF8F4] text-[#281A15] hover:bg-[#EAE1D4]'
+              }`}
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${recalculating ? 'animate-spin' : ''}`} />
+              <span>
+                {recalculating
+                  ? 'Recalculating...'
+                  : hasStaleMetrics
+                  ? 'Clean Stale Revenue & Recalculate'
+                  : 'Recalculate from Confirmed Orders'}
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Coupon Redemptions Breakdown */}
+      {couponRedemptions && couponRedemptions.byCoupon.length > 0 && (
+        <div className="rounded-xl border border-[#79543D]/18 bg-[#FAF8F4] p-4 space-y-2.5 text-xs">
+          <div className="flex items-center justify-between gap-2">
+            <div className="flex items-center gap-1.5 font-semibold text-[#281A15]">
+              <Tag className="h-3.5 w-3.5 text-[#79543D]" />
+              <span>Coupon Redemptions (From Legitimate Confirmed Orders)</span>
+            </div>
+            <span className="font-mono text-[11px] text-[#79543D]">
+              Attributed revenue: {formatINR(couponRedemptions.totalAttributedRevenue)}
+            </span>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
+            {couponRedemptions.byCoupon.map((c) => (
+              <div
+                key={c.code}
+                className="rounded-lg border border-[#79543D]/16 bg-[#F3EDE5]/45 px-3 py-2 flex items-center justify-between gap-2"
+              >
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5">
+                    <span className="font-mono font-semibold text-[#281A15]">{c.code}</span>
+                    <span
+                      className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                        c.active
+                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                          : 'bg-slate-100 text-slate-700'
+                      }`}
+                    >
+                      {c.active ? 'Active' : 'Inactive'}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-[#79543D] truncate">{c.description}</p>
+                </div>
+                <div className="text-right font-mono shrink-0">
+                  <div className="font-semibold text-[#281A15]">{c.redemptions} uses</div>
+                  <div className="text-[10px] text-[#79543D]">{formatINR(c.attributedRevenue)}</div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* Create New Offer / Promotional Campaign */}
       <form
